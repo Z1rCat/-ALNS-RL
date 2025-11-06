@@ -13389,7 +13389,7 @@ def save_results(round, routes_save, obj_record = -1):
 
 # @profile()
 # @time_me()
-def real_main(parallel_number2, dynamic_t2 = 0):
+def real_main(parallel_number2, dynamic_t2 = 0, distribution_name='default'):
     global waiting_times, only_check_this_influenced_r_in_dynamic_uncertainty, used_interrupt, ALNS_implement_start_RL_can_move, interrupt_by_implement_is_one_and_assign_action_once_only, time_dependent_truck_travel_time, dynamic_t_begin, ALNS_greedy_under_unknown_duration_assume_duration, number_of_training, number_of_implementation, re_plan_when_event_finishes_information, ALNS_end_flag, RL_is_trained_or_evaluated_or_ALNS_is_evaluated, delayed_time_table_uncertainty_index, RL_insertion_segment, congestion_nodes_at_begining, RL_removal_implementation_store, RL_insertion_implementation_store, ALNS_removal_implementation_store, ALNS_insertion_implementation_store, vessel_train, combine_insertion_and_removal_operators, state_reward_pairs_insertion, after_action_review, get_reward_by_cost_gap, ALNS_guides_RL, state_reward_pairs, congestion_nodes, congestion_links, path, stochastic, add_RL, request_segment_in_dynamic, delayed_time_table, unexpected_events, VCP_coordination, different_companies, during_iteration, emission_preference_constraints_after_iteration, wtw_emissions, dynamic, dynamic_t, big_r, request_flow_t, percentage, not_initial_in_CP, R, R_pool, parallel_number, carriers_number, auction_round_number, CP_try_r_of_other_carriers, use_speed, get_satisfactory_value_one_by_one, fuzzy_probability, only_eco_label, only_eco_label_add_cost, heterogeneous_preferences_no_constraints, request_segment, data_path, CP, parallel_ALNS, allow_infeasibility, swap_or_not, fuzzy_constraints,real_multi_obj,weight_interval,w1,w2,w3,Demir_barge_free,truck_fleet, forbid_much_delay, two_T, heterogeneous_preferences, Demir,old_current_save,parallel, parallel_thread, max_processors, start_from_best_at_begin_of_segement, belta, truck_time_free, functions_time, Fixed_Data, by_wenjing, T_number, k_number, node_number, processors_number, note, obj_number, exp_number, regret_k, service_time, transshipment_time, c_storage, fuel_cost, has_end_depot2, check_obj, exps_record_path, forbid_T_trucks, get_initial_bymyself, request_number_in_R, multi_obj, c_storage, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, alpha, bundle_or_not, c, devide_value, stop_time, regret_k, regular, insert_multiple_r, bi_obj_cost_emission, bi_obj_cost_time, K
     waiting_times = {}
     only_check_this_influenced_r_in_dynamic_uncertainty = -1
@@ -13420,7 +13420,11 @@ def real_main(parallel_number2, dynamic_t2 = 0):
         if 'break_it' in locals():
             return
         #two_events_mu_5_1_80_5, three_events_mu_5_1_80_5_40_5, four_events_mu_5_1_80_5_40_5_5_1, five_events_mu_5_1_80_5_40_5_5_1_40_20, six_events_mu_5_1_80_5_40_5_5_1_40_20_80_40
-        duration_type = 'mix_mu_5_40_terminal_dependent'
+        # 使用传入的分布名称，如果为default则使用原有配置
+        if distribution_name == 'default':
+            duration_type = 'mix_mu_5_40_terminal_dependent'  # 保持向后兼容
+        else:
+            duration_type = distribution_name
         RL_is_trained_or_evaluated_or_ALNS_is_evaluated = 0
         get_reward_by_cost_gap = 0
         ALNS_guides_RL = 0
@@ -13578,11 +13582,25 @@ def real_main(parallel_number2, dynamic_t2 = 0):
                 # else:
                 table_number = Dynamic_ALNS_RL34959.table_number; add_event_types =  0 
                 if add_event_types == 1:
-                    data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-    request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                    # 支持新旧两种文件格式
+                    if distribution_name == 'default':
+                        # 旧格式：向后兼容
+                        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
+        request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                    else:
+                        # 新格式：使用分布配置名称
+                        data_path = "A:/MYpython/34959_RL/Uncertainties_Dynamic_Planning/plot_distribution_" + duration_type + "/R" + str(
+        request_number_in_R) + "/Intermodal_EGS_data_dynamic_" + duration_type + "_table" + str(table_number) + ".xlsx"
                 else:
-                    data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-                        request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                    # 支持新旧两种文件格式
+                    if distribution_name == 'default':
+                        # 旧格式：向后兼容
+                        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
+                            request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                    else:
+                        # 新格式：使用分布配置名称
+                        data_path = "A:/MYpython/34959_RL/Uncertainties_Dynamic_Planning/plot_distribution_" + duration_type + "/R" + str(
+                            request_number_in_R) + "/Intermodal_EGS_data_dynamic_" + duration_type + "_table" + str(table_number) + ".xlsx"
                 # data_path = "/data/yimeng/Uncertainties Dynamic planning under unexpected events/Instances/R" + str(request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(Dynamic_ALNS_RL34959.table_number) + ".xlsx"
             else:
                 if CP == 1:

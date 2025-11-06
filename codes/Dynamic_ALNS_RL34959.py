@@ -9,9 +9,15 @@ import os
 import time
 # haven't done: set the initial solution as original route, and detect which request is changed, and check which part can't be removed
 
-def Intermodal_ALNS_function():
+def Intermodal_ALNS_function(distribution_name='default'):
+    """
+    ALNS函数包装器
+
+    Args:
+        distribution_name: 不确定性事件分布配置名称
+    """
     global dynamic_end
-    Intermodal_ALNS34959.real_main(3, 0)
+    Intermodal_ALNS34959.real_main(3, 0, distribution_name)
 
     # data_path = 'C:/Users/yimengzhang/OneDrive/桌面/Intermodal_EGS_data_dynamic_new_requests.xlsx'
     while True:
@@ -67,10 +73,17 @@ def Intermodal_ALNS_function():
         if t in unexpected_times:
             if t == unexpected_times[-1]:
                 dynamic_end = 1
-            Intermodal_ALNS34959.real_main(3, t)
+            Intermodal_ALNS34959.real_main(3, t, distribution_name)
 
     #another way of dynamic is optimizing only the urgent parts of requests, maybe better than this way
-def main(approach):
+def main(approach, distribution_name='default'):
+    """
+    ALNS-RL混合算法主函数
+
+    Args:
+        approach: 优化方法编号
+        distribution_name: 不确定性事件分布配置名称
+    """
     global RL_can_start_implementation_phase_from_the_last_table, ALNS_calculates_average_duration_list, ALNS_reward_list_in_implementation, ALNS_removal_reward_list_in_implementation,  ALNS_removal_action_list_in_implementation, ALNS_insertion_reward_list_in_implementation, ALNS_insertion_action_list_in_implementation, table_number, reward_list_in_implementation, removal_reward_list_in_implementation, removal_state_list_in_implementation, removal_action_list_in_implementation, insertion_reward_list_in_implementation, insertion_state_list_in_implementation, insertion_action_list_in_implementation
     RL_can_start_implementation_phase_from_the_last_table = 0
     ALNS_calculates_average_duration_list = []
@@ -81,7 +94,7 @@ def main(approach):
         elif approach == 2:
             dynamic_RL_online_insertion.main('DQN', 'barge')
         else:
-            Intermodal_ALNS_function()
+            Intermodal_ALNS_function(distribution_name)
     else:
         if approach == 1:
             dynamic_RL34959.main('DQN', 'barge')
@@ -91,7 +104,7 @@ def main(approach):
             table_number = 0 
             start_from_end_table = 0
             while True:
-                Intermodal_ALNS_function()
+                Intermodal_ALNS_function(distribution_name)
                 try:
                     if dynamic_RL34959.implement == 1:
                         if start_from_end_table == 0:
