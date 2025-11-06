@@ -138,6 +138,7 @@ def main(approach, distribution_name='default'):
             table_number = 0 
             start_from_end_table = 0
             while True:
+                print(f"调试: 准备执行 ALNS function，当前 table_number = {table_number}")
                 Intermodal_ALNS_function(distribution_name)
                 try:
                     if dynamic_RL34959.implement == 1:
@@ -147,12 +148,24 @@ def main(approach, distribution_name='default'):
                             start_from_end_table = 1
                         else:
                             table_number -= 1
+                            # 添加边界检查：确保table_number不小于0
+                            if table_number < 0:
+                                print(f"调试: table_number {table_number} 小于0，重置为99")
+                                table_number = 99
                     else:
                         table_number += 1
+                        # 添加边界检查：table_number范围应为0-99
+                        if table_number >= 100:
+                            print(f"调试: table_number {table_number} 超出范围[0, 99]，重置为0")
+                            table_number = 0
                 except:
                     if Intermodal_ALNS34959.add_RL == 0:
                         if Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 0:
                             table_number -= 1
+                            # 添加边界检查：确保table_number不小于0
+                            if table_number < 0:
+                                print(f"调试: table_number {table_number} 小于0，重置为99")
+                                table_number = 99
                         elif Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 3 and len(
                                 ALNS_reward_list_in_implementation) > Intermodal_ALNS34959.number_of_training:
                             if start_from_end_table == 0:
@@ -160,8 +173,16 @@ def main(approach, distribution_name='default'):
                                 start_from_end_table = 1
                             else:
                                 table_number -= 1
+                                # 添加边界检查：确保table_number不小于0
+                                if table_number < 0:
+                                    print(f"调试: table_number {table_number} 小于0，重置为99")
+                                    table_number = 99
                         else:
                             table_number += 1
+                            # 添加边界检查：table_number范围应为0-99
+                            if table_number >= 100:
+                                print(f"调试: table_number {table_number} 超出范围[0, 99]，重置为0")
+                                table_number = 0
 if __name__ == '__main__':
     main(approach)
 
