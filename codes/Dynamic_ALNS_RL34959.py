@@ -54,12 +54,46 @@ def Intermodal_ALNS_function(distribution_name='default'):
     for key in all_sheets.keys():
         prefix = 'R_' + str(request_number_in_R)
         if prefix in key and prefix != key and 'info' not in key:
-            if ' ' in key:
-                # pass
-                blank_index = key.rfind(' ')
-                unexpected_times.append(int(key.replace(prefix + '_', '')[0:blank_index - len(prefix) - 1]))
-            else:
-                unexpected_times.append(int(key.replace(prefix + '_', '')))
+            try:
+                if ' ' in key:
+                    # 旧格式：R_5_123 或 R_5_123 (2)
+                    blank_index = key.rfind(' ')
+                    time_str = key.replace(prefix + '_', '')[0:blank_index - len(prefix) - 1]
+                    unexpected_times.append(int(time_str))
+                elif key.endswith('_events'):
+                    # 新格式：R_5_events - 从events表中提取时间信息
+                    # 从事件表中读取第一个事件的时间
+                    try:
+                        events_df = pd.read_excel(Data, sheet_name=key)
+                        if len(events_df) > 0 and 'duration' in events_df.columns:
+                            # duration是列表格式 [start, end]，取start时间
+                            first_duration = events_df.iloc[0]['duration']
+                            if isinstance(first_duration, str) and first_duration.startswith('[') and first_duration.endswith(']'):
+                                # 解析字符串格式的列表 "[start, end]"
+                                import ast
+                                duration_list = ast.literal_eval(first_duration)
+                                if isinstance(duration_list, list) and len(duration_list) >= 1:
+                                    unexpected_times.append(int(duration_list[0]))
+                            elif isinstance(first_duration, list) and len(first_duration) >= 1:
+                                # 已经是列表格式
+                                unexpected_times.append(int(first_duration[0]))
+                    except Exception as e:
+                        print(f"警告: 无法从事件表 {key} 提取时间信息: {e}")
+                        continue
+                else:
+                    # 尝试直接解析为时间（旧格式兼容）
+                    time_str = key.replace(prefix + '_', '')
+                    if time_str.isdigit():
+                        unexpected_times.append(int(time_str))
+                    else:
+                        print(f"警告: 无法解析表名中的时间信息: {key}")
+                        continue
+            except ValueError as e:
+                print(f"警告: 表名 {key} 解析失败: {e}")
+                continue
+            except Exception as e:
+                print(f"警告: 处理表名 {key} 时发生未知错误: {e}")
+                continue
     unexpected_times = list(dict.fromkeys(unexpected_times))
     unexpected_times.sort()
     dynamic_end = 0

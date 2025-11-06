@@ -30,7 +30,7 @@ class BatchDistributionGenerator:
     """
 
     def __init__(self, base_output_dir: str = "Uncertainties_Dynamic_Planning",
-                 base_data_path: str = "../Intermodal_EGS_data_all.xlsx"):
+                 base_data_path: str = "A:/MYpython/34959_RL/Intermodal_EGS_data_all.xlsx"):
         """
         初始化批量生成器
 
@@ -363,7 +363,7 @@ def main():
     parser.add_argument(
         '--data-path',
         type=str,
-        default='../Intermodal_EGS_data_all.xlsx',
+        default="A:/MYpython/34959_RL/Intermodal_EGS_data_all.xlsx",
         help='基础数据文件路径'
     )
 

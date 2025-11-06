@@ -13583,24 +13583,62 @@ def real_main(parallel_number2, dynamic_t2 = 0, distribution_name='default'):
                 table_number = Dynamic_ALNS_RL34959.table_number; add_event_types =  0 
                 if add_event_types == 1:
                     # 支持新旧两种文件格式
+                    data_path = None
                     if distribution_name == 'default':
                         # 旧格式：向后兼容
-                        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
+                        old_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
         request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                        data_path = old_path
                     else:
                         # 新格式：使用分布配置名称
-                        data_path = "A:/MYpython/34959_RL/Uncertainties_Dynamic_Planning/plot_distribution_" + duration_type + "/R" + str(
+                        new_path = "A:/MYpython/34959_RL/Uncertainties_Dynamic_Planning/plot_distribution_" + duration_type + "/R" + str(
         request_number_in_R) + "/Intermodal_EGS_data_dynamic_" + duration_type + "_table" + str(table_number) + ".xlsx"
+                        data_path = new_path
+
+                        # 如果新格式不存在，尝试回退到旧格式
+                        if not os.path.exists(data_path):
+                            old_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
+            request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                            if os.path.exists(old_path):
+                                print(f"信息: 新格式文件不存在，回退到旧格式: {old_path}")
+                                data_path = old_path
+                            else:
+                                print(f"警告: 新旧格式文件都不存在:")
+                                print(f"  新格式: {new_path}")
+                                print(f"  旧格式: {old_path}")
                 else:
                     # 支持新旧两种文件格式
+                    data_path = None
                     if distribution_name == 'default':
                         # 旧格式：向后兼容
-                        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
+                        old_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
                             request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                        data_path = old_path
                     else:
                         # 新格式：使用分布配置名称
-                        data_path = "A:/MYpython/34959_RL/Uncertainties_Dynamic_Planning/plot_distribution_" + duration_type + "/R" + str(
+                        new_path = "A:/MYpython/34959_RL/Uncertainties_Dynamic_Planning/plot_distribution_" + duration_type + "/R" + str(
                             request_number_in_R) + "/Intermodal_EGS_data_dynamic_" + duration_type + "_table" + str(table_number) + ".xlsx"
+                        data_path = new_path
+
+                        # 如果新格式不存在，尝试回退到旧格式
+                        if not os.path.exists(data_path):
+                            old_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
+                                request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                            if os.path.exists(old_path):
+                                print(f"信息: 新格式文件不存在，回退到旧格式: {old_path}")
+                                data_path = old_path
+                            else:
+                                print(f"警告: 新旧格式文件都不存在:")
+                                print(f"  新格式: {new_path}")
+                                print(f"  旧格式: {old_path}")
+
+                # 验证最终路径是否存在
+                if data_path and not os.path.exists(data_path):
+                    print(f"错误: 数据文件不存在: {data_path}")
+                    print(f"请检查分布配置 '{distribution_name}' 的数据是否已生成")
+                    raise FileNotFoundError(f"数据文件不存在: {data_path}")
+                elif data_path:
+                    print(f"调试: 使用数据文件: {data_path}")
                 # data_path = "/data/yimeng/Uncertainties Dynamic planning under unexpected events/Instances/R" + str(request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(Dynamic_ALNS_RL34959.table_number) + ".xlsx"
             else:
                 if CP == 1:
