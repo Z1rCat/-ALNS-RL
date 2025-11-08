@@ -1,5 +1,10 @@
 #!/usr/bin/env Python
 # coding=utf-8
+
+# 抑制tkinter线程退出错误
+import os
+os.environ['TK_SILENCE_DEPRECATION'] = '1'
+
 import concurrent.futures
 import threading
 import argparse

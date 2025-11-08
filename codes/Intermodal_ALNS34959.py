@@ -12027,26 +12027,28 @@ def main(R_pool2, parallel_number2, SA2, combination2, only_T2, has_end_depot2, 
         if stochastic == 1:
             #save routes and R_pool and objectives (obj_record), and also routes_match in the file for this time step
             #until now, I didn't save R_pool because all r can be served
+            # 计算运行时间和目标值
+            running_time = timeit.default_timer() - dynamic_start_time
+            overall_distance, overall_cost, overall_time, overall_profit, overall_emission, served_requests, overall_request_cost, overall_vehicle_cost, overall_wait_cost, overall_transshipment_cost, overall_un_load_cost, overall_emission_cost, overall_storage_cost, overall_delay_penalty, overall_number_transshipment, overall_average_speed, overall_average_time_ratio, overall_emission_transshipment = overall_obj(
+                routes)
+            obj_record = pd.DataFrame(index=range(0, 1),
+                                      columns=['overall_distance', 'overall_cost', 'overall_time', 'overall_profit',
+                                               'overall_emission', 'served_requests', 'overall_request_cost',
+                                               'overall_vehicle_cost', 'overall_wait_cost',
+                                               'overall_transshipment_cost',
+                                               'overall_un_load_cost', 'overall_emission_cost', 'overall_storage_cost',
+                                               'overall_delay_penalty', 'running_time'])
+            obj_record.loc[0] = [overall_distance, overall_cost, overall_time, overall_profit, overall_emission, served_requests, overall_request_cost, overall_vehicle_cost, overall_wait_cost, overall_transshipment_cost, overall_un_load_cost, overall_emission_cost, overall_storage_cost, overall_delay_penalty, running_time]
+
+            # 保存结果，确保总是包含obj_record
             if add_RL == 1 and dynamic_RL34959.implement == 0:
-                save_results(-1, routes)
+                save_results(-1, routes, obj_record)
             else:
                 # it has the last round in training will be saved's risk, but it does not matter
             #     if skip_the_last_training_round_and_implement_is_one == 0:
-            #         save_results(-1, routes)
+            #         save_results(-1, routes, obj_record)
             #         skip_the_last_training_round_and_implement_is_one = 1
             #     else:
-                running_time = timeit.default_timer() - dynamic_start_time
-                overall_distance, overall_cost, overall_time, overall_profit, overall_emission, served_requests, overall_request_cost, overall_vehicle_cost, overall_wait_cost, overall_transshipment_cost, overall_un_load_cost, overall_emission_cost, overall_storage_cost, overall_delay_penalty, overall_number_transshipment, overall_average_speed, overall_average_time_ratio, overall_emission_transshipment = overall_obj(
-                    routes)
-                obj_record = pd.DataFrame(index=range(0, 1),
-                                          columns=['overall_distance', 'overall_cost', 'overall_time', 'overall_profit',
-                                                   'overall_emission', 'served_requests', 'overall_request_cost',
-                                                   'overall_vehicle_cost', 'overall_wait_cost',
-                                                   'overall_transshipment_cost',
-                                                   'overall_un_load_cost', 'overall_emission_cost', 'overall_storage_cost',
-                                                   'overall_delay_penalty', 'running_time'])
-                obj_record.loc[0] = [overall_distance, overall_cost, overall_time, overall_profit, overall_emission, served_requests, overall_request_cost, overall_vehicle_cost, overall_wait_cost, overall_transshipment_cost, overall_un_load_cost, overall_emission_cost, overall_storage_cost, overall_delay_penalty, running_time]
-
                 save_results(-1, routes, obj_record)
             if Dynamic_ALNS_RL34959.dynamic_end == 1:
                 # restore routes and R_pool when all uncertainty finisheds to test RL and let the optimization never end
