@@ -110,14 +110,13 @@ def Intermodal_ALNS_function(distribution_name='default'):
             Intermodal_ALNS34959.real_main(3, t, distribution_name)
 
     #another way of dynamic is optimizing only the urgent parts of requests, maybe better than this way
-def main(approach, distribution_name='default', max_tables=100):
+def main(approach, distribution_name='default'):
     """
     ALNS-RL混合算法主函数
 
     Args:
         approach: 优化方法编号
         distribution_name: 不确定性事件分布配置名称
-        max_tables: 最大处理的数据文件数量 (0=无限循环)
     """
     global RL_can_start_implementation_phase_from_the_last_table, ALNS_calculates_average_duration_list, ALNS_reward_list_in_implementation, ALNS_removal_reward_list_in_implementation,  ALNS_removal_action_list_in_implementation, ALNS_insertion_reward_list_in_implementation, ALNS_insertion_action_list_in_implementation, table_number, reward_list_in_implementation, removal_reward_list_in_implementation, removal_state_list_in_implementation, removal_action_list_in_implementation, insertion_reward_list_in_implementation, insertion_state_list_in_implementation, insertion_action_list_in_implementation
     RL_can_start_implementation_phase_from_the_last_table = 0
@@ -138,84 +137,7 @@ def main(approach, distribution_name='default', max_tables=100):
             ALNS_reward_list_in_implementation, ALNS_removal_reward_list_in_implementation,  ALNS_removal_action_list_in_implementation, ALNS_insertion_reward_list_in_implementation, ALNS_insertion_action_list_in_implementation = [], [], [], [], []
             table_number = 0
             start_from_end_table = 0
-            processed_tables = 0
-            start_time = time.time()
-
-            print(f"开始处理数据文件，最大数量: {'无限循环' if max_tables == 0 else max_tables}")
-
-            while True:
-                # 检查终止条件
-                if max_tables > 0 and processed_tables >= max_tables:
-                    elapsed_time = time.time() - start_time
-                    print(f"\n=== 实验完成 ===")
-                    print(f"处理的数据文件数量: {processed_tables}")
-                    print(f"总运行时间: {elapsed_time:.2f} 秒")
-                    print(f"平均每个文件处理时间: {elapsed_time/processed_tables:.2f} 秒")
-                    print("="*50)
-                    break
-
-                # 显示进度报告
-                if max_tables > 0:
-                    progress = (processed_tables / max_tables) * 100
-                    elapsed_time = time.time() - start_time
-                    avg_time_per_table = elapsed_time / processed_tables if processed_tables > 0 else 0
-                    remaining_tables = max_tables - processed_tables
-                    est_remaining_time = avg_time_per_table * remaining_tables if avg_time_per_table > 0 else 0
-
-                    print(f"\n进度: {processed_tables}/{max_tables} ({progress:.1f}%) - "
-                          f"剩余时间: {est_remaining_time:.1f}秒")
-                else:
-                    # 无限循环模式，每10个文件显示一次进度
-                    if processed_tables % 10 == 0 and processed_tables > 0:
-                        elapsed_time = time.time() - start_time
-                        print(f"\n已处理 {processed_tables} 个文件 - 运行时间: {elapsed_time:.1f}秒")
-
-                print(f"调试: 准备执行 ALNS function，当前 table_number = {table_number}")
-                Intermodal_ALNS_function(distribution_name)
-                processed_tables += 1
-                try:
-                    if dynamic_RL34959.implement == 1:
-                        if start_from_end_table == 0:
-                            table_number = 499
-                            RL_can_start_implementation_phase_from_the_last_table = 1
-                            start_from_end_table = 1
-                        else:
-                            table_number -= 1
-                            # 添加边界检查：确保table_number不小于0
-                            if table_number < 0:
-                                print(f"调试: table_number {table_number} 小于0，重置为99")
-                                table_number = 99
-                    else:
-                        table_number += 1
-                        # 添加边界检查：table_number范围应为0-99
-                        if table_number >= 100:
-                            print(f"调试: table_number {table_number} 超出范围[0, 99]，重置为0")
-                            table_number = 0
-                except:
-                    if Intermodal_ALNS34959.add_RL == 0:
-                        if Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 0:
-                            table_number -= 1
-                            # 添加边界检查：确保table_number不小于0
-                            if table_number < 0:
-                                print(f"调试: table_number {table_number} 小于0，重置为99")
-                                table_number = 99
-                        elif Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 3 and len(
-                                ALNS_reward_list_in_implementation) > Intermodal_ALNS34959.number_of_training:
-                            if start_from_end_table == 0:
-                                table_number = 999
-                                start_from_end_table = 1
-                            else:
-                                table_number -= 1
-                                # 添加边界检查：确保table_number不小于0
-                                if table_number < 0:
-                                    print(f"调试: table_number {table_number} 小于0，重置为99")
-                                    table_number = 99
-                        else:
-                            table_number += 1
-                            # 添加边界检查：table_number范围应为0-99
-                            if table_number >= 100:
-                                print(f"调试: table_number {table_number} 超出范围[0, 99]，重置为0")
-                                table_number = 0
+            Intermodal_ALNS_function(distribution_name)
 if __name__ == '__main__':
     main(approach)
 

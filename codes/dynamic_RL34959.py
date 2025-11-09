@@ -57,6 +57,88 @@ def profile():
 
     return wrapper
 
+def save_reward_details_to_excel():
+    """
+    保存RL训练过程中的详细reward信息到Excel文件
+    """
+    if add_ALNS == 1 and len(all_rewards_list) > 0:
+        try:
+            # 构建Excel文件路径
+            excel_path = Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
+                episode_length) + "_delay_reward_time_dependent" + str(
+                time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
+                iteration_multiply) + "multiply" + "reward_details.xlsx"
+
+            # 准备数据
+            training_data = []
+            running_sum = 0
+            running_avg = []
+            running_std = []
+
+            for i, reward in enumerate(all_rewards_list):
+                running_sum += reward
+
+                # 计算移动平均和标准差（窗口大小为iteration_numbers_unit）
+                if i >= iteration_numbers_unit - 1:
+                    window_rewards = all_rewards_list[i - iteration_numbers_unit + 1:i + 1]
+                    window_avg = np.mean(window_rewards)
+                    window_std = np.std(window_rewards)
+                    running_avg.append(window_avg)
+                    running_std.append(window_std)
+                else:
+                    running_avg.append(0)
+                    running_std.append(0)
+
+                training_data.append({
+                    'iteration': i + 1,
+                    'reward': reward,
+                    'cumulative_sum': running_sum,
+                    'cumulative_avg': running_sum / (i + 1),
+                    'moving_avg': running_avg[-1],
+                    'moving_std': running_std[-1],
+                    'algorithm': algorithm,
+                    'mode': mode,
+                    'episode_length': episode_length,
+                    'iteration_multiply': iteration_multiply
+                })
+
+            # 创建DataFrame并保存
+            df_training = pd.DataFrame(training_data)
+
+            with pd.ExcelWriter(excel_path) as writer:
+                # 保存详细的训练数据
+                df_training.to_excel(writer, sheet_name='training_details', index=False)
+
+                # 保存统计摘要
+                summary_data = {
+                    'metric': ['total_iterations', 'total_reward', 'final_avg_reward', 'max_reward', 'min_reward',
+                              'final_moving_avg', 'final_moving_std', 'convergence_achieved'],
+                    'value': [len(all_rewards_list), sum(all_rewards_list), sum(all_rewards_list)/len(all_rewards_list),
+                              max(all_rewards_list), min(all_rewards_list),
+                              running_avg[-1] if running_avg else 0, running_std[-1] if running_std else 0,
+                              'Yes' if len(running_avg) > 0 and running_avg[-1] >= 0.9 else 'No']
+                }
+                df_summary = pd.DataFrame(summary_data)
+                df_summary.to_excel(writer, sheet_name='summary', index=False)
+
+                # 保存移动平均数据
+                if len(running_avg) > 0:
+                    moving_avg_data = {
+                        'iteration': range(iteration_numbers_unit, len(all_rewards_list) + 1),
+                        'moving_avg': running_avg,
+                        'moving_std': running_std
+                    }
+                    df_moving = pd.DataFrame(moving_avg_data)
+                    df_moving.to_excel(writer, sheet_name='moving_averages', index=False)
+
+            print(f"[INFO] RL训练reward详情已保存到: {excel_path}")
+            print(f"[INFO] 总训练轮数: {len(all_rewards_list)}")
+            print(f"[INFO] 最终平均奖励: {sum(all_rewards_list)/len(all_rewards_list):.4f}")
+            print(f"[INFO] 最终移动平均: {running_avg[-1] if running_avg else 0:.4f}")
+
+        except Exception as e:
+            print(f"[ERROR] 保存reward详情到Excel失败: {str(e)}")
+
 def save_plot_reward_list():
     if add_ALNS == 1:
         # plot all_rewards_list and save
@@ -77,6 +159,10 @@ def save_plot_reward_list():
             for reward in all_rewards_list:
                 f.write(f"{reward}\n")
         print('all_rewards_list', all_rewards_list)
+
+        # 新增：保存详细的reward信息到Excel
+        save_reward_details_to_excel()
+
         plt.plot(range(1, len(all_rewards_list) + 1), all_rewards_list)
         # plt.fill_between(timestamps, bottom_line, top_line)
         plt.ylabel('Reward')

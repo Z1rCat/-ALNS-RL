@@ -139,12 +139,7 @@ def parse_arguments():
   # 设置并行工作进程数
   python Dynamic_master34959.py --workers 4
 
-  # 设置最大处理文件数
-  python Dynamic_master34959.py --max-tables 500
-
-  # 无限循环模式（0）
-  python Dynamic_master34959.py --max-tables 0
-        """
+          """
     )
 
     # 分布参数
@@ -174,13 +169,7 @@ def parse_arguments():
         help='并行工作进程数 (默认: 2)'
     )
 
-    parser.add_argument(
-        '--max-tables', '-m',
-        type=int,
-        default=100,
-        help='最大处理的数据文件数量 (默认: 100, 0=无限循环)'
-    )
-
+    
     parser.add_argument(
         '--gpu',
         type=int,
@@ -258,8 +247,7 @@ def main():
         print(f"分布配置: {args.distribution}")
         print(f"强化学习: {'禁用' if args.no_rl else '启用'}")
         print(f"并行进程数: {args.workers}")
-        print(f"最大数据文件数: {'无限循环' if args.max_tables == 0 else args.max_tables}")
-        if args.gpu is not None:
+                if args.gpu is not None:
             print(f"使用GPU: {args.gpu}")
         print("="*80)
 
@@ -297,13 +285,13 @@ def main():
         # 运行优化算法
         if add_RL == 0:
             print("运行ALNS算法...")
-            Dynamic_ALNS_RL34959.main(0, distribution_name=args.distribution, max_tables=args.max_tables)
+            Dynamic_ALNS_RL34959.main(0, distribution_name=args.distribution)
         else:
             print("运行ALNS-RL混合算法...")
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_number)) as executor:
                 # 提交任务
                 futures = {
-                    executor.submit(Dynamic_ALNS_RL34959.main, approach, args.distribution, args.max_tables): approach
+                    executor.submit(Dynamic_ALNS_RL34959.main, approach, args.distribution): approach
                     for approach in parallel_number
                 }
 
