@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python visualization_code.py)",
+      "Bash(python visualization_simple.py)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

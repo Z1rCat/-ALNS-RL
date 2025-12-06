@@ -148,3 +148,81 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+# ===========================
+# 1. Python 标准忽略文件
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.ipynb_checkpoints/
+
+# ===========================
+# 2. 虚拟环境 (Virtual Env)
+# ===========================
+# 根据你的控制台路径 (A:\MYpython\34959_RL\codes\env)
+env/
+venv/
+codes/env/
+.env
+
+# ===========================
+# 3. 核心：忽略生成的海量数据
+# ===========================
+# 忽略整个存放生成数据的文件夹（包含空格的路径 Git 能识别）
+Uncertainties Dynamic planning under unexpected events/
+
+# 忽略临时分析结果
+analysis_results/
+
+# 忽略 Python 运行时生成的图表或临时 Excel
+*.pdf
+*.png
+# 如果你不想上传任何生成的 Excel 结果，但想保留根目录的原始数据：
+# 规则：忽略所有 xlsx，但保留根目录下的（如果需要）
+# **/*.xlsx
+# !Intermodal_EGS_data_all.xlsx
+
+# 针对性忽略生成的动态拥堵数据
+Intermodal_EGS_data_dynamic_congestion*.xlsx
+best_routes*.xlsx
+obj_record*.xlsx
+routes_match*.xlsx
+action_reward_table*.xlsx
+
+# ===========================
+# 4. 强化学习 & 运行时文件
+# ===========================
+# 训练模型保存的文件 (Stable Baselines3 通常存为 .zip)
+*.zip
+*.pth
+*.pt
+*.pkl
+
+# Tensorboard 日志
+Training/Logs/
+tensorboard_logs/
+
+# 运行时产生的停止信号文件
+34959.txt
+
+# 运行时产生的临时记录
+better_obj_record*.txt
+implementation_time.txt
+training_time.txt
+time_s.txt
+
+# ===========================
+# 5. IDE 配置文件 (可选)
+# ===========================
+.idea/
+.vscode/
+# 忽略旧的文件夹名
+Uncertainties Dynamic planning under unexpected events/
+
+# 忽略报错信息里出现的文件夹名 (新增)
+Uncertainties_Dynamic_Planning/
+
+# 忽略所有生成的 Excel 数据
+*.xlsx
+!Intermodal_EGS_data_all.xlsx  # (可选) 如果你想保留根目录的原始数据
