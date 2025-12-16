@@ -38,40 +38,6 @@ import orjson
 import json
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
-import rl_logging
-
-# 日志字段定义（与 RL 侧保持一致）
-TRACE_FIELDS = [
-    "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
-    "table_number", "dynamic_t_begin", "duration_type",
-    "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "feasible", "source"
-]
-
-def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source="ALNS"):
-    try:
-        payload = {
-            "ts": rl_logging.now_ts(),
-            "phase": "implement" if 'dynamic_RL34959' in globals() and getattr(dynamic_RL34959, 'implement', 0) == 1 else "train",
-            "stage": stage,
-            "uncertainty_index": row_dict.get("uncertainty_index", ""),
-            "request": row_dict.get("request", ""),
-            "vehicle": row_dict.get("vehicle", ""),
-            "table_number": globals().get("Dynamic_ALNS_RL34959", None) and getattr(Dynamic_ALNS_RL34959, "table_number", ""),
-            "dynamic_t_begin": globals().get("dynamic_t_begin", ""),
-            "duration_type": globals().get("duration_type", ""),
-            "delay_tolerance": row_dict.get("delay_tolerance", ""),
-            "severity": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "severity_level", ""),
-            "passed_terminals": row_dict.get("passed_terminals", ""),
-            "current_time": row_dict.get("current_time", ""),
-            "action": action if action is not None else row_dict.get("action", ""),
-            "reward": reward if reward is not None else row_dict.get("reward", ""),
-            "feasible": feasible,
-            "source": source
-        }
-        rl_logging.append_row("rl_trace.csv", TRACE_FIELDS, payload)
-    except Exception as e:
-        print("log_rl_event error", e)
 #may cause bug list:
 #1. request_flow_t is not updated when finding best solution by hash table
 import fuzzy_HP
@@ -9333,8 +9299,7 @@ def add_r_segment(r_number,new_r_segment_add):
         R_pool = np.vstack([R_pool, new_r_segment_add])
 
 def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward_list_in_implementation):
-    global ALNS_end_flag, path, exp_number, request_number_in_R
-    print(f"\n>>> [Debug] Attempting to save table. Total rewards: {len(reward_list_in_implementation)}")
+    global ALNS_end_flag
     if add_RL == 0:
         if ALNS_greedy_under_unknown_duration_assume_duration != 3:
             stop_segments = number_of_implementation / segment_length_in_RL_or_ALNS_implementation
@@ -9371,63 +9336,12 @@ def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward
                                       insertion_operator_insertion_action, insertion_operator_insertion_action_reward,
                                       insertion_operator_non_insertion_action,
                                       insertion_operator_non_insertion_action_reward, average_reward, std_reward]
-        
-        # === [关键修复] 安全构建路径 ===
-        import os
-        
-        # 不要直接读 global path，先给它起个局部变量名来操作，避免 UnboundLocalError
-        try:
-            current_path_val = path
-        except NameError:
-            current_path_val = None
-            
-        # 强制构建一个安全的绝对路径
-        base_output_dir = r"A:\MYpython\34959_RL\Uncertainties Dynamic planning under unexpected events\Figures"
-        # 确保 exp_number 存在
-        safe_exp_num = exp_number if 'exp_number' in globals() else 34959
-        experiment_dir = f"experiment{safe_exp_num}"
-        
-        safe_path = os.path.join(base_output_dir, experiment_dir)
-        
-        # 覆盖 path
-        path = safe_path
-        
-        # 确保目录存在
-        if not os.path.exists(path):
-            try:
-                os.makedirs(path, exist_ok=True)
-                print(f">>> [Fix] Created directory: {path}")
-            except Exception as e:
-                print(f"!!! [Fix] Failed to create dir: {e}")
-        
-        # 构建文件名
-        # 确保 request_number_in_R 存在
-        safe_r_num = request_number_in_R if 'request_number_in_R' in globals() else 5
-        path_action_reward_table = os.path.join(path, f'action_reward_table{safe_exp_num-1}R{safe_r_num}.xlsx')
-        
-        print(f">>> [Fix] Saving Excel to: {path_action_reward_table}")
-        
-        try:
-            with pd.ExcelWriter(path_action_reward_table) as writer:
-                sheet_name_str = 'RL' + str(add_RL) + 'type' + str(duration_type) + 'strategy' + str(ALNS_greedy_under_unknown_duration_assume_duration)
-                # Excel sheet name 最大长度限制为 31
-                if len(sheet_name_str) > 31:
-                    sheet_name_str = sheet_name_str[:31]
-                action_reward_table.to_excel(writer, sheet_name=sheet_name_str)
-            print(">>> [Fix] Save Successful!")
-        except Exception as e:
-            print(f"!!! [Fix] Save Failed: {e}")
-            # 尝试保存到根目录作为备选，防止数据丢失
-            fallback_path = f"emergency_save_R{request_number_in_R}.xlsx"
-            action_reward_table.to_excel(fallback_path)
-            print(f"!!! [Fix] Saved to fallback: {os.path.abspath(fallback_path)}")
-
+        path_action_reward_table = path + '/action_reward_table' + str(
+            exp_number - 1) + 'R' + str(request_number_in_R) + '.xlsx'
+        with pd.ExcelWriter(path_action_reward_table) as writer:  # doctest: +SKIP
+            action_reward_table.to_excel(writer, sheet_name='RL' + str(add_RL) + 'type' + duration_type + 'strategy' + str(ALNS_greedy_under_unknown_duration_assume_duration))
         ALNS_end_flag = 1
-        
-        # 3. 暴力退出
-        print(">>> [Fix] Force Exiting Process...")
-        import os
-        os._exit(0) # 比 sys.exit() 更强力，直接终止进程
+        sys.exit('saved_table')
 
 def stop_wait():
     if os.path.exists('34959.txt'):
@@ -9719,10 +9633,6 @@ def prepare_for_dynamic():
                                             if influenced_passed_terminals[1] != -1:
                                                 print('more than one terminal is congested')
                                             new_row = pd.Series(data={'uncertainty_index': uncertainty_index, 'uncertainty_type': 'begin', 'request': influenced_r, 'vehicle': k, 'delay_tolerance': delay_tolerance, 'passed_terminals': influenced_passed_terminals, 'current_time': duration[0], 'action': -10000000, 'reward': -10000000})
-                                            try:
-                                                log_rl_event(new_row.to_dict(), "begin_removal", action=-10000000, source="ALNS")
-                                            except Exception as e:
-                                                print("log begin_removal error", e)
 
                                             # if len(state_reward_pairs) > 1:
                                             #     print('len > 1')
@@ -11076,17 +10986,9 @@ def get_and_send_rewards(uncertainty_index, R_change_dynamic_travel_time, check_
 
                         reward = get_reward(check_terminal, action, influenced_r, R_change_dynamic_travel_time, index, duration, congestion_link, congestion_node, -1)
                         state_reward_pairs.loc[pair_index]['reward'] = reward
-                    try:
-                        log_rl_event(state_reward_pairs.loc[pair_index].to_dict(), "finish_removal", action=action, reward=reward, source="ALNS")
-                    except Exception as e:
-                        print("log finish_removal error", e)
 
                 else:
                     state_reward_pairs.loc[pair_index]['reward'] = reward
-                    try:
-                        log_rl_event(state_reward_pairs.loc[pair_index].to_dict(), "finish_removal", action=state_reward_pairs.loc[pair_index].get('action', ''), reward=reward, source="ALNS")
-                    except Exception as e:
-                        print("log finish_removal error", e)
                 break_flag = 1
                 break
         if break_flag == 1:
@@ -13487,7 +13389,7 @@ def save_results(round, routes_save, obj_record = -1):
 
 # @profile()
 # @time_me()
-def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
+def real_main(parallel_number2, dynamic_t2 = 0):
     global waiting_times, only_check_this_influenced_r_in_dynamic_uncertainty, used_interrupt, ALNS_implement_start_RL_can_move, interrupt_by_implement_is_one_and_assign_action_once_only, time_dependent_truck_travel_time, dynamic_t_begin, ALNS_greedy_under_unknown_duration_assume_duration, number_of_training, number_of_implementation, re_plan_when_event_finishes_information, ALNS_end_flag, RL_is_trained_or_evaluated_or_ALNS_is_evaluated, delayed_time_table_uncertainty_index, RL_insertion_segment, congestion_nodes_at_begining, RL_removal_implementation_store, RL_insertion_implementation_store, ALNS_removal_implementation_store, ALNS_insertion_implementation_store, vessel_train, combine_insertion_and_removal_operators, state_reward_pairs_insertion, after_action_review, get_reward_by_cost_gap, ALNS_guides_RL, state_reward_pairs, congestion_nodes, congestion_links, path, stochastic, add_RL, request_segment_in_dynamic, delayed_time_table, unexpected_events, VCP_coordination, different_companies, during_iteration, emission_preference_constraints_after_iteration, wtw_emissions, dynamic, dynamic_t, big_r, request_flow_t, percentage, not_initial_in_CP, R, R_pool, parallel_number, carriers_number, auction_round_number, CP_try_r_of_other_carriers, use_speed, get_satisfactory_value_one_by_one, fuzzy_probability, only_eco_label, only_eco_label_add_cost, heterogeneous_preferences_no_constraints, request_segment, data_path, CP, parallel_ALNS, allow_infeasibility, swap_or_not, fuzzy_constraints,real_multi_obj,weight_interval,w1,w2,w3,Demir_barge_free,truck_fleet, forbid_much_delay, two_T, heterogeneous_preferences, Demir,old_current_save,parallel, parallel_thread, max_processors, start_from_best_at_begin_of_segement, belta, truck_time_free, functions_time, Fixed_Data, by_wenjing, T_number, k_number, node_number, processors_number, note, obj_number, exp_number, regret_k, service_time, transshipment_time, c_storage, fuel_cost, has_end_depot2, check_obj, exps_record_path, forbid_T_trucks, get_initial_bymyself, request_number_in_R, multi_obj, c_storage, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, alpha, bundle_or_not, c, devide_value, stop_time, regret_k, regular, insert_multiple_r, bi_obj_cost_emission, bi_obj_cost_time, K
     waiting_times = {}
     only_check_this_influenced_r_in_dynamic_uncertainty = -1
@@ -13565,12 +13467,11 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
 
     auction_round_number = 3
     carriers_number = 3
-    exp_number =34959
+    exp_number =34959 
     parallel_number = parallel_number2
     not_initial_in_CP = 0
     Demir = 0
-    if request_number_in_R2 is not None:
-        request_number_in_R = request_number_in_R2
+    request_number_in_R =5 
     request_segment = 0
     big_r = 1000000000000
     heterogeneous_preferences = 0

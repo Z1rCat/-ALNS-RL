@@ -201,26 +201,13 @@ def main():
     parser.add_argument("--target_folder", required=True)
     parser.add_argument("--total_files", type=int, default=1000)
     parser.add_argument("--workers", type=int, default=os.cpu_count())
-    parser.add_argument("--request_numbers", type=str, default="5",
-                        help="指定要生成的R数量，单个值如'5'或逗号分隔如'5,10'")
     args = parser.parse_args()
-
-    try:
-        target_rs = [int(x) for x in args.request_numbers.split(",") if x.strip()]
-    except ValueError:
-        print(f"[Error] 无效的 --request_numbers 参数: {args.request_numbers}")
-        sys.exit(1)
-    target_rs = [r for r in target_rs if r in EXP_NUMBERS]
-    if not target_rs:
-        print("[Error] --request_numbers 为空或不在预设列表 {5,10,20,30,50,100} 中")
-        sys.exit(1)
-
+    
     print(f"=== Generator Launching: {args.dist_name} ===")
     print(f"   Target: .../{os.path.basename(args.target_folder)}")
     print(f"   Files per R: {args.total_files}")
     print(f"   Workers: {args.workers}")
-    print(f"   R 集合: {target_rs}")
-
+    
     start_all = time.time()
     
     # 1. 生成数据矩阵
@@ -237,7 +224,7 @@ def main():
                              initializer=init_worker, 
                              initargs=(DATA_FILE, EXP_NUMBERS, FIGURES_DIR)) as executor:
         
-        for r in target_rs:
+        for r in EXP_NUMBERS.keys():
             print(f"\n>> Generating R_{r}...")
             r_dir = os.path.join(base_out, f"R{r}")
             os.makedirs(r_dir, exist_ok=True)

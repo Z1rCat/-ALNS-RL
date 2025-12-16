@@ -19,8 +19,6 @@ import Dynamic_ALNS_RL34959
 import cProfile
 import pstats
 import io
-from pathlib import Path
-import rl_logging
 # from Intermodal_ALNS34959 import parallel_read_excel, parallel_save_excel
 # from torch.utils.tensorboard import SummaryWriter
 # writer = SummaryWriter(os.path.join('Training', 'Logs'))
@@ -58,60 +56,6 @@ def profile():
         return res
 
     return wrapper
-
-# ===== 日志工具 =====
-TRACE_FIELDS = [
-    "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
-    "table_number", "dynamic_t_begin", "duration_type",
-    "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "feasible", "source"
-]
-
-TRAIN_FIELDS = [
-    "ts", "phase", "step_idx", "reward", "avg_reward", "std_reward",
-    "training_time", "implementation_time"
-]
-
-def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source="RL"):
-    try:
-        payload = {
-            "ts": rl_logging.now_ts(),
-            "phase": "implement" if implement == 1 else "train",
-            "stage": stage,
-            "uncertainty_index": row.get("uncertainty_index", ""),
-            "request": row.get("request", ""),
-            "vehicle": row.get("vehicle", ""),
-            "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
-            "dynamic_t_begin": getattr(Intermodal_ALNS34959, "dynamic_t_begin", ""),
-            "duration_type": getattr(Intermodal_ALNS34959, "duration_type", ""),
-            "delay_tolerance": row.get("delay_tolerance", ""),
-            "severity": globals().get("severity_level", ""),
-            "passed_terminals": row.get("passed_terminals", ""),
-            "current_time": row.get("current_time", ""),
-            "action": action if action is not None else row.get("action", ""),
-            "reward": reward if reward is not None else row.get("reward", ""),
-            "feasible": feasible,
-            "source": source
-        }
-        rl_logging.append_row("rl_trace.csv", TRACE_FIELDS, payload)
-    except Exception as e:
-        print("log_trace_from_row error", e)
-
-def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_reward=None, training_time=None, implementation_time=None):
-    try:
-        payload = {
-            "ts": rl_logging.now_ts(),
-            "phase": phase,
-            "step_idx": step_idx,
-            "reward": reward if reward is not None else "",
-            "avg_reward": avg_reward if avg_reward is not None else "",
-            "std_reward": std_reward if std_reward is not None else "",
-            "training_time": training_time if training_time is not None else "",
-            "implementation_time": implementation_time if implementation_time is not None else "",
-        }
-        rl_logging.append_row("rl_training.csv", TRAIN_FIELDS, payload)
-    except Exception as e:
-        print("log_training_row error", e)
 
 def save_plot_reward_list():
     if add_ALNS == 1:
@@ -191,11 +135,6 @@ def send_action(action):
                     stop_wait()
                     try:
                         Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
-                        try:
-                            row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
-                        except:
-                            row_dict = {}
-                        log_trace_from_row(row_dict, "send_action", action=action, source="RL")
                         break
                     except:
                         print("Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action")
@@ -406,11 +345,6 @@ class coordinationEnv(Env):
                             if type(reward).__module__ == 'numpy':
                                 reward = reward[0,0]
                             all_rewards_list.append(reward)
-                            try:
-                                row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
-                            except:
-                                row_dict = {}
-                            log_trace_from_row(row_dict, "receive_reward", action=row_dict.get('action', ''), reward=reward, source="RL")
                             # parallel_save_excel(path + 'state_reward_pairs.xlsx', state_reward_pairs, 'state_reward_pairs')
                             uncertainty_type = Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index]
                             #drop the finish
@@ -797,7 +731,6 @@ def main(algorithm2, mode2):
                 break
             model.learn(total_timesteps=total_timesteps2)
             training_time = timeit.default_timer() - start_time
-            log_training_row("train", step_idx=len(all_rewards_list), training_time=training_time)
             try:
                 with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
                         episode_length) + "_delay_reward_time_dependent" + str(
@@ -837,7 +770,6 @@ def main(algorithm2, mode2):
                 for _ in range(1):
                     average_reward, deviation = evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
                     print('congestion_terminal_mean_list', congestion_terminal_mean_list, average_reward, deviation)
-            log_training_row("eval", step_idx=len(all_rewards_list), avg_reward=average_reward, std_reward=deviation)
             print('evaluation', 'average_reward', average_reward, 'deviation', deviation)# sys.exit('stop_it_in_testing')
             if average_reward >= 0.9:
                 sucess_times += 1
@@ -924,7 +856,6 @@ def main(algorithm2, mode2):
                 # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                 #     print('gesa')
                 implementation_time = timeit.default_timer() - implementation_start_time
-                log_training_row("implement", step_idx=len(all_rewards_list), implementation_time=implementation_time)
                 try:
                     # Append one line to a file that does not exist
                     implementation_time_path = Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
@@ -1035,3 +966,4 @@ if __name__ == '__main__':
             # mode = 'train'
             # mode = 'truck'
             main(algorithm, mode)
+

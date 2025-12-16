@@ -17,9 +17,6 @@ LEGACY_FOLDER_NAME = "plot_distribution_targetInstances_disruption_mix_mu_5_40_t
 
 warnings.filterwarnings("ignore")
 
-# 默认 R 数量
-DEFAULT_REQUEST_NUMBER = 5
-
 # 参数定义
 add_RL = 1 
 combine_insertion_and_removal_operators = 1
@@ -27,32 +24,6 @@ if combine_insertion_and_removal_operators == 1:
     parallel_number = list(range(0,2))
 else:
     parallel_number = list(range(0, 3))
-
-def select_request_number():
-    """
-    交互式选择 R 值
-    """
-    print("\n" + "="*50)
-    print(" 选择请求规模 R ".center(50, "="))
-    print("="*50)
-    print("  [5]   默认")
-    print("  [10]  中等")
-    print("  [20]  中等偏大")
-    print("  [30]  较大")
-    print("  [50]  大")
-    print("  [100] 超大")
-    print("="*50)
-    while True:
-        choice = input(f"请输入 R 值 (回车默认 {DEFAULT_REQUEST_NUMBER}): ").strip()
-        if choice == "":
-            return DEFAULT_REQUEST_NUMBER
-        try:
-            r_val = int(choice)
-            if r_val in [5, 10, 20, 30, 50, 100]:
-                return r_val
-        except ValueError:
-            pass
-        print("输入无效，请重试。")
 
 def select_distribution_mode():
     """
@@ -85,7 +56,7 @@ def select_distribution_mode():
             return mapping[choice]
         print("Invalid selection. Try again.")
 
-def run_generator(dist_name, request_number):
+def run_generator(dist_name):
     """
     调用生成器脚本覆盖旧数据
     """
@@ -101,8 +72,7 @@ def run_generator(dist_name, request_number):
         "python", generator_script,
         "--dist_name", dist_name,
         "--target_folder", LEGACY_FOLDER_NAME,
-        "--total_files", "1000",
-        "--request_numbers", str(request_number)
+        "--total_files", "1000"
     ]
     
     try:
@@ -116,10 +86,9 @@ def run_generator(dist_name, request_number):
 def main():
     # 1. 交互式选择
     dist_name = select_distribution_mode()
-    request_number = select_request_number()
     
     # 2. 生成数据 (鸠占鹊巢)
-    run_generator(dist_name, request_number)
+    run_generator(dist_name)
     
     # 3. 启动旧系统
     print("\n>>> [Master] Phase 2: Starting Legacy Simulation (ALNS + RL)...")
@@ -135,7 +104,7 @@ def main():
         # 注意：这里不传递 dist_name，因为 ALNS/RL 会去读已经被我们覆盖掉的默认路径
         with concurrent.futures.ThreadPoolExecutor() as executor:
             print(f"   Launching threads for approaches: {parallel_number}")
-            futures = {executor.submit(Dynamic_ALNS_RL34959.main, approach, request_number): approach for approach in parallel_number}
+            futures = {executor.submit(Dynamic_ALNS_RL34959.main, approach): approach for approach in parallel_number}
             
             for future in concurrent.futures.as_completed(futures):
                 try:
