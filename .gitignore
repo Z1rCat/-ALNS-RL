@@ -1,132 +1,40 @@
-# Python
+# ===========================
+# Python 通用忽略
+# ===========================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
+sdist/
+*.whl
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pipenv
-Pipfile.lock
-
-# PEP 582
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
+# ===========================
+# 虚拟环境
+# ===========================
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
+.env
+.venv
 codes/env/
 
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# IDE
+# ===========================
+# 编辑器 / IDE
+# ===========================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
+# ===========================
+# 操作系统
+# ===========================
 .DS_Store
 .DS_Store?
 ._*
@@ -135,94 +43,49 @@ dmypy.json
 ehthumbs.db
 Thumbs.db
 
-# Git backup
-.git_backup_*/
-
-# Large data files and results (uncomment if needed)
-# *.xlsx
-# *.xls
-# *.csv
-# results/
-# figures/
-
-# Temporary files
-*.tmp
-*.temp
 # ===========================
-# 1. Python 标准忽略文件
+# 测试 / 覆盖率 / 缓存
 # ===========================
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.ipynb_checkpoints/
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+.cache/
+htmlcov/
+.mypy_cache/
+.pyre/
 
 # ===========================
-# 2. 虚拟环境 (Virtual Env)
+# 运行日志与生成数据（可再现，不提交）
 # ===========================
-# 根据你的控制台路径 (A:\MYpython\34959_RL\codes\env)
-env/
-venv/
-codes/env/
-.env
-
-# ===========================
-# 3. 核心：忽略生成的海量数据
-# ===========================
-# 忽略整个存放生成数据的文件夹（包含空格的路径 Git 能识别）
+codes/logs/
+analysis_results/
 Uncertainties Dynamic planning under unexpected events/
 
-# 忽略临时分析结果
-analysis_results/
+# RL 汇总图/表（可由脚本重建）
+ALNS_Research_Documentation/figures_rl_logs/
+ALNS_Research_Documentation/rl_logs_aggregate.csv
 
-# 忽略 Python 运行时生成的图表或临时 Excel
-*.pdf
-*.png
-# 如果你不想上传任何生成的 Excel 结果，但想保留根目录的原始数据：
-# 规则：忽略所有 xlsx，但保留根目录下的（如果需要）
-# **/*.xlsx
-# !Intermodal_EGS_data_all.xlsx
+# 训练过程重文件
+Training/Logs/
+tensorboard_logs/
+34959.txt
+better_obj_record*.txt
+implementation_time.txt
+training_time.txt
+time_s.txt
 
-# 针对性忽略生成的动态拥堵数据
+# 论文/汇报导出物（可再生成）
+报告/
+
+# ===========================
+# 动态事件/结果表（默认不提交）
+# ===========================
 Intermodal_EGS_data_dynamic_congestion*.xlsx
 best_routes*.xlsx
 obj_record*.xlsx
 routes_match*.xlsx
 action_reward_table*.xlsx
 
-# ===========================
-# 4. 强化学习 & 运行时文件
-# ===========================
-# 训练模型保存的文件 (Stable Baselines3 通常存为 .zip)
-*.zip
-*.pth
-*.pt
-*.pkl
-
-# Tensorboard 日志
-Training/Logs/
-tensorboard_logs/
-
-# 运行时产生的停止信号文件
-34959.txt
-
-# 运行时产生的临时记录
-better_obj_record*.txt
-implementation_time.txt
-training_time.txt
-time_s.txt
-
-# ===========================
-# 5. IDE 配置文件 (可选)
-# ===========================
-.idea/
-.vscode/
-# 忽略旧的文件夹名
-Uncertainties Dynamic planning under unexpected events/
-
-# 忽略报错信息里出现的文件夹名 (新增)
-Uncertainties_Dynamic_Planning/
-
-# 忽略所有生成的 Excel 数据
+# Excel 数据（默认不提交）
 *.xlsx
-!Intermodal_EGS_data_all.xlsx  # (可选) 如果你想保留根目录的原始数据

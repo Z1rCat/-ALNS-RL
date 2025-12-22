@@ -1,6 +1,15 @@
 import numpy as np
-import skfuzzy as fuzz
-from skfuzzy import control as ctrl
+try:
+    import skfuzzy as fuzz
+    from skfuzzy import control as ctrl
+except ImportError:
+    class _Dummy:
+        def __getattr__(self, item):
+            def _noop(*args, **kwargs):
+                return None
+            return _noop
+    fuzz = _Dummy()
+    ctrl = _Dummy()
 import matplotlib.pyplot as plt
 
 def fuzzy_HP_all(Cost_preference, Time_preference, Delay_preference, Transshipment_preference, Emissions_preference, actual_Cost, actual_Time, actual_Delay, actual_Transshipment, actual_Emissions):

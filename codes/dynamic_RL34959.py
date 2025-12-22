@@ -8,7 +8,16 @@ import random
 import os
 import matplotlib.pyplot as plt
 from stable_baselines3 import DQN, PPO, A2C, DDPG, HER, SAC, TD3
-from line_profiler import LineProfiler
+try:
+    from line_profiler import LineProfiler
+except ImportError:
+    class LineProfiler:
+        def __call__(self, *args, **kwargs):
+            def wrapper(func):
+                return func
+            return wrapper
+        def print_stats(self):
+            pass
 from stable_baselines3.common.vec_env import VecFrameStack
 from stable_baselines3.common.evaluation import evaluate_policy
 import timeit
@@ -21,6 +30,7 @@ import pstats
 import io
 from pathlib import Path
 import rl_logging
+from collections import deque
 # from Intermodal_ALNS34959 import parallel_read_excel, parallel_save_excel
 # from torch.utils.tensorboard import SummaryWriter
 # writer = SummaryWriter(os.path.join('Training', 'Logs'))
@@ -60,11 +70,18 @@ def profile():
     return wrapper
 
 # ===== 日志工具 =====
+global_step = 0
+MIN_STEPS = 100
+MAX_STEPS = 20000
+SLIDING_WINDOW = 100
+TARGET_REWARD = 0.5
+recent_rewards = deque(maxlen=SLIDING_WINDOW)
+
 TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
     "table_number", "dynamic_t_begin", "duration_type",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "feasible", "source"
+    "action", "reward", "action_meaning", "feasible", "source"
 ]
 
 TRAIN_FIELDS = [
@@ -74,6 +91,19 @@ TRAIN_FIELDS = [
 
 def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source="RL"):
     try:
+        action_val = action if action is not None else row.get("action", "")
+        action_meaning = ""
+        try:
+            if action_val in [-10000000, -10000000.0, ""]:
+                action_meaning = ""
+            else:
+                a_int = int(action_val)
+                if "insert" in stage:
+                    action_meaning = "接受插入" if a_int == 0 else "拒绝插入"
+                else:
+                    action_meaning = "等待/保持" if a_int == 0 else "重新规划"
+        except Exception:
+            action_meaning = ""
         payload = {
             "ts": rl_logging.now_ts(),
             "phase": "implement" if implement == 1 else "train",
@@ -88,8 +118,9 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
             "severity": globals().get("severity_level", ""),
             "passed_terminals": row.get("passed_terminals", ""),
             "current_time": row.get("current_time", ""),
-            "action": action if action is not None else row.get("action", ""),
+            "action": action_val,
             "reward": reward if reward is not None else row.get("reward", ""),
+            "action_meaning": action_meaning,
             "feasible": feasible,
             "source": source
         }
@@ -112,6 +143,11 @@ def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_rewar
         rl_logging.append_row("rl_training.csv", TRAIN_FIELDS, payload)
     except Exception as e:
         print("log_training_row error", e)
+
+def next_step():
+    global global_step
+    global_step += 1
+    return global_step
 
 def save_plot_reward_list():
     if add_ALNS == 1:
@@ -231,6 +267,8 @@ def get_state(chosen_pair, table_number=-1, request_number_in_R=-1, duration_typ
         request_number_in_R = Intermodal_ALNS34959.request_number_in_R
         duration_type = Intermodal_ALNS34959.duration_type
         dynamic_t_begin = Intermodal_ALNS34959.dynamic_t_begin
+    # 防止索引越界：文件从 0 到 999
+    table_number = max(0, min(table_number, 999))
 
     if add_event_types == 1:
         data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent" + "_event_types" + "/R" + str(
@@ -319,7 +357,7 @@ def get_state(chosen_pair, table_number=-1, request_number_in_R=-1, duration_typ
         state_list = [state_list[0], severity_level, event_type]
     else:
         state_list = [state_list[0], severity_level]
-    state = np.array([state_list]).astype(float)
+    state = np.array(state_list, dtype=float)
     return state
 
 def check_RL_ALNS_iteraction_bug():
@@ -344,6 +382,14 @@ class coordinationEnv(Env):
     #@profile()
     def step(self, action):
         global state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, iteration_times, RL_drop_finish, episode_length, next_state_reward_time_step, next_state_penalty_time_step, time_s, all_average_reward, all_deviation, timestamps
+        # 将动作转为标量
+        try:
+            if isinstance(action, np.ndarray):
+                action = int(action.squeeze())
+            else:
+                action = int(action)
+        except Exception:
+            pass
 
         # truck picks up containers at A, then go to B to transfer to barge, plan transshipment time is 30
         # between A and B, 300 km, truck speed 75 km/h, so 4 hour go to terminal B, truck on route 5/h
@@ -365,10 +411,10 @@ class coordinationEnv(Env):
         # For COSCO's transportation, Rotterdam is the best choice and the profit is 2. For Contargo's transportation, Antwerp is the best choice
         # if both COSCO and Contargo choose unilateral action, i.e., COSCO choose Rotterdam and Contargo choose Antwerp, then reward is 0.
         # Only when they choose the same terminal, reward is positive.
-        # if self.state[0][0] >= 10 or self.state[0][0] <= 14:
+        # if self.state[0] >= 10 or self.state[0] <= 14:
             # congestion_duration = random.choice(range(0,4))
             # congestion_duration = np.random.uniform(low=1, high=5)
-        # if self.state[0][1]
+        # if self.state[1]
         if add_ALNS == 1:
             if time_s >= total_timesteps2:
                 wait_training_finish_last_iteration = 1
@@ -406,6 +452,9 @@ class coordinationEnv(Env):
                             if type(reward).__module__ == 'numpy':
                                 reward = reward[0,0]
                             all_rewards_list.append(reward)
+                            recent_rewards.append(reward)
+                            step_id = next_step()
+                            log_training_row("implement" if implement == 1 else "train", step_idx=step_id, reward=reward)
                             try:
                                 row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
                             except:
@@ -468,7 +517,7 @@ class coordinationEnv(Env):
                     locals()['congestion_duration' + str(int(terminal))] = np.random.normal(eval('congestion_'+str(int(terminal)) + '_mean'),1)
                 else:
                     locals()['congestion_duration' + str(int(terminal))] = np.random.normal(
-                        self.state[0][11]%24/5, 1)
+                        self.state[11]%24/5, 1)
             # congestion_duration1 = np.random.normal(congestion_2_mean,1)
             # congestion_duration2 = np.random.normal(congestion_3_mean,1)
             # congestion_duration0 = np.random.gamma(congestion_1_mean, 1)
@@ -503,22 +552,22 @@ class coordinationEnv(Env):
             if non_stationary == 0 or (time_s  <= iteration_numbers_unit * iteration_multiply / 2):
 
                 for i in range(1, 11):
-                    terminal = self.state[0][i]
+                    terminal = self.state[i]
                     if terminal == -1:
                         break
                     # travel_time = 3
                     locals()['latter_terminal_influenced_time' + str(int(terminal))] = max(0, eval(
-                        'congestion_duration' + str(int(self.state[0][i]))))
+                        'congestion_duration' + str(int(self.state[i]))))
 
                     for j in range(1,i):
-                        locals()['latter_terminal_influenced_time' + str(int(terminal))] = eval('latter_terminal_influenced_time' + str(int(terminal))) - eval('congestion_duration' + str(int(self.state[0][j]))) - eval('travel_time_' + mode)[int(self.state[0][j]), int(self.state[0][j+1])]
+                        locals()['latter_terminal_influenced_time' + str(int(terminal))] = eval('latter_terminal_influenced_time' + str(int(terminal))) - eval('congestion_duration' + str(int(self.state[j]))) - eval('travel_time_' + mode)[int(self.state[j]), int(self.state[j+1])]
                     locals()['latter_terminal_influenced_time' + str(int(terminal))] = max(0, eval('latter_terminal_influenced_time' + str(int(terminal))))
 
                     influenced_time = influenced_time + eval('latter_terminal_influenced_time' +  str(int(terminal)))
             else:
                 # influenced_time = np.random.normal(2,1)
                 influenced_time = random.choice(range(0, 8))
-            # if self.state[0][11] >= 18 or self.state[0][11] <= 8:
+            # if self.state[11] >= 18 or self.state[11] <= 8:
             #     if action == 0:
             #         self.state = 2
             #     else:
@@ -533,7 +582,7 @@ class coordinationEnv(Env):
             else:
                 reward = -2
 
-            if (action == 0 and (self.state[0][0] >= influenced_time)) or (action == 1 and (self.state[0][0] < influenced_time)):
+            if (action == 0 and (self.state[0] >= influenced_time)) or (action == 1 and (self.state[0] < influenced_time)):
                 next_state_reward_time_step = time_s + 1
             else:
                 next_state_penalty_time_step = time_s + 1
@@ -583,14 +632,14 @@ class coordinationEnv(Env):
         #generate a random terminal sequence
         if add_ALNS == 0:
             new_seq = get_new_seq()
-            self.state = np.array([[random.choice(range(0, 4)),new_seq[0],new_seq[1],new_seq[2], new_seq[3],new_seq[4],new_seq[5],new_seq[6],new_seq[7],new_seq[8], new_seq[9], random.choice(range(0, 24))]]).astype(float)
+            self.state = np.array([random.choice(range(0, 4)),new_seq[0],new_seq[1],new_seq[2], new_seq[3],new_seq[4],new_seq[5],new_seq[6],new_seq[7],new_seq[8], new_seq[9], random.choice(range(0, 24))]).astype(float)
         else:
             if evaluate == 1:
                 if number_of_state_key >= len(state_keys):
                     number_of_state_key = 0
 
                 # chosen_pair = state_action_reward_collect[list_of_collect_index[number_of_collect]]
-                self.state = np.array([tuple(state_keys[number_of_state_key])])
+                self.state = np.array(state_keys[number_of_state_key], dtype=float)
 
             else:
                 #this is used for both learning and implement
@@ -797,7 +846,7 @@ def main(algorithm2, mode2):
                 break
             model.learn(total_timesteps=total_timesteps2)
             training_time = timeit.default_timer() - start_time
-            log_training_row("train", step_idx=len(all_rewards_list), training_time=training_time)
+            log_training_row("train", step_idx=global_step, training_time=training_time)
             try:
                 with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
                         episode_length) + "_delay_reward_time_dependent" + str(
@@ -819,7 +868,7 @@ def main(algorithm2, mode2):
             for collect_index in list_of_collect_index:
                 chosen_pair = state_action_reward_collect[collect_index]
                 state = get_state(chosen_pair,table_number_collect[collect_index][0],table_number_collect[collect_index][1],table_number_collect[collect_index][2],table_number_collect[collect_index][3])
-                state_key = tuple(state[0])
+                state_key = tuple(state)
                 if state_key not in state_action_reward_collect_for_evaluate.keys():
                     state_action_reward_collect_for_evaluate[state_key] = {}
                 state_action_reward_collect_for_evaluate[state_key][chosen_pair[7]] = chosen_pair[8]
@@ -837,33 +886,15 @@ def main(algorithm2, mode2):
                 for _ in range(1):
                     average_reward, deviation = evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
                     print('congestion_terminal_mean_list', congestion_terminal_mean_list, average_reward, deviation)
-            log_training_row("eval", step_idx=len(all_rewards_list), avg_reward=average_reward, std_reward=deviation)
+            log_training_row("eval", step_idx=global_step, avg_reward=average_reward, std_reward=deviation)
             print('evaluation', 'average_reward', average_reward, 'deviation', deviation)# sys.exit('stop_it_in_testing')
-            if average_reward >= 0.9:
-                sucess_times += 1
-                if sucess_times >= 5:
-                    implement = 1
-                    try:
-                        with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                                episode_length) + "_delay_reward_time_dependent" + str(
-                            time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-                            iteration_multiply) + "multiply" + 'time_s.txt', 'w') as f:
-                            f.write(f"{str(time_s)}\n")
-                    except:
-                        pass
+            # 收敛判断：步数+滑窗均值
+            if len(recent_rewards) > 0:
+                sliding_avg = np.mean(recent_rewards)
             else:
-                sucess_times = 0
-            if time_s >= 1:
-
+                sliding_avg = -999
+            if (global_step >= MIN_STEPS and sliding_avg >= TARGET_REWARD) or (global_step >= MAX_STEPS):
                 implement = 1
-                try:
-                    with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                            episode_length) + "_delay_reward_time_dependent" + str(
-                        time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-                        iteration_multiply) + "multiply" + 'time_s_reach_max.txt', 'w') as f:
-                        f.write(f"{str(time_s)}\n")
-                except:
-                    pass
 
             wait_training_finish_last_iteration = 0
             evaluate = 0
@@ -918,13 +949,17 @@ def main(algorithm2, mode2):
                 # while True:
                 implementation_start_time = timeit.default_timer()
                 action, _states = model.predict(obs)
+                try:
+                    action_scalar = int(np.array(action).squeeze())
+                except Exception:
+                    action_scalar = action
                 # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
                 #     print('wrong...')
                 # #check_RL_ALNS_iteraction_bug()
                 # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                 #     print('gesa')
                 implementation_time = timeit.default_timer() - implementation_start_time
-                log_training_row("implement", step_idx=len(all_rewards_list), implementation_time=implementation_time)
+                log_training_row("implement", step_idx=global_step, implementation_time=implementation_time)
                 try:
                     # Append one line to a file that does not exist
                     implementation_time_path = Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
@@ -941,7 +976,7 @@ def main(algorithm2, mode2):
                 # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                 #     print('gesa')
                 #check_RL_ALNS_iteraction_bug()
-                send_action(action[0])
+                send_action(action_scalar)
                 #check_RL_ALNS_iteraction_bug()
                 # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                 #     print('gesa')
@@ -954,7 +989,7 @@ def main(algorithm2, mode2):
                     # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                     #     print('gesa')
                     if Intermodal_ALNS34959.state_reward_pairs.iloc[0]['action'] == -10000000:
-                        send_action(action[0])
+                        send_action(action_scalar)
                     if ALNS_got_action_in_implementation == 1 or len(Intermodal_ALNS34959.state_reward_pairs) == 0:#danger donot know why in rare case Intermodal_ALNS34959.state_reward_pairs is empty when alns got action is 0, but i think i can let it go to next iteration
                         # clear all data in pairs
                         if os.path.exists('34959.txt'):

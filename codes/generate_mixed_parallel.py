@@ -16,6 +16,16 @@ except ImportError:
 
 # 忽略 FutureWarning
 warnings.filterwarnings("ignore")
+if os.name == "nt":
+    try:
+        os.system("chcp 65001 >nul")
+    except Exception:
+        pass
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 # ================= CONFIGURATION =================
 # 自动获取项目根目录 (假设脚本在 codes/ 下)
@@ -27,6 +37,24 @@ FIGURES_DIR = os.path.join(ROOT_DIR, "Figures")
 # 实验映射 (用于查找 Best Routes 以确定事件发生时间)
 EXP_NUMBERS = {5: 12793, 10: 12792, 20: 12794, 30: 12816, 50: 12817, 100: 12818}
 
+DIST_DISPLAY = {
+    'mixed_v1': '?? v1 (25% ?? + 75% ??)',
+    'stress_test': '???? (100% ?????120)',
+    'chaos_uniform': '???? (100% ?? 10-100)',
+    'curriculum_easy': '???? (50% ?? + 50% ??)',
+    'baseline_legacy': '???? (????????20)',
+    'normal_mix_8_80_50_50': '?? 50/50 (??8 / 80)',
+    'lognormal_mix_8_80_50_50': '???? 50/50 (??8 / 80)',
+    'normal_mix_8_80_75_25': '?? 75/25 (??8 / 80)',
+    'lognormal_mix_8_80_75_25': '???? 75/25 (??8 / 80)',
+    'normal_mix_80_8_25_75': '?? 25/75 (??80 -> 8)',
+    'normal_mix_80_8_50_50': '?? 50/50 (??80 -> 8)',
+    'normal_mix_80_8_75_25': '?? 75/25 (??80 -> 8)',
+    'lognormal_mix_80_8_25_75': '???? 25/75 (??80 -> 8)',
+    'lognormal_mix_80_8_50_50': '???? 50/50 (??80 -> 8)',
+    'lognormal_mix_9_30_3_30_30_40': '???? 30/30/40 (??9 / 30 / 3)'
+}
+
 # 子进程全局缓存
 GLOBAL_DATA = {}
 
@@ -34,7 +62,8 @@ def get_distribution_matrix(dist_name, total_files, max_events):
     """
     【兵工厂核心】根据策略生成随机数矩阵 [Files, Events]
     """
-    print(f"   -> Assembling matrix for strategy: [{dist_name}]")
+    dist_label = DIST_DISPLAY.get(dist_name, "????")
+    print(f"   -> ????????: {dist_label}")
     
     if dist_name == "mixed_v1":
         # 混合 V1: 25% 高压 (RL触发区), 75% 混沌
@@ -67,9 +96,74 @@ def get_distribution_matrix(dist_name, total_files, max_events):
     elif dist_name == "baseline_legacy":
         # 模仿原始数据分布 (LogNormal)
         matrix = np.random.lognormal(3, 0.5, (total_files, max_events))
+    elif dist_name == "normal_mix_8_80_50_50":
+        n1 = int(total_files * 0.5)
+        n2 = total_files - n1
+        mat_1 = np.random.normal(8, 2, (n1, max_events))
+        mat_2 = np.random.normal(80, 20, (n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "lognormal_mix_8_80_50_50":
+        n1 = int(total_files * 0.5)
+        n2 = total_files - n1
+        mat_1 = np.random.lognormal(mean=2, sigma=0.5, size=(n1, max_events))
+        mat_2 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "normal_mix_8_80_75_25":
+        n1 = int(total_files * 0.75)
+        n2 = total_files - n1
+        mat_1 = np.random.normal(8, 2, (n1, max_events))
+        mat_2 = np.random.normal(80, 20, (n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "lognormal_mix_8_80_75_25":
+        n1 = int(total_files * 0.75)
+        n2 = total_files - n1
+        mat_1 = np.random.lognormal(mean=2, sigma=0.5, size=(n1, max_events))
+        mat_2 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "normal_mix_80_8_25_75":
+        n1 = int(total_files * 0.25)
+        n2 = total_files - n1
+        mat_1 = np.random.normal(80, 20, (n1, max_events))
+        mat_2 = np.random.normal(8, 2, (n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "normal_mix_80_8_50_50":
+        n1 = int(total_files * 0.5)
+        n2 = total_files - n1
+        mat_1 = np.random.normal(80, 20, (n1, max_events))
+        mat_2 = np.random.normal(8, 2, (n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "normal_mix_80_8_75_25":
+        n1 = int(total_files * 0.75)
+        n2 = total_files - n1
+        mat_1 = np.random.normal(80, 20, (n1, max_events))
+        mat_2 = np.random.normal(8, 2, (n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "lognormal_mix_80_8_25_75":
+        n1 = int(total_files * 0.25)
+        n2 = total_files - n1
+        mat_1 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n1, max_events))
+        mat_2 = np.random.lognormal(mean=2, sigma=0.5, size=(n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "lognormal_mix_80_8_50_50":
+        n1 = int(total_files * 0.5)
+        n2 = total_files - n1
+        mat_1 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n1, max_events))
+        mat_2 = np.random.lognormal(mean=2, sigma=0.5, size=(n2, max_events))
+        matrix = np.vstack([mat_1, mat_2])
+    elif dist_name == "lognormal_mix_9_30_3_30_30_40":
+        n1 = int(total_files * 0.3)
+        n2 = int(total_files * 0.3)
+        n3 = total_files - n1 - n2
+        mu_9 = np.log(9) - 0.125
+        mu_30 = np.log(30) - 0.125
+        mu_3 = np.log(3) - 0.125
+        mat_1 = np.random.lognormal(mean=mu_9, sigma=0.5, size=(n1, max_events))
+        mat_2 = np.random.lognormal(mean=mu_30, sigma=0.5, size=(n2, max_events))
+        mat_3 = np.random.lognormal(mean=mu_3, sigma=0.5, size=(n3, max_events))
+        matrix = np.vstack([mat_1, mat_2, mat_3])
         
     else:
-        print(f"Warning: Unknown distribution '{dist_name}', using baseline.")
+        print("?????????????????")
         matrix = np.random.lognormal(3, 0.5, (total_files, max_events))
 
     # 截断: 保证最小 Duration 为 1 分钟，防止负数
@@ -122,7 +216,7 @@ def init_worker(base_data_path, exp_mapping, figures_dir):
                 GLOBAL_DATA['triggers'][r] = None
                 
     except Exception as e:
-        print(f"[Worker Error] Init failed: {e}")
+        print(f"?????????{e}")
 
 def generate_single_file(args):
     """写入单个 Excel"""
@@ -208,17 +302,18 @@ def main():
     try:
         target_rs = [int(x) for x in args.request_numbers.split(",") if x.strip()]
     except ValueError:
-        print(f"[Error] 无效的 --request_numbers 参数: {args.request_numbers}")
+        print(f"?? 无效的 --request_numbers 参数: {args.request_numbers}")
         sys.exit(1)
     target_rs = [r for r in target_rs if r in EXP_NUMBERS]
     if not target_rs:
-        print("[Error] --request_numbers 为空或不在预设列表 {5,10,20,30,50,100} 中")
+        print("?? --request_numbers 为空或不在预设列表 {5,10,20,30,50,100} 中")
         sys.exit(1)
 
-    print(f"=== Generator Launching: {args.dist_name} ===")
-    print(f"   Target: .../{os.path.basename(args.target_folder)}")
-    print(f"   Files per R: {args.total_files}")
-    print(f"   Workers: {args.workers}")
+    dist_label = DIST_DISPLAY.get(args.dist_name, "????")
+    print(f"=== ?????: {dist_label} ===")
+    print(f"   ????: .../{os.path.basename(args.target_folder)}")
+    print(f"   ?? R ???: {args.total_files}")
+    print(f"   ????: {args.workers}")
     print(f"   R 集合: {target_rs}")
 
     start_all = time.time()
@@ -259,11 +354,11 @@ def main():
                 for _ in as_completed(futures):
                     done += 1
                     if done % 100 == 0:
-                        sys.stdout.write(f"\r   Progress: {done}/{len(futures)}")
+                        sys.stdout.write(f"\r   ??: {done}/{len(futures)}")
                         sys.stdout.flush()
                 print("")
                 
-    print(f"\n=== All Done in {time.time() - start_all:.2f}s ===")
+    print(f"\n=== ??????? {time.time() - start_all:.2f} ? ===")
 
 if __name__ == "__main__":
     main()

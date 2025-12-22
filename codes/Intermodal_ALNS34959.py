@@ -23,9 +23,38 @@ from collections import defaultdict
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
 import os
 import wrapt
-from line_profiler import LineProfiler
-from numba import jit
+try:
+    from line_profiler import LineProfiler
+except ImportError:
+    class LineProfiler:
+        def __call__(self, *args, **kwargs):
+            def wrapper(func):
+                return func
+            return wrapper
+        def print_stats(self):
+            pass
+try:
+    from numba import jit
+except ImportError:
+    def jit(*args, **kwargs):
+        def wrapper(func):
+            return func
+        return wrapper
 import os.path
+
+def _index_int(value):
+    if pd.isna(value):
+        return value
+    try:
+        return int(value)
+    except Exception:
+        return value
+
+def _index_int_list(values):
+    try:
+        return [_index_int(v) for v in values]
+    except Exception:
+        return values
 
 # kernprof -l Intermodal_ALNS_new_operators_20201005.py
 # python -m line_profiler Intermodal_ALNS_new_operators_20201005.py.lprof
@@ -34,10 +63,37 @@ import os.path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import pickle
 import hashlib
-import orjson
+try:
+    import orjson
+except ImportError:
+    import json
+    class _OrjsonFallback:
+        def dumps(self, obj, *args, **kwargs):
+            return json.dumps(obj).encode()
+        def loads(self, b, *args, **kwargs):
+            if isinstance(b, bytes):
+                b = b.decode()
+            return json.loads(b)
+    orjson = _OrjsonFallback()
 import json
-import skfuzzy as fuzz
-from skfuzzy import control as ctrl
+try:
+    import skfuzzy as fuzz
+    from skfuzzy import control as ctrl
+    _fuzzy_available = True
+except ImportError:
+    _fuzzy_available = False
+    class _DummyFuzz:
+        def __getattr__(self, item):
+            def _noop(*args, **kwargs):
+                return None
+            return _noop
+    fuzz = _DummyFuzz()
+    class _DummyCtrl:
+        def __getattr__(self, item):
+            def _noop(*args, **kwargs):
+                return None
+            return _noop
+    ctrl = _DummyCtrl()
 import rl_logging
 
 # 日志字段定义（与 RL 侧保持一致）
@@ -45,11 +101,24 @@ TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
     "table_number", "dynamic_t_begin", "duration_type",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "feasible", "source"
+    "action", "reward", "action_meaning", "feasible", "source"
 ]
 
 def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source="ALNS"):
     try:
+        action_val = action if action is not None else row_dict.get("action", "")
+        action_meaning = ""
+        try:
+            if action_val in [-10000000, -10000000.0, ""]:
+                action_meaning = ""
+            else:
+                a_int = int(action_val)
+                if "insert" in stage:
+                    action_meaning = "接受插入" if a_int == 0 else "拒绝插入"
+                else:
+                    action_meaning = "等待/保持" if a_int == 0 else "重新规划"
+        except Exception:
+            action_meaning = ""
         payload = {
             "ts": rl_logging.now_ts(),
             "phase": "implement" if 'dynamic_RL34959' in globals() and getattr(dynamic_RL34959, 'implement', 0) == 1 else "train",
@@ -64,14 +133,33 @@ def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source=
             "severity": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "severity_level", ""),
             "passed_terminals": row_dict.get("passed_terminals", ""),
             "current_time": row_dict.get("current_time", ""),
-            "action": action if action is not None else row_dict.get("action", ""),
+            "action": action_val,
             "reward": reward if reward is not None else row_dict.get("reward", ""),
+            "action_meaning": action_meaning,
             "feasible": feasible,
             "source": source
         }
         rl_logging.append_row("rl_trace.csv", TRACE_FIELDS, payload)
     except Exception as e:
         print("log_rl_event error", e)
+
+def log_impl_reward(reward):
+    try:
+        step_id = ""
+        if hasattr(dynamic_RL34959, "next_step"):
+            step_id = dynamic_RL34959.next_step()
+        fields = getattr(dynamic_RL34959, "TRAIN_FIELDS", [
+            "ts", "phase", "step_idx", "reward", "avg_reward", "std_reward", "training_time", "implementation_time"
+        ])
+        payload = {
+            "ts": rl_logging.now_ts(),
+            "phase": "implement",
+            "step_idx": step_id,
+            "reward": reward
+        }
+        rl_logging.append_row("rl_training.csv", fields, payload)
+    except Exception as e:
+        print("log_impl_reward error", e)
 #may cause bug list:
 #1. request_flow_t is not updated when finding best solution by hash table
 import fuzzy_HP
@@ -9371,6 +9459,30 @@ def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward
                                       insertion_operator_insertion_action, insertion_operator_insertion_action_reward,
                                       insertion_operator_non_insertion_action,
                                       insertion_operator_non_insertion_action_reward, average_reward, std_reward]
+        try:
+            summary_fields = [
+                "ts", "reward_count", "average_reward", "std_reward",
+                "removal_action", "removal_action_reward",
+                "removal_wait_action", "removal_wait_action_reward",
+                "insertion_action", "insertion_action_reward",
+                "insertion_non_action", "insertion_non_action_reward"
+            ]
+            rl_logging.append_row("rl_summary.csv", summary_fields, {
+                "ts": rl_logging.now_ts(),
+                "reward_count": len(reward_list_in_implementation),
+                "average_reward": average_reward,
+                "std_reward": std_reward,
+                "removal_action": removal_operator_removal_action,
+                "removal_action_reward": removal_operator_removal_action_reward,
+                "removal_wait_action": removal_operator_waiting_action,
+                "removal_wait_action_reward": removal_operator_waiting_action_reward,
+                "insertion_action": insertion_operator_insertion_action,
+                "insertion_action_reward": insertion_operator_insertion_action_reward,
+                "insertion_non_action": insertion_operator_non_insertion_action,
+                "insertion_non_action_reward": insertion_operator_non_insertion_action_reward
+            })
+        except Exception as e:
+            print("log summary error", e)
         
         # === [关键修复] 安全构建路径 ===
         import os
@@ -9588,7 +9700,7 @@ def prepare_for_dynamic():
                 # else:
                 duration = eval(R_change_dynamic_travel_time['duration'][index])
                 if R_change_dynamic_travel_time['location_type'][index] == 'link':
-                    congestion_link = eval(R_change_dynamic_travel_time['location'][index])
+                    congestion_link = _index_int_list(eval(R_change_dynamic_travel_time['location'][index]))
                     congestion_links.append(congestion_link)
 
                     # for k in D.keys():
@@ -9598,7 +9710,7 @@ def prepare_for_dynamic():
 
                 else:
                     # congestion in node, remove current and future plans that use this node
-                    congestion_node = R_change_dynamic_travel_time['location'][index]
+                    congestion_node = _index_int(R_change_dynamic_travel_time['location'][index])
                     congestion_nodes.append(congestion_node)
                     congestion_nodes_at_begining[congestion_node] = duration
                     congestion_link = -1
@@ -9610,7 +9722,7 @@ def prepare_for_dynamic():
                 for node in remove_node_in_congestion_list:
                     del congestion_nodes_at_begining[node]
                 global influenced_mode_by_current_event
-                influenced_mode_by_current_event = R_change_dynamic_travel_time['mode'][index]
+                influenced_mode_by_current_event = _index_int(R_change_dynamic_travel_time['mode'][index])
                 for k in routes.keys():
                     if len(routes[k][0]) <= 2:
                         continue
@@ -9892,17 +10004,18 @@ def prepare_for_dynamic():
                     influenced_requests_lists_different_uncertainties[uncertainty_index] = []
             elif R_change_dynamic_travel_time['type'][index] == 'delay':
                 #delay
-                D[R_change_dynamic_travel_time['vehicle'][index]][eval(R_change_dynamic_travel_time['location'][index])[0],
-                     eval(R_change_dynamic_travel_time['location'][index])[1]] = 100000000000
+                delay_vehicle = _index_int(R_change_dynamic_travel_time['vehicle'][index])
+                delay_link = _index_int_list(eval(R_change_dynamic_travel_time['location'][index]))
+                D[delay_vehicle][delay_link[0], delay_link[1]] = 100000000000
             elif R_change_dynamic_travel_time['type'][index] == 'congestion_finish':
 
                 #check_repeat_r_in_R_pool(), check_T_k_record_and_R()
                 if R_change_dynamic_travel_time['location_type'][index] == 'link':
-                    congestion_link = eval(R_change_dynamic_travel_time['location'][index])
+                    congestion_link = _index_int_list(eval(R_change_dynamic_travel_time['location'][index]))
                     check_terminal = congestion_link[0]
                     congestion_links.remove(congestion_link)
                 else:
-                    congestion_node = R_change_dynamic_travel_time['location'][index]
+                    congestion_node = _index_int(R_change_dynamic_travel_time['location'][index])
                     check_terminal = congestion_node
                     congestion_nodes.remove(congestion_node)
                 duration = eval(R_change_dynamic_travel_time['duration'][index])
@@ -10019,6 +10132,7 @@ def prepare_for_dynamic():
                                     Dynamic_ALNS_RL34959.removal_action_list_in_implementation.append(action)
                                     Dynamic_ALNS_RL34959.removal_reward_list_in_implementation.append(reward)
                                     Dynamic_ALNS_RL34959.reward_list_in_implementation.append(reward)
+                                    log_impl_reward(reward)
                                     print('implementation times', len(Dynamic_ALNS_RL34959.reward_list_in_implementation))
                                     segment_length_in_RL_or_ALNS_implementation = 10
                                     if len(Dynamic_ALNS_RL34959.reward_list_in_implementation) % segment_length_in_RL_or_ALNS_implementation == 0:
@@ -10048,6 +10162,7 @@ def prepare_for_dynamic():
                                         Dynamic_ALNS_RL34959.insertion_action_list_in_implementation.append(action)
                                         Dynamic_ALNS_RL34959.insertion_reward_list_in_implementation.append(reward)
                                         Dynamic_ALNS_RL34959.reward_list_in_implementation.append(reward)
+                                        log_impl_reward(reward)
                                         print('implementation times', len(Dynamic_ALNS_RL34959.reward_list_in_implementation))
                                         segment_length_in_RL_or_ALNS_implementation = 10
                                         if len(Dynamic_ALNS_RL34959.reward_list_in_implementation) % segment_length_in_RL_or_ALNS_implementation == 0:
@@ -10262,6 +10377,10 @@ def insert_r_in_learning_or_implementation(index,check_terminal, new_row, r_numb
             # if dynamic_RL34959.implement == 1:
             #     print('remove it when run it in server')
         new_row['uncertainty_type'] = finish_or_begin
+        try:
+            log_rl_event(new_row.to_dict(), "begin_insertion", action=-10000000, source="ALNS")
+        except Exception as e:
+            print("log begin_insertion error", e)
     # new_row['action'] = -10000000
     # new_row['reward'] = -10000000
     # here I need to let the ALNS finds the good positions
@@ -10625,6 +10744,10 @@ def check_uncertainty_in_insertion_by_RL(implement_or_not, congestion_nodes_in_t
                         RL_insertion_implementation_store[(uncertainty_index, influenced_r)][k] = store_all(2, state_reward_pairs.loc[pair_index], action_insertion)
                     except:
                         print('RL_insertion_implementation_store[(uncertainty_index, influenced_r)][k] = store_all(2, state_reward_pairs.loc[pair_index], action_insertion)')
+                    try:
+                        log_rl_event(state_reward_pairs.loc[pair_index].to_dict(), "finish_insertion", action=action_insertion, reward=state_reward_pairs.loc[pair_index].get('reward', ''), source="ALNS")
+                    except Exception as e:
+                        print("log finish_insertion error", e)
                     if action_insertion == 1:
                         #it means the insertion should be removed
                         #then restore the route to the one that the request is only removed
@@ -13581,6 +13704,8 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
 
     three_eco_labels = 0
     fuzzy_constraints = 1
+    if not _fuzzy_available:
+        fuzzy_constraints = 0
     # fuzzy_probability is used to check which method is used in fuzzy preferences, if 1, then old method (before 20210320, which didn't use fuzzy rules & output and only use a membership function which created by myself), otherwise the new method.
     fuzzy_probability = 0
     if Demir == 1:
@@ -13675,10 +13800,11 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
                 # if ALNS_greedy_under_unknown_duration_assume_duration == 0 and add_RL == 0:
                 #     table_number = 999 - Dynamic_ALNS_RL34959.table_number#if waiting and RL = 0, then implement start from the end
                 # else:
-                table_number = Dynamic_ALNS_RL34959.table_number; add_event_types =  0 
+                table_number = Dynamic_ALNS_RL34959.table_number; add_event_types =  0
+                table_number = max(0, min(table_number, 999))
                 if add_event_types == 1:
                     data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-    request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                        request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
                 else:
                     data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
                         request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"

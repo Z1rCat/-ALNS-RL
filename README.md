@@ -1,231 +1,53 @@
-# ALNS-RL: 基于强化学习和自适应大邻域搜索的动态多式联运优化系统
+# 多式联运 ALNS+RL 项目（34959_RL）
 
-## 📖 项目简介
+## 项目概览
+本项目基于 Adaptive Large Neighborhood Search（ALNS）结合强化学习（RL），用于处理动态多式联运场景中的突发拥堵与不确定事件。`ALNS` 负责路径搜索与仿真，`RL` 负责在“规划/插入”两个关键阶段做出二元决策，从而提升实时调度的可行性与稳定性。
 
-本项目实现了一个创新的**ALNS-RL混合算法**，用于解决动态多式联运物流网络优化问题。系统结合了**自适应大邻域搜索(ALNS)**元启发式算法和**强化学习(RL)**智能体，能够在不确定环境下进行实时的运输路径优化和调度决策。
-
-### 🎯 研究目标
-- 处理动态需求变化和不确定事件
-- 优化多式联运网络中的路径选择和资源配置
-- 通过强化学习实现实时决策和自适应调整
-- 评估环境影响和运输成本
-
-## 🏗️ 系统架构
+## 目录结构与说明
 
 ```
-ALNS-RL动态优化系统
-├── 强化学习层 (dynamic_RL34959.py)
-│   ├── DQN智能体：实时决策制定
-│   ├── PPO智能体：策略优化
-│   └── 环境建模：Gym接口
-├── 优化算法层 (Intermodal_ALNS34959.py)
-│   ├── ALNS核心：大规模优化求解
-│   ├── 邻域操作：破坏与重建算子
-│   └── 并行计算：加速求解过程
-├── 集成控制层 (Dynamic_ALNS_RL34959.py)
-│   ├── 算法协调：ALNS与RL协同
-│   ├── 动态事件处理：不确定事件响应
-│   └── 解空间管理：最优解维护
-├── 不确定性处理 (fuzzy_HP.py)
-│   ├── 模糊逻辑：不确定性建模
-│   └── 隶属度函数：事件严重程度评估
-└── 环境评估 (emission_models.py)
-    ├── 碳排放计算：运输环境影响
-    └── 可持续性指标：绿色物流评估
-```
-3. 参数配置
-若需修改实验设置（如订单规模 R 或不确定性分布），目前需要直接修改代码文件：
-修改 R 值: 打开 codes/Intermodal_ALNS34959.py，修改全局变量 request_number_in_R。
-修改分布: 需使用数据生成脚本重新生成 Excel 文件并替换目标文件夹。
-
-
-📈 实验结果
-系统在 Uncertainties... 目录下输出实验日志：
-obj_record*.xlsx: 记录每一步的目标函数值、成本、排放等指标。
-best_routes*.xlsx: 记录找到的最优路径方案。
-## 🔧 核心算法
-
-### ALNS算法特性
-- **自适应机制**：动态调整算子选择概率
-- **多邻域搜索**：破坏与重建操作组合
-- **并行优化**：多进程加速求解
-- **解空间管理**：哈希表避免重复计算
-
-### 强化学习集成
-- **状态空间**：网络状态、车辆位置、需求信息
-- **动作空间**：路径选择、调度决策、资源分配
-- **奖励函数**：成本最小化 + 服务质量最大化
-- **训练策略**：经验回放 + 目标网络更新
-
-### 动态事件处理
-- **需求变化**：新订单插入、订单取消
-- **运输延误**：车辆故障、交通拥堵
-- **网络中断**：节点失效、弧段不可用
-- **容量限制**：节点拥堵、运力约束
-
-## 📋 环境要求
-
-### 系统环境
-- **Python**: 3.9.19
-- **操作系统**: Windows 10/11
-- **GPU**: 支持CUDA的NVIDIA显卡（推荐）
-
-### Conda环境配置
-
-```bash
-# 创建新的conda环境
-conda create -n alns-rl python=3.9.19
-conda activate alns-rl
-
-# 安装PyTorch (CUDA版本)
-pip install torch==2.3.1+cu121 torchvision==0.18.1+cu121 torchaudio==2.3.1+cu121 -f https://download.pytorch.org/whl/torch_stable.html
-
-# 安装其他依赖
-pip install pandas numpy matplotlib networkx openpyxl scikit-fuzzy stable-baselines3 gym gymnasium
+.
+├── codes/                         # 核心代码（ALNS、RL、协调器、脚本）
+├── codes/logs/run_*               # 实验运行生成的日志/图片（可再现）
+├── ALNS_Research_Documentation/   # 文档与可视化资源
+│   ├── rl_alns_run_report.md      # 本次组会汇报的 Markdown 报告
+│   ├── rl_logs_aggregate.csv      # 跨运行的聚合统计表
+│   ├── collect_rl_logs.py         # 采集日志并生成汇总的脚本
+│   ├── plot_rl_logs_summary.py    # 读取聚合表并绘图的脚本
+│   └── figures_rl_logs/           # 跨运行对比图（热力图 + 散点图）
+└── Uncertainties Dynamic planning under unexpected events/
+                                   # 由数据生成脚本产出的分布样本（忽略/不提交）
 ```
 
-### 完整依赖清单
-详见 `codes/environment.yml` 文件，包含所有必需的Python包及版本号。
+## 运行与复现建议
 
-## 🚀 快速开始
-
-### 1. 克隆项目
-```bash
-git clone https://github.com/Z1rCat/-ALNS-RL.git
-cd -ALNS-RL
+### 1. 数据生成
+```powershell
+& A:/MYpython/34959_RL/codes/env/python.exe a:/MYpython/34959_RL/codes/Dynamic_master34959.py
 ```
+该脚本会生成数据、调用 ALNS+RL 双线程，并输出 `codes/logs/run_*` 文件夹，记录详尽的 `rl_training.csv`、`rl_trace.csv` 与图片。
 
-### 2. 环境配置
-```bash
-# 使用项目提供的conda环境文件
-conda env create -f codes/environment.yml
-conda activate pytorch
+### 2. 结果整理与绘图
+```powershell
+& A:/MYpython/34959_RL/codes/env/python.exe a:/MYpython/34959_RL/ALNS_Research_Documentation/collect_rl_logs.py
+& A:/MYpython/34959_RL/codes/env/python.exe a:/MYpython/34959_RL/ALNS_Research_Documentation/plot_rl_logs_summary.py
 ```
+第一步汇总所有 `run_*` 日志到 `rl_logs_aggregate.csv`；第二步读取聚合表绘制：
+- `figures_rl_logs/overall_implement_avg_reward_heatmap.png`
+- `figures_rl_logs/overall_reward_vs_action_ratio.png`
 
-### 3. 数据准备
-将数据文件放置在项目根目录：
-- `Intermodal_EGS_data_all.xlsx`: 主要数据集
-- `Intermodal_EGS_data_all_heterogeneous_6.xlsx`: 异构场景数据
-- 其他Excel文件：不同实验场景的数据
+### 3. 快速查阅报告
+`ALNS_Research_Documentation/rl_alns_run_report.md` 包含：
+- 系统架构概览
+- RL 调用流程与 reward 释义
+- 不同分布/R 下的热图与动作分析
+- 典型弱/强/中性能例证与图片
 
-### 4. 运行实验
+## 其他说明
 
-#### 基础ALNS优化
-```python
-python codes/Intermodal_ALNS34959.py
-```
+- 强化学习训练数据在 `codes/logs/run_*/rl_training.csv`，其中 `phase=implement` 的 `reward` 即用于实施阶段直方图与正确率评估。
+- `codes/logs/run_*/rl_trace.csv` 记录了每一次 `begin_removal` / `begin_insertion` 的动作、reward，以及阶段标记，便于追踪 RL 在哪个阶段被调用。
+- `codes/logs/run_*/rl_summary.csv` 汇总了 `average_reward`、`removal`/`insertion` 动作数，常用于跨运行对比。
 
-#### ALNS-RL混合优化
-```python
-python codes/Dynamic_ALNS_RL34959.py
-```
-
-#### 强化学习训练
-```python
-python codes/dynamic_RL34959.py
-```
-
-## 📊 实验配置
-
-### 参数设置
-```python
-# ALNS参数
-max_iterations = 1000
-reaction_factor = 0.8
-destruction_size = [0.1, 0.3]  # 破坏比例范围
-
-# RL参数
-learning_rate = 0.001
-gamma = 0.99
-epsilon_start = 1.0
-epsilon_end = 0.01
-epsilon_decay = 0.995
-
-# 动态参数
-time_horizon = 24  # 小时
-update_frequency = 1  # 小时
-uncertainty_level = 0.3  # 不确定性程度
-```
-
-### 场景设置
-- **确定性场景**: 已知所有需求和运输时间
-- **随机需求场景**: 需求按概率分布生成
-- **混合事件场景**: 多种不确定事件组合
-- **时间依赖场景**: 事件概率随时间变化
-
-## 📁 项目结构
-
-```
-34959_RL/
-├── codes/                          # 核心代码目录
-│   ├── dynamic_RL34959.py          # 强化学习主模块
-│   ├── Intermodal_ALNS34959.py     # ALNS算法核心
-│   ├── Dynamic_ALNS_RL34959.py     # ALNS-RL集成模块
-│   ├── fuzzy_HP.py                 # 模糊逻辑处理
-│   ├── emission_models.py          # 环境影响模型
-│   └── environment.yml             # Conda环境配置
-├── Uncertainties Dynamic planning under unexpected events/  # 实验结果
-│   ├── Figures/                    # 图表结果
-│   ├── Instances/                  # 实例数据
-│   └── plot_distribution_*/       # 分布分析结果
-├── analysis_results/               # 分析结果
-├── *.xlsx                          # 数据文件
-└── README.md                       # 项目说明文档
-```
-
-## 📈 实验结果分析
-
-### 性能指标
-- **总成本**: 运输成本 + 转运成本 + 延误惩罚
-- **服务水平**: 需求满足率 + 准时交付率
-- **计算效率**: 求解时间 + 收敛速度
-- **环境影响**: 碳排放量 + 能源消耗
-
-### 结果文件说明
-- `best_routes*.xlsx`: 最优路径方案
-- `obj_record*.xlsx`: 目标函数值变化记录
-- `routes_match*.xlsx`: 路径匹配分析
-- `exps_record*.xlsx`: 实验统计记录
-
-## 🎯 主要创新点
-
-1. **算法创新**: 首次将ALNS与RL结合用于动态多式联运优化
-2. **实时决策**: RL智能体实现毫秒级响应动态变化
-3. **不确定性建模**: 模糊逻辑处理复杂不确定事件
-4. **并行计算**: 多进程加速大规模问题求解
-5. **环境友好**: 集成碳排放评估支持绿色物流
-
-## 📚 相关文献
-
-- Adaptive Large Neighborhood Search for Dynamic Vehicle Routing Problems
-- Deep Reinforcement Learning for Real-time Transportation Optimization
-- Fuzzy Logic Applications in Uncertain Supply Chain Management
-- Sustainable Intermodal Freight Network Design under Uncertainty
-
-## 🤝 贡献指南
-
-欢迎提交Issue和Pull Request来改进本项目：
-
-1. Fork本项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启Pull Request
-
-## 📄 许可证
-
-本项目采用MIT许可证 - 详见 [LICENSE](LICENSE) 文件
-
-## 📞 联系方式
-
-如有问题或建议，请通过以下方式联系：
-- GitHub Issues: [项目Issues页面]
-- 邮箱: [您的邮箱]
-
-## 🙏 致谢
-
-感谢所有为本项目做出贡献的研究人员和开发者。
-
----
-
-**注意**: 这是一个研究项目，主要用于学术研究目的。如需商业应用，请确保遵守相关许可证要求。
+## 版本管理与忽略策略
+本项目采用 `.gitignore` 忽略虚拟环境、日志与自动生成的数据（详见 `.gitignore`），确保仓库只跟踪源码与核心文档。
