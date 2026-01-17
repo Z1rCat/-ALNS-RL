@@ -99,7 +99,7 @@ import rl_logging
 # 日志字段定义（与 RL 侧保持一致）
 TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
-    "table_number", "dynamic_t_begin", "duration_type",
+    "table_number", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
     "action", "reward", "action_meaning", "feasible", "source"
 ]
@@ -129,6 +129,8 @@ def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source=
             "table_number": globals().get("Dynamic_ALNS_RL34959", None) and getattr(Dynamic_ALNS_RL34959, "table_number", ""),
             "dynamic_t_begin": globals().get("dynamic_t_begin", ""),
             "duration_type": globals().get("duration_type", ""),
+            "gt_mean": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "current_gt_mean", ""),
+            "phase_label": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "current_phase_label", ""),
             "delay_tolerance": row_dict.get("delay_tolerance", ""),
             "severity": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "severity_level", ""),
             "passed_terminals": row_dict.get("passed_terminals", ""),

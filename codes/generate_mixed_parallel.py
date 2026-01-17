@@ -1,6 +1,8 @@
 import os
 import time
 import argparse
+import json
+import math
 import pandas as pd
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -37,139 +39,201 @@ FIGURES_DIR = os.path.join(ROOT_DIR, "Figures")
 # 实验映射 (用于查找 Best Routes 以确定事件发生时间)
 EXP_NUMBERS = {5: 12793, 10: 12792, 20: 12794, 30: 12816, 50: 12817, 100: 12818}
 
-DIST_DISPLAY = {
-    'mixed_v1': '?? v1 (25% ?? + 75% ??)',
-    'stress_test': '???? (100% ?????120)',
-    'chaos_uniform': '???? (100% ?? 10-100)',
-    'curriculum_easy': '???? (50% ?? + 50% ??)',
-    'baseline_legacy': '???? (????????20)',
-    'normal_mix_8_80_50_50': '?? 50/50 (??8 / 80)',
-    'lognormal_mix_8_80_50_50': '???? 50/50 (??8 / 80)',
-    'normal_mix_8_80_75_25': '?? 75/25 (??8 / 80)',
-    'lognormal_mix_8_80_75_25': '???? 75/25 (??8 / 80)',
-    'normal_mix_80_8_25_75': '?? 25/75 (??80 -> 8)',
-    'normal_mix_80_8_50_50': '?? 50/50 (??80 -> 8)',
-    'normal_mix_80_8_75_25': '?? 75/25 (??80 -> 8)',
-    'lognormal_mix_80_8_25_75': '???? 25/75 (??80 -> 8)',
-    'lognormal_mix_80_8_50_50': '???? 50/50 (??80 -> 8)',
-    'lognormal_mix_9_30_3_30_30_40': '???? 30/30/40 (??9 / 30 / 3)'
-}
+CONFIG_PATH = os.path.join(ROOT_DIR, "distribution_config.json")
+
+DEFAULT_DISTRIBUTIONS = [
+    {"name": "S1_1", "pattern": "random_mix", "means": {"A": 9, "B": 90}, "display": "S1_1 random mix A=9 B=90"},
+    {"name": "S1_2", "pattern": "random_mix", "means": {"A": 3, "B": 30}, "display": "S1_2 random mix A=3 B=30"},
+    {"name": "S1_3", "pattern": "random_mix", "means": {"A": 6, "B": 60}, "display": "S1_3 random mix A=6 B=60"},
+    {"name": "S2_1", "pattern": "aba", "means": {"A": 9, "B": 90}, "display": "S2_1 ABA A=9 B=90"},
+    {"name": "S2_2", "pattern": "aba", "means": {"A": 90, "B": 9}, "display": "S2_2 ABA A=90 B=9"},
+    {"name": "S2_3", "pattern": "aba", "means": {"A": 3, "B": 30}, "display": "S2_3 ABA A=3 B=30"},
+    {"name": "S2_4", "pattern": "aba", "means": {"A": 30, "B": 3}, "display": "S2_4 ABA A=30 B=3"},
+    {"name": "S2_5", "pattern": "aba", "means": {"A": 6, "B": 60}, "display": "S2_5 ABA A=6 B=60"},
+    {"name": "S2_6", "pattern": "aba", "means": {"A": 60, "B": 6}, "display": "S2_6 ABA A=60 B=6"},
+    {"name": "S3_1", "pattern": "ab", "means": {"A": 9, "B": 90}, "display": "S3_1 OOD A=9 B=90"},
+    {"name": "S3_2", "pattern": "ab", "means": {"A": 90, "B": 9}, "display": "S3_2 OOD A=90 B=9"},
+    {"name": "S3_3", "pattern": "ab", "means": {"A": 3, "B": 30}, "display": "S3_3 OOD A=3 B=30"},
+    {"name": "S3_4", "pattern": "ab", "means": {"A": 30, "B": 3}, "display": "S3_4 OOD A=30 B=3"},
+    {"name": "S3_5", "pattern": "ab", "means": {"A": 6, "B": 60}, "display": "S3_5 OOD A=6 B=60"},
+    {"name": "S3_6", "pattern": "ab", "means": {"A": 60, "B": 6}, "display": "S3_6 OOD A=60 B=6"},
+    {"name": "S4_1", "pattern": "recall", "means": {"A": 9, "B": 90}, "display": "S4_1 recall A=9 B=90"},
+    {"name": "S4_2", "pattern": "recall", "means": {"A": 90, "B": 9}, "display": "S4_2 recall A=90 B=9"},
+    {"name": "S4_3", "pattern": "recall", "means": {"A": 3, "B": 30}, "display": "S4_3 recall A=3 B=30"},
+    {"name": "S4_4", "pattern": "recall", "means": {"A": 30, "B": 3}, "display": "S4_4 recall A=30 B=3"},
+    {"name": "S4_5", "pattern": "recall", "means": {"A": 6, "B": 60}, "display": "S4_5 recall A=6 B=60"},
+    {"name": "S4_6", "pattern": "recall", "means": {"A": 60, "B": 6}, "display": "S4_6 recall A=60 B=6"},
+    {"name": "S5_1", "pattern": "adaptation", "means": {"A": 9, "B": 90}, "display": "S5_1 adaptation A=9 B=90"},
+    {"name": "S5_2", "pattern": "adaptation", "means": {"A": 90, "B": 9}, "display": "S5_2 adaptation A=90 B=9"},
+    {"name": "S5_3", "pattern": "adaptation", "means": {"A": 3, "B": 30}, "display": "S5_3 adaptation A=3 B=30"},
+    {"name": "S5_4", "pattern": "adaptation", "means": {"A": 30, "B": 3}, "display": "S5_4 adaptation A=30 B=3"},
+    {"name": "S5_5", "pattern": "adaptation", "means": {"A": 6, "B": 60}, "display": "S5_5 adaptation A=6 B=60"},
+    {"name": "S5_6", "pattern": "adaptation", "means": {"A": 60, "B": 6}, "display": "S5_6 adaptation A=60 B=6"},
+    {"name": "S6_1", "pattern": "abc", "means": {"A": 9, "B": 90, "C": 30}, "display": "S6_1 ABC A=9 B=90 C=30"},
+    {"name": "S6_2", "pattern": "abc", "means": {"A": 9, "B": 30, "C": 90}, "display": "S6_2 ABC A=9 B=30 C=90"},
+    {"name": "S6_3", "pattern": "abc", "means": {"A": 90, "B": 30, "C": 9}, "display": "S6_3 ABC A=90 B=30 C=9"},
+]
+
+DIST_DISPLAY = {}
 
 # 子进程全局缓存
 GLOBAL_DATA = {}
+
+EXPECTED_TOTAL_FILES = 500
+
+SCENARIO_CONFIGS = {}
+
+def load_distribution_config():
+    dist_entries = DEFAULT_DISTRIBUTIONS
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("distributions"), list):
+            dist_entries = data["distributions"]
+    except Exception:
+        pass
+    normalized = []
+    for item in dist_entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        pattern = str(item.get("pattern", "")).strip()
+        means = item.get("means", {})
+        if not name or not pattern or not isinstance(means, dict):
+            continue
+        display = str(item.get("display", "")).strip()
+        normalized.append({
+            "name": name,
+            "pattern": pattern,
+            "means": means,
+            "display": display,
+        })
+    return normalized or DEFAULT_DISTRIBUTIONS
+
+def build_display(name, pattern, means):
+    parts = []
+    for key in ("A", "B", "C"):
+        if key in means:
+            value = means[key]
+            if isinstance(value, dict):
+                mean_val = value.get("mean")
+                if mean_val is None:
+                    mean_val = value.get("mu")
+                extra = ""
+                if "var" in value:
+                    extra = f",var={value['var']}"
+                elif "std" in value:
+                    extra = f",std={value['std']}"
+                parts.append(f"{key}={mean_val}{extra}")
+            else:
+                parts.append(f"{key}={value}")
+    suffix = " ".join(parts)
+    if suffix:
+        return f"{name} {pattern} {suffix}"
+    return f"{name} {pattern}"
+
+def build_scenario_configs():
+    SCENARIO_CONFIGS.clear()
+    DIST_DISPLAY.clear()
+    for item in load_distribution_config():
+        name = item["name"]
+        pattern = item["pattern"]
+        means = item["means"]
+        display_str = item["display"] or build_display(name, pattern, means)
+        SCENARIO_CONFIGS[name] = {"pattern": pattern, "means": means}
+        DIST_DISPLAY[name] = display_str
+
+build_scenario_configs()
+
+def sample_durations(mean_val, max_events, std=None, dist="normal"):
+    if dist == "normal":
+        sigma = std if std is not None else max(1.0, mean_val * 0.25)
+        samples = np.random.normal(mean_val, sigma, size=max_events)
+    elif dist == "lognormal":
+        if std is None:
+            sigma = 0.5
+            mu = math.log(max(mean_val, 1.0)) - 0.5 * sigma * sigma
+        else:
+            variance = std * std
+            mean_val = max(mean_val, 1.0)
+            mu = math.log((mean_val * mean_val) / math.sqrt(variance + mean_val * mean_val))
+            sigma = math.sqrt(max(1e-6, math.log(1 + variance / (mean_val * mean_val))))
+        samples = np.random.lognormal(mean=mu, sigma=sigma, size=max_events)
+    else:
+        raise ValueError(f"Unsupported dist '{dist}'")
+    samples = np.maximum(samples, 1)
+    return samples.astype(int)
+
+def build_phase_labels(pattern, total_files):
+    if pattern == "random_mix":
+        return list(np.random.choice(["A", "B"], size=total_files, p=[0.5, 0.5]))
+    segments = {
+        "aba": [(0, 174, "A"), (175, 349, "B"), (350, 499, "A")],
+        "ab": [(0, 349, "A"), (350, 499, "B")],
+        "recall": [(0, 424, "A"), (425, 499, "B")],
+        "adaptation": [(0, 99, "A"), (100, 499, "B")],
+        "abc": [(0, 174, "A"), (175, 349, "B"), (350, 499, "C")],
+    }
+    labels = [""] * total_files
+    for start, end, label in segments[pattern]:
+        end = min(end, total_files - 1)
+        for idx in range(start, end + 1):
+            if 0 <= idx < total_files:
+                labels[idx] = label
+    if any(lbl == "" for lbl in labels):
+        last = "A"
+        for i in range(total_files):
+            if labels[i] == "":
+                labels[i] = last
+            else:
+                last = labels[i]
+    return labels
+
+def parse_phase_spec(spec):
+    if isinstance(spec, dict):
+        mean_val = spec.get("mean")
+        if mean_val is None:
+            mean_val = spec.get("mu")
+        if mean_val is None:
+            raise ValueError("Phase spec must include mean")
+        std = spec.get("std")
+        var = spec.get("var")
+        if std is None and var is not None:
+            std = math.sqrt(var)
+        dist = spec.get("dist", "normal")
+        return {"mean": float(mean_val), "std": float(std) if std is not None else None, "dist": dist}
+    return {"mean": float(spec), "std": None, "dist": "normal"}
+
+def build_scenario_matrix_and_meta(dist_name, total_files, max_events):
+    config = SCENARIO_CONFIGS[dist_name]
+    labels = build_phase_labels(config["pattern"], total_files)
+    matrix = np.zeros((total_files, max_events), dtype=int)
+    meta_rows = []
+    for i, label in enumerate(labels):
+        phase_spec = config["means"][label]
+        phase_params = parse_phase_spec(phase_spec)
+        mean_val = phase_params["mean"]
+        matrix[i] = sample_durations(mean_val, max_events, std=phase_params["std"], dist=phase_params["dist"])
+        meta_rows.append({"gt_mean": mean_val, "phase_label": label})
+    return matrix, meta_rows
+
+def build_default_meta(matrix, phase_label):
+    meta_rows = []
+    for row in matrix:
+        meta_rows.append({"gt_mean": float(np.mean(row)), "phase_label": phase_label})
+    return meta_rows
 
 def get_distribution_matrix(dist_name, total_files, max_events):
     """
     【兵工厂核心】根据策略生成随机数矩阵 [Files, Events]
     """
-    dist_label = DIST_DISPLAY.get(dist_name, "????")
-    print(f"   -> ????????: {dist_label}")
-    
-    if dist_name == "mixed_v1":
-        # 混合 V1: 25% 高压 (RL触发区), 75% 混沌
-        n_stress = int(total_files * 0.25)
-        n_chaos = total_files - n_stress
-        # Stress: Mean=120, Std=30
-        mat_1 = np.random.normal(120, 30, (n_stress, max_events))
-        # Chaos: Uniform 10-100
-        mat_2 = np.random.uniform(10, 100, (n_chaos, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-        
-    elif dist_name == "stress_test":
-        # 全高压: 模拟严重拥堵
-        matrix = np.random.normal(120, 30, (total_files, max_events))
-        
-    elif dist_name == "chaos_uniform":
-        # 全混沌: 完全随机
-        matrix = np.random.uniform(10, 100, (total_files, max_events))
-        
-    elif dist_name == "curriculum_easy":
-        # 课程学习: 前50%简单，后50%逐渐变难
-        n_easy = int(total_files * 0.5)
-        n_hard = total_files - n_easy
-        # LogNormal (Legacy-like)
-        mat_1 = np.random.lognormal(3, 0.5, (n_easy, max_events)) 
-        # Normal (Medium)
-        mat_2 = np.random.normal(60, 15, (n_hard, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-        
-    elif dist_name == "baseline_legacy":
-        # 模仿原始数据分布 (LogNormal)
-        matrix = np.random.lognormal(3, 0.5, (total_files, max_events))
-    elif dist_name == "normal_mix_8_80_50_50":
-        n1 = int(total_files * 0.5)
-        n2 = total_files - n1
-        mat_1 = np.random.normal(8, 2, (n1, max_events))
-        mat_2 = np.random.normal(80, 20, (n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "lognormal_mix_8_80_50_50":
-        n1 = int(total_files * 0.5)
-        n2 = total_files - n1
-        mat_1 = np.random.lognormal(mean=2, sigma=0.5, size=(n1, max_events))
-        mat_2 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "normal_mix_8_80_75_25":
-        n1 = int(total_files * 0.75)
-        n2 = total_files - n1
-        mat_1 = np.random.normal(8, 2, (n1, max_events))
-        mat_2 = np.random.normal(80, 20, (n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "lognormal_mix_8_80_75_25":
-        n1 = int(total_files * 0.75)
-        n2 = total_files - n1
-        mat_1 = np.random.lognormal(mean=2, sigma=0.5, size=(n1, max_events))
-        mat_2 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "normal_mix_80_8_25_75":
-        n1 = int(total_files * 0.25)
-        n2 = total_files - n1
-        mat_1 = np.random.normal(80, 20, (n1, max_events))
-        mat_2 = np.random.normal(8, 2, (n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "normal_mix_80_8_50_50":
-        n1 = int(total_files * 0.5)
-        n2 = total_files - n1
-        mat_1 = np.random.normal(80, 20, (n1, max_events))
-        mat_2 = np.random.normal(8, 2, (n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "normal_mix_80_8_75_25":
-        n1 = int(total_files * 0.75)
-        n2 = total_files - n1
-        mat_1 = np.random.normal(80, 20, (n1, max_events))
-        mat_2 = np.random.normal(8, 2, (n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "lognormal_mix_80_8_25_75":
-        n1 = int(total_files * 0.25)
-        n2 = total_files - n1
-        mat_1 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n1, max_events))
-        mat_2 = np.random.lognormal(mean=2, sigma=0.5, size=(n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "lognormal_mix_80_8_50_50":
-        n1 = int(total_files * 0.5)
-        n2 = total_files - n1
-        mat_1 = np.random.lognormal(mean=4.4, sigma=0.5, size=(n1, max_events))
-        mat_2 = np.random.lognormal(mean=2, sigma=0.5, size=(n2, max_events))
-        matrix = np.vstack([mat_1, mat_2])
-    elif dist_name == "lognormal_mix_9_30_3_30_30_40":
-        n1 = int(total_files * 0.3)
-        n2 = int(total_files * 0.3)
-        n3 = total_files - n1 - n2
-        mu_9 = np.log(9) - 0.125
-        mu_30 = np.log(30) - 0.125
-        mu_3 = np.log(3) - 0.125
-        mat_1 = np.random.lognormal(mean=mu_9, sigma=0.5, size=(n1, max_events))
-        mat_2 = np.random.lognormal(mean=mu_30, sigma=0.5, size=(n2, max_events))
-        mat_3 = np.random.lognormal(mean=mu_3, sigma=0.5, size=(n3, max_events))
-        matrix = np.vstack([mat_1, mat_2, mat_3])
-        
-    else:
-        print("?????????????????")
-        matrix = np.random.lognormal(3, 0.5, (total_files, max_events))
+    dist_label = DIST_DISPLAY.get(dist_name, dist_name)
+    print(f"   -> distribution: {dist_label}")
 
-    # 截断: 保证最小 Duration 为 1 分钟，防止负数
-    matrix = np.maximum(matrix, 1)
-    # 取整
-    return matrix.astype(int)
+    if dist_name in SCENARIO_CONFIGS:
+        return build_scenario_matrix_and_meta(dist_name, total_files, max_events)
+    available = ", ".join(sorted(SCENARIO_CONFIGS.keys()))
+    raise ValueError(f"Unknown dist_name '{dist_name}'. Available: {available}")
 
 def init_worker(base_data_path, exp_mapping, figures_dir):
     """子进程初始化：加载一次大文件"""
@@ -220,7 +284,7 @@ def init_worker(base_data_path, exp_mapping, figures_dir):
 
 def generate_single_file(args):
     """写入单个 Excel"""
-    idx, r, duration_row, out_dir = args
+    idx, r, duration_row, out_dir, meta_row = args
     
     fname = f"Intermodal_EGS_data_dynamic_congestion{idx}.xlsx"
     fpath = os.path.join(out_dir, fname)
@@ -238,6 +302,15 @@ def generate_single_file(args):
             T.to_excel(writer, 'T', index=False)
             K.to_excel(writer, 'K', index=False)
             o.to_excel(writer, 'o', index=False)
+            current_mean = meta_row.get("gt_mean", "")
+            current_label = meta_row.get("phase_label", "")
+            meta_df = pd.DataFrame(
+                {
+                    "Property": ["gt_mean", "phase_label"],
+                    "Value": [current_mean, current_label],
+                }
+            )
+            meta_df.to_excel(writer, sheet_name="__meta__", index=False)
             
             # 动态事件 Sheets
             limit = min(len(duration_row), 50) # 限制每个文件最多50个事件
@@ -293,7 +366,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist_name", required=True)
     parser.add_argument("--target_folder", required=True)
-    parser.add_argument("--total_files", type=int, default=1000)
+    parser.add_argument("--total_files", type=int, default=EXPECTED_TOTAL_FILES)
     parser.add_argument("--workers", type=int, default=os.cpu_count())
     parser.add_argument("--request_numbers", type=str, default="5",
                         help="指定要生成的R数量，单个值如'5'或逗号分隔如'5,10'")
@@ -309,6 +382,10 @@ def main():
         print("?? --request_numbers 为空或不在预设列表 {5,10,20,30,50,100} 中")
         sys.exit(1)
 
+    if args.total_files != EXPECTED_TOTAL_FILES:
+        print(f"?? total_files overridden to {EXPECTED_TOTAL_FILES} for physical isolation")
+        args.total_files = EXPECTED_TOTAL_FILES
+
     dist_label = DIST_DISPLAY.get(args.dist_name, "????")
     print(f"=== ?????: {dist_label} ===")
     print(f"   ????: .../{os.path.basename(args.target_folder)}")
@@ -320,7 +397,7 @@ def main():
     
     # 1. 生成数据矩阵
     MAX_EVT = 60
-    full_matrix = get_distribution_matrix(args.dist_name, args.total_files, MAX_EVT)
+    full_matrix, meta_rows = get_distribution_matrix(args.dist_name, args.total_files, MAX_EVT)
     
     # 2. 准备输出路径
     base_out = os.path.join(OUTPUT_ROOT, args.target_folder)
@@ -340,7 +417,7 @@ def main():
             # 准备任务
             tasks = []
             for i in range(args.total_files):
-                tasks.append((i, r, full_matrix[i], r_dir))
+                tasks.append((i, r, full_matrix[i], r_dir, meta_rows[i]))
             
             # 提交并监控进度
             futures = [executor.submit(generate_single_file, t) for t in tasks]

@@ -1,1825 +1,3 @@
-【任务指令：ALNS-RL 系统不确定性生成模块的重构与高性能升级】
-1. 项目背景与当前状态
-我正在维护一个基于 Python 的多式联运路径优化系统（ALNS + Deep RL）。
-状态：代码已回退到初始稳定版本（Legacy）。
-痛点：
-硬编码：数据生成和读取的路径是写死的，无法灵活切换实验场景。
-性能低下：生成 1000 个场景文件是单线程串行写入，速度极慢。
-训练无效：RL 模块因数据分布太简单（Duration太短）导致从未被触发。
-2. 核心目标
-你需要帮我实现一套**“参数化驱动 + 高性能并行 + 混合分布”**的全新生成与读取流程。
-3. 详细文件结构说明 (地形侦察)
-项目根目录：A:\MYpython\34959_RL\
-Intermodal_EGS_data_all.xlsx: 基础网络数据（含 N, T, K, o, R_5, R_20 等 Sheet）。
-codes/: 核心代码目录。
-Dynamic_master34959.py: 主控入口。
-Dynamic_ALNS_RL34959.py: 中间协调层。
-Intermodal_ALNS34959.py: ALNS 算法核心（读取端）。
-dynamic_RL34959.py: RL 智能体（读取端）。
-Uncertainties Dynamic planning under unexpected events/: 数据存储根目录。
-Figures/: 存放 best_routes（静态最优路径），生成器需要读取它来确定拥堵发生的时间点。
-4. 分阶段实施细节 (Action Plan)
-请按顺序提供修改后的代码或新文件代码：
-Phase 1: 重铸兵工厂 (高性能生成器)
-新建文件 codes/generate_mixed_parallel.py。这是重中之重，必须满足以下硬性指标：
-高性能架构：
-必须使用 concurrent.futures.ProcessPoolExecutor 进行多进程并行写入，利用多核 CPU。
-Numpy 向量化：在主进程中一次性生成 [1000, N] 的随机数矩阵，而不是在循环里一次次调 random。
-混合分布逻辑 (Hybrid Distribution)：
-接收参数 dist_name (作为文件夹名后缀)。
-逻辑：前 250 个文件使用 高强度正态分布 (Mean=120, Sigma=30，模拟严重拥堵以强制触发 RL)；后 750 个文件使用 均匀分布 (Low=10, High=100)。
-输入/输出规范：
-输入：读取 Intermodal_EGS_data_all.xlsx 和对应的 best_routes 文件（需处理 R5， R20, R50 等不同规模）。
-输出路径：必须严格遵循格式 .../plot_distribution_targetInstances_disruption_{dist_name}_not_time_dependent/R{r}/...。
-Excel 格式 (关键)：每个 Excel 包含 N, T, K, o, R Sheet。
-不确定性 Sheet 命名：必须严格保留格式 R_{r}_{start_time} (2)。RL 靠读取这个 (2) 后缀的 Sheet 来获取状态。
-Duration 列格式：必须存为字符串 "[start, end]"。
-Phase 2: 改造指挥部 (Master)
-修改 codes/Dynamic_master34959.py：
-引入 argparse，接收命令行参数 --dist_name。
-在调用 Dynamic_ALNS_RL34959.main(...) 时，将 dist_name 传递下去。
-Phase 3: 改造传令兵 (Middleware)
-修改 codes/Dynamic_ALNS_RL34959.py：
-更新 main() 和 Intermodal_ALNS_function() 的签名，接收 dist_name。
-将该参数分别透传给 dynamic_RL34959.main (RL) 和 Intermodal_ALNS34959.real_main (ALNS)。
-注意：在此文件中也有读取文件解析时间点的逻辑（用于 unexpected_times），请务必将这里的硬编码路径也替换为基于 dist_name 的动态路径，并修复可能存在的 R_5 匹配到 R_50 的解析 Bug。
-Phase 4: 改造前线 (ALNS & RL)
-ALNS (Intermodal_ALNS34959.py):
-修改 real_main，接收 dist_name。
-找到 data_path = ... 拼接处，用 dist_name 替换原来的硬编码字符串。,
-RL (dynamic_RL34959.py):
-在 main 中接收 dist_name 并赋值给全局变量 CURRENT_DIST_NAME。
-在 get_state 函数中，使用 CURRENT_DIST_NAME 拼接路径读取 Excel，确保与 ALNS 读取的是同一个文件。
-5. 交付要求
-请先给出 Phase 1 (generate_mixed_parallel.py) 的完整代码，务必包含并行处理和向量化生成的逻辑。
-然后依次给出 Master, Middleware, ALNS, RL 需要修改的代码片段（标明行号或上下文）。
-请确保所有路径拼接在 Windows 环境下（使用 os.path.join 或 /）均能正常工作。
-特别提醒：RL 模块读取 Excel 状态的逻辑极其脆弱，生成器写入 Excel Sheet 的名字和列结构（尤其是 duration 列）必须与原版逻辑100% 兼容，否则 100 名老奶奶的安全将无法保障。
-
-
-
-附录：
-1.readme.md
-# ALNS-RL: 基于强化学习和自适应大邻域搜索的动态多式联运优化系统
-
-## 📖 项目简介
-
-本项目实现了一个创新的**ALNS-RL混合算法**，用于解决动态多式联运物流网络优化问题。系统结合了**自适应大邻域搜索(ALNS)**元启发式算法和**强化学习(RL)**智能体，能够在不确定环境下进行实时的运输路径优化和调度决策。
-
-### 🎯 研究目标
-- 处理动态需求变化和不确定事件
-- 优化多式联运网络中的路径选择和资源配置
-- 通过强化学习实现实时决策和自适应调整
-- 评估环境影响和运输成本
-
-## 🏗️ 系统架构
-
-```
-ALNS-RL动态优化系统
-├── 强化学习层 (dynamic_RL34959.py)
-│   ├── DQN智能体：实时决策制定
-│   ├── PPO智能体：策略优化
-│   └── 环境建模：Gym接口
-├── 优化算法层 (Intermodal_ALNS34959.py)
-│   ├── ALNS核心：大规模优化求解
-│   ├── 邻域操作：破坏与重建算子
-│   └── 并行计算：加速求解过程
-├── 集成控制层 (Dynamic_ALNS_RL34959.py)
-│   ├── 算法协调：ALNS与RL协同
-│   ├── 动态事件处理：不确定事件响应
-│   └── 解空间管理：最优解维护
-├── 不确定性处理 (fuzzy_HP.py)
-│   ├── 模糊逻辑：不确定性建模
-│   └── 隶属度函数：事件严重程度评估
-└── 环境评估 (emission_models.py)
-    ├── 碳排放计算：运输环境影响
-    └── 可持续性指标：绿色物流评估
-```
-
-## 🔧 核心算法
-
-### ALNS算法特性
-- **自适应机制**：动态调整算子选择概率
-- **多邻域搜索**：破坏与重建操作组合
-- **并行优化**：多进程加速求解
-- **解空间管理**：哈希表避免重复计算
-
-### 强化学习集成
-- **状态空间**：网络状态、车辆位置、需求信息
-- **动作空间**：路径选择、调度决策、资源分配
-- **奖励函数**：成本最小化 + 服务质量最大化
-- **训练策略**：经验回放 + 目标网络更新
-
-### 动态事件处理
-- **需求变化**：新订单插入、订单取消
-- **运输延误**：车辆故障、交通拥堵
-- **网络中断**：节点失效、弧段不可用
-- **容量限制**：节点拥堵、运力约束
-
-## 📋 环境要求
-
-### 系统环境
-- **Python**: 3.9.19
-- **操作系统**: Windows 10/11
-- **GPU**: 支持CUDA的NVIDIA显卡（推荐）
-
-### Conda环境配置
-
-```bash
-# 创建新的conda环境
-conda create -n alns-rl python=3.9.19
-conda activate alns-rl
-
-# 安装PyTorch (CUDA版本)
-pip install torch==2.3.1+cu121 torchvision==0.18.1+cu121 torchaudio==2.3.1+cu121 -f https://download.pytorch.org/whl/torch_stable.html
-
-# 安装其他依赖
-pip install pandas numpy matplotlib networkx openpyxl scikit-fuzzy stable-baselines3 gym gymnasium
-```
-
-### 完整依赖清单
-详见 `codes/environment.yml` 文件，包含所有必需的Python包及版本号。
-
-## 🚀 快速开始
-
-### 1. 克隆项目
-```bash
-git clone https://github.com/Z1rCat/-ALNS-RL.git
-cd -ALNS-RL
-```
-
-### 2. 环境配置
-```bash
-# 使用项目提供的conda环境文件
-conda env create -f codes/environment.yml
-conda activate pytorch
-```
-
-### 3. 数据准备
-将数据文件放置在项目根目录：
-- `Intermodal_EGS_data_all.xlsx`: 主要数据集
-- `Intermodal_EGS_data_all_heterogeneous_6.xlsx`: 异构场景数据
-- 其他Excel文件：不同实验场景的数据
-
-### 4. 运行实验
-
-#### 基础ALNS优化
-```python
-python codes/Intermodal_ALNS34959.py
-```
-
-#### ALNS-RL混合优化
-```python
-python codes/Dynamic_ALNS_RL34959.py
-```
-
-#### 强化学习训练
-```python
-python codes/dynamic_RL34959.py
-```
-
-## 📊 实验配置
-
-### 参数设置
-```python
-# ALNS参数
-max_iterations = 1000
-reaction_factor = 0.8
-destruction_size = [0.1, 0.3]  # 破坏比例范围
-
-# RL参数
-learning_rate = 0.001
-gamma = 0.99
-epsilon_start = 1.0
-epsilon_end = 0.01
-epsilon_decay = 0.995
-
-# 动态参数
-time_horizon = 24  # 小时
-update_frequency = 1  # 小时
-uncertainty_level = 0.3  # 不确定性程度
-```
-
-### 场景设置
-- **确定性场景**: 已知所有需求和运输时间
-- **随机需求场景**: 需求按概率分布生成
-- **混合事件场景**: 多种不确定事件组合
-- **时间依赖场景**: 事件概率随时间变化
-
-## 📁 项目结构
-
-```
-34959_RL/
-├── codes/                          # 核心代码目录
-│   ├── dynamic_RL34959.py          # 强化学习主模块
-│   ├── Intermodal_ALNS34959.py     # ALNS算法核心
-│   ├── Dynamic_ALNS_RL34959.py     # ALNS-RL集成模块
-│   ├── fuzzy_HP.py                 # 模糊逻辑处理
-│   ├── emission_models.py          # 环境影响模型
-│   └── environment.yml             # Conda环境配置
-├── Uncertainties Dynamic planning under unexpected events/  # 实验结果
-│   ├── Figures/                    # 图表结果
-│   ├── Instances/                  # 实例数据
-│   └── plot_distribution_*/       # 分布分析结果
-├── analysis_results/               # 分析结果
-├── *.xlsx                          # 数据文件
-└── README.md                       # 项目说明文档
-```
-
-## 📈 实验结果分析
-
-### 性能指标
-- **总成本**: 运输成本 + 转运成本 + 延误惩罚
-- **服务水平**: 需求满足率 + 准时交付率
-- **计算效率**: 求解时间 + 收敛速度
-- **环境影响**: 碳排放量 + 能源消耗
-
-### 结果文件说明
-- `best_routes*.xlsx`: 最优路径方案
-- `obj_record*.xlsx`: 目标函数值变化记录
-- `routes_match*.xlsx`: 路径匹配分析
-- `exps_record*.xlsx`: 实验统计记录
-
-## 🎯 主要创新点
-
-1. **算法创新**: 首次将ALNS与RL结合用于动态多式联运优化
-2. **实时决策**: RL智能体实现毫秒级响应动态变化
-3. **不确定性建模**: 模糊逻辑处理复杂不确定事件
-4. **并行计算**: 多进程加速大规模问题求解
-5. **环境友好**: 集成碳排放评估支持绿色物流
-
-## 📚 相关文献
-
-- Adaptive Large Neighborhood Search for Dynamic Vehicle Routing Problems
-- Deep Reinforcement Learning for Real-time Transportation Optimization
-- Fuzzy Logic Applications in Uncertain Supply Chain Management
-- Sustainable Intermodal Freight Network Design under Uncertainty
-
-## 🤝 贡献指南
-
-欢迎提交Issue和Pull Request来改进本项目：
-
-1. Fork本项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启Pull Request
-
-## 📄 许可证
-
-本项目采用MIT许可证 - 详见 [LICENSE](LICENSE) 文件
-
-## 📞 联系方式
-
-如有问题或建议，请通过以下方式联系：
-- GitHub Issues: [项目Issues页面]
-- 邮箱: [您的邮箱]
-
-## 🙏 致谢
-
-感谢所有为本项目做出贡献的研究人员和开发者。
-
----
-
-**注意**: 这是一个研究项目，主要用于学术研究目的。如需商业应用，请确保遵守相关许可证要求。
-
-2.Dynamic_master34959
-#!/usr/bin/env Python
-# coding=utf-8
-import concurrent.futures
-import threading
-import Dynamic_ALNS_RL34959
-import dynamic_RL34959
-import pandas as pd
-import os
-import time
-import warnings
-import sys
-import torch
-from GPUtil import showUtilization as gpu_usage
-from numba import cuda
-
-def free_gpu_cache(GPU_number):
-    print("Initial GPU Usage")
-    gpu_usage()
-
-    torch.cuda.empty_cache()
-
-    cuda.select_device(GPU_number)
-    cuda.close()
-    cuda.select_device(GPU_number)
-
-    print("GPU Usage after emptying the cache")
-    gpu_usage()
-#while True:
- #   try:
-
-  #      free_gpu_cache(0); print('use GPU 0')
-   #     break
-    #except:
-     #   try:
-      #      free_gpu_cache(1); print('use GPU 1')
-       #     break
-        #except:
-         #   continue
-
-
-warnings.filterwarnings("ignore")
-# from multiprocessing import Process
-#coordinator is 0
-add_RL =1 
-combine_insertion_and_removal_operators = 1
-if combine_insertion_and_removal_operators == 1:
-    parallel_number = list(range(0,2))
-else:
-    parallel_number = list(range(0, 3))
-# number_of_approachs = pd.DataFrame([len(parallel_number)-1])
-# with pd.ExcelWriter(number_of_approachs_path) as writer:  # doctest: +SKIP
-#     number_of_approachs.to_excel(writer, sheet_name='number_of_approachs', index=False)
-
-# parallel_number.append(-1)
-# def runInParallel(*fns):
-#   proc = []
-#   for fn in fns:
-#     p = Process(target=fn)
-#     p.start()
-#     proc.append(p)
-#   for p in proc:
-#     p.join()
-
-
-def main():
-    # runInParallel(dynamic_RL34959.main(), Dynamic_ALNS_RL34959.main())
-    # threading.Thread(target=dynamic_RL34959.main()).start()
-    # threading.Thread(target=Dynamic_ALNS_RL34959.main()).start()
-    #if I set max_workers=len(parallel_number), then child processors can't report error
-    # with concurrent.futures.ProcessPoolExecutor(max_workers = 1) as executor:
-    # with concurrent.futures.ProcessPoolExecutor(max_workers = 3) as executor:
-    if os.path.exists('34959.txt'):
-        os.remove('34959.txt')
-    if add_RL == 0:
-        Dynamic_ALNS_RL34959.main(0)
-    else:
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            # chunksize, extra = divmod(len(parallel_number), executor._max_workers * 4)
-            #####map####
-            # for number, output in zip(parallel_number, executor.map(Intermodal_ALNS.real_main, parallel_number)):
-            #     print('%d is prime: %s' % (number, output))
-            #####map####
-
-            ####submit###
-            # to_do = []
-
-            futures = {executor.submit(Dynamic_ALNS_RL34959.main, approach): approach for approach in parallel_number}
-            for future in concurrent.futures.as_completed(futures):
-                print('finish')
-                with open('34959.txt', 'w') as f:
-                    f.write('do not wait anymore')
-                future.result() #stop here, and type this line at commend line, then exception is raised
-
-                # result = futures[future]
-                # try:
-                #     data = future.result()
-                # except Exception as exc:
-                #     print('%r generated an exception: %s' % (result, exc))
-                #     sys.exit(-1)
-                # else:
-                #     print(data)
-            ####submit###
-            # for parallel_number in range(0,2):
-            #     Intermodal_ALNS.parallel_number=parallel_number
-            #     executor.submit(Intermodal_ALNS)
-
-cprofile = 0
-if cprofile == 1:
-    import cProfile
-    import pstats
-    import io
-
-    pr = cProfile.Profile()
-    pr.enable()
-
-if __name__ == '__main__':
-    main()
-
-if cprofile == 1:
-    pr.disable()
-    s = io.StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats('cumtime')
-    ps.print_stats()
-
-    with open('/data/yimeng/logs/RL34959_save_profile.txt', 'w+', encoding="utf-8") as f:
-        f.write(s.getvalue())
-
-
-3.Dynamic_ALNS_RL34959
-#!/usr/bin/env Python
-# coding=utf-8
-# import concurrent.futures
-import Intermodal_ALNS34959
-import dynamic_RL34959
-#import dynamic_RL_online_insertion
-import pandas as pd
-import os
-import time
-# haven't done: set the initial solution as original route, and detect which request is changed, and check which part can't be removed
-
-def Intermodal_ALNS_function():
-    global dynamic_end
-    Intermodal_ALNS34959.real_main(3, 0)
-
-    # data_path = 'C:/Users/yimengzhang/OneDrive/桌面/Intermodal_EGS_data_dynamic_new_requests.xlsx'
-    while True:
-        try:
-            request_number_in_R = Intermodal_ALNS34959.request_number_in_R
-            data_path = Intermodal_ALNS34959.data_path
-            break
-        except:
-            continue
-    Data = pd.ExcelFile(data_path)
-    R = pd.read_excel(Data, 'R_' + str(request_number_in_R))
-    # time_horizon is the maximum time of request delivery
-    max_delivery = 0
-    for r in R.index:
-        if R['bd'][r] > max_delivery:
-            max_delivery = R['bd'][r]
-    time_horizon = range(0, max_delivery)
-    # set unexpected events
-    # two types:
-    # uncertain events: generated stochastically
-    # known events: know what will happen like a god
-    # in the TRC paper, like a god, just set the events in excel
-    # name of sheet: R_number_time
-    # in the sheet, mark request number for changed request (OD/schedule/load), assign new request a number
-    # only the changed R and new R in the sheet
-    # for changed R, give the request number
-
-    # unexpected delay is defined in ALNS by changing a vehicle's D
-    # the line before if what == 'D':
-
-    all_sheets = pd.read_excel(Data, None)
-
-    unexpected_times = []
-    for key in all_sheets.keys():
-        prefix = 'R_' + str(request_number_in_R)
-        if prefix in key and prefix != key and 'info' not in key:
-            if ' ' in key:
-                # pass
-                blank_index = key.rfind(' ')
-                unexpected_times.append(int(key.replace(prefix + '_', '')[0:blank_index - len(prefix) - 1]))
-            else:
-                unexpected_times.append(int(key.replace(prefix + '_', '')))
-    unexpected_times = list(dict.fromkeys(unexpected_times))
-    unexpected_times.sort()
-    dynamic_end = 0
-
-    for t in time_horizon:
-        # handle unexpected events methods
-        # rerun
-        # predict what will happen
-        # prepare in advance, optimize based on the worst situation
-        #                                       an integrated way
-        if t in unexpected_times:
-            if t == unexpected_times[-1]:
-                dynamic_end = 1
-            Intermodal_ALNS34959.real_main(3, t)
-
-    #another way of dynamic is optimizing only the urgent parts of requests, maybe better than this way
-def main(approach):
-    global RL_can_start_implementation_phase_from_the_last_table, ALNS_calculates_average_duration_list, ALNS_reward_list_in_implementation, ALNS_removal_reward_list_in_implementation,  ALNS_removal_action_list_in_implementation, ALNS_insertion_reward_list_in_implementation, ALNS_insertion_action_list_in_implementation, table_number, reward_list_in_implementation, removal_reward_list_in_implementation, removal_state_list_in_implementation, removal_action_list_in_implementation, insertion_reward_list_in_implementation, insertion_state_list_in_implementation, insertion_action_list_in_implementation
-    RL_can_start_implementation_phase_from_the_last_table = 0
-    ALNS_calculates_average_duration_list = []
-    combine_insertion_and_removal_operators = 1
-    if combine_insertion_and_removal_operators == 0:
-        if approach == 1:
-            dynamic_RL34959.main('DQN', 'barge')
-        elif approach == 2:
-            dynamic_RL_online_insertion.main('DQN', 'barge')
-        else:
-            Intermodal_ALNS_function()
-    else:
-        if approach == 1:
-            dynamic_RL34959.main('DQN', 'barge')
-        else:
-            reward_list_in_implementation, removal_reward_list_in_implementation, removal_state_list_in_implementation, removal_action_list_in_implementation, insertion_reward_list_in_implementation, insertion_state_list_in_implementation, insertion_action_list_in_implementation = [], [], [], [], [], [], []
-            ALNS_reward_list_in_implementation, ALNS_removal_reward_list_in_implementation,  ALNS_removal_action_list_in_implementation, ALNS_insertion_reward_list_in_implementation, ALNS_insertion_action_list_in_implementation = [], [], [], [], []
-            table_number = 0 
-            start_from_end_table = 0
-            while True:
-                Intermodal_ALNS_function()
-                try:
-                    if dynamic_RL34959.implement == 1:
-                        if start_from_end_table == 0:
-                            table_number = 499
-                            RL_can_start_implementation_phase_from_the_last_table = 1
-                            start_from_end_table = 1
-                        else:
-                            table_number -= 1
-                    else:
-                        table_number += 1
-                except:
-                    if Intermodal_ALNS34959.add_RL == 0:
-                        if Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 0:
-                            table_number -= 1
-                        elif Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 3 and len(
-                                ALNS_reward_list_in_implementation) > Intermodal_ALNS34959.number_of_training:
-                            if start_from_end_table == 0:
-                                table_number = 999
-                                start_from_end_table = 1dynamic_RL34959
-                            else:
-                                table_number -= 1
-                        else:
-                            table_number += 1
-if __name__ == '__main__':
-    main(approach)
-
-
-4.dynamic_RL34959
-import pandas as pd
-import gym
-from gym import Env
-from gym.spaces import Discrete, Box, Dict, Tuple, MultiBinary, MultiDiscrete
-import numpy as np
-import copy
-import random
-import os
-import matplotlib.pyplot as plt
-from stable_baselines3 import DQN, PPO, A2C, DDPG, HER, SAC, TD3
-from line_profiler import LineProfiler
-from stable_baselines3.common.vec_env import VecFrameStack
-from stable_baselines3.common.evaluation import evaluate_policy
-import timeit
-import time
-import Intermodal_ALNS34959
-import sys
-import Dynamic_ALNS_RL34959
-import cProfile
-import pstats
-import io
-# from Intermodal_ALNS34959 import parallel_read_excel, parallel_save_excel
-# from torch.utils.tensorboard import SummaryWriter
-# writer = SummaryWriter(os.path.join('Training', 'Logs'))
-# writer.add_scalar(tag, scalar_value, global_step=None, walltime=None)
-# for epoch in range(100):
-#     mAP = eval(model)
-#     writer.add_scalar('mAP', mAP, epoch)
-# writer.add_image(tag, img_tensor, global_step=None, walltime=None, dataformats='CHW')
-# writer.add_images(tag, img_tensor, global_step=None, walltime=None, dataformats='NCHW')
-import wrapt
-if 'builtins' not in dir() or not hasattr(builtins, 'profile'):
-    import builtins
-
-def profile(func):
-    def inner(*args, **kwargs):
-        return func(*args, **kwargs)
-
-    return inner
-
-
-builtins.__dict__['profile'] = profile
-
-
-def profile():
-
-    lp = LineProfiler()
-
-    @wrapt.decorator
-    def wrapper(func, instance, args, kwargs):
-        # global lp
-        lp_wrapper = lp(func)
-        res = lp_wrapper(*args, **kwargs)
-        lp.print_stats()
-        # lp.dump_stats(path + current_save + '/better_obj_record' + current_save + '.txt')
-        return res
-
-    return wrapper
-
-def save_plot_reward_list():
-    if add_ALNS == 1:
-        # plot all_rewards_list and save
-        for reward_index in range(len(all_rewards_list)):
-            # check_RL_ALNS_iteraction_bug()
-            if (reward_index + 1) % iteration_numbers_unit == 0:
-                average_reward, std_reward = np.mean(all_rewards_list[
-                                                     reward_index + 1 - iteration_numbers_unit:reward_index + 1]), np.std(
-                    all_rewards_list[
-                    reward_index + 1 - iteration_numbers_unit:reward_index + 1])
-                all_average_reward.append(average_reward)
-                all_deviation.append(std_reward)
-        # top_line = [a + b for a, b in zip(all_average_reward, all_deviation)]
-        with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                episode_length) + "_delay_reward_time_dependent" + str(
-            time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-            iteration_multiply) + "multiply" + 'reward_list.txt', 'w') as f:
-            for reward in all_rewards_list:
-                f.write(f"{reward}\n")
-        print('all_rewards_list', all_rewards_list)
-        plt.plot(range(1, len(all_rewards_list) + 1), all_rewards_list)
-        # plt.fill_between(timestamps, bottom_line, top_line)
-        plt.ylabel('Reward')
-        plt.xlabel('Iteration')
-        # plt.title('Congested terminals: ' + str(congested_terminals))
-        # plt.show()
-        plt.savefig(
-            Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                episode_length) + "_delay_reward_time_dependent" + str(
-                time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-                iteration_multiply) + "multiply" + '.pdf',
-            format='pdf', bbox_inches='tight')
-
-def stop_wait():
-    try:
-        if os.path.exists('34959.txt') and Intermodal_ALNS34959.ALNS_end_flag != 1:
-            save_plot_reward_list()
-            sys.exit(78)
-    except:
-        if os.path.exists('34959.txt'):
-            save_plot_reward_list()
-            sys.exit(78)
-#@profile()
-def send_action(action):
-    # global only_stop_once_by_implementation
-    # get the index first
-    break_flag = 0
-    while True:
-        if len(Intermodal_ALNS34959.state_reward_pairs) != 0:
-            break
-        else:
-            print('len(Intermodal_ALNS34959.state_reward_pairs) == 0 in send_action function')
-    while True:
-        # print('send action 1')
-        # if only_stop_once_by_implementation == 0:
-        #     if Intermodal_ALNS34959.interrupt_by_implement_is_one_and_assign_action_once_only == 1:
-        #         only_stop_once_by_implementation = 1
-        #         break
-        stop_wait()
-        for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
-            try:
-                check = Intermodal_ALNS34959.state_reward_pairs['uncertainty_index'][pair_index] == uncertainty_index and \
-                    Intermodal_ALNS34959.state_reward_pairs['vehicle'][pair_index] == vehicle and \
-                    Intermodal_ALNS34959.state_reward_pairs['request'][pair_index] == request and \
-                    Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] == -10000000
-            except:
-                break
-            if implement == 0:
-                if Intermodal_ALNS34959.after_action_review == 1:
-                    check = check and Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index] == 'finish'
-            else:
-                check = check and Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index] == 'begin'
-            if check:
-                while True:
-                    # print('send action 2')
-                    stop_wait()
-                    try:
-                        Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
-                        break
-                    except:
-                        print("Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action")
-                        continue
-                # parallel_save_excel(path + 'state_reward_pairs.xlsx', Intermodal_ALNS34959.state_reward_pairs, 'state_reward_pairs')
-                break_flag = 1
-                break
-        if break_flag == 1:
-            while True:
-                # print('send action 3')
-                stop_wait()
-                if Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] != -10000000:
-                    break
-                else:
-                    print("Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] != -10000000")
-                    Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
-            break
-#@profile()
-def get_state(chosen_pair, table_number=-1, request_number_in_R=-1, duration_type='x', dynamic_t_begin=-1):
-    global severity_level
-    #check_RL_ALNS_iteraction_bug()
-    state_list = [None] * 13
-    state_list[0] = chosen_pair[4] #delay tolerance
-    passed_terminals = chosen_pair[5]
-    if len(passed_terminals) < 10:
-        for z in range(10 - len(passed_terminals)):
-            passed_terminals.append(-1)
-    state_list[1:11] = passed_terminals
-    state_list[11] = chosen_pair[6] #current time
-    uncertainty_index = chosen_pair[0]
-    if table_number == -1:
-        table_number = Dynamic_ALNS_RL34959.table_number
-        request_number_in_R = Intermodal_ALNS34959.request_number_in_R
-        duration_type = Intermodal_ALNS34959.duration_type
-        dynamic_t_begin = Intermodal_ALNS34959.dynamic_t_begin
-
-    if add_event_types == 1:
-        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent" + "_event_types" + "/R" + str(
-            request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
-    else:
-        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-            request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
-    Data = pd.ExcelFile(data_path)
-    # check_repeat_r_in_R_pool(), check_T_k_record_and_R()
-    # below are travel time uncertainty, including delay and congestion at nodes and arcs
-    R_change_dynamic_travel_time = pd.read_excel(Data, 'R_' + str(request_number_in_R) + '_' + str(
-            dynamic_t_begin) + ' (2)')
-    # data_path = "/data/yimeng/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-    #     request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
-    # Data = pd.ExcelFile(data_path)
-    #
-    for index in R_change_dynamic_travel_time.index:
-        if uncertainty_index == R_change_dynamic_travel_time['uncertainty_index'][index]:
-            if R_change_dynamic_travel_time['type'][index] == 'congestion':
-                # if dynamic_RL_online.implement == 1:
-                #     #then send state to RL
-                #
-                # else:
-                duration = eval(R_change_dynamic_travel_time['duration'][index])
-                break
-    duration_length = duration[1] - duration[0]
-    # if state_list[0] >= duration_length:
-    #     severity_level = 0
-    # else:
-    #     severity_level = 1
-    ###############
-    # if duration_length <= 20:
-    #     severity_level = 1
-    # elif duration_length <= 25:
-    #     severity_level = 2
-    # elif duration_length <= 30:
-    #     severity_level = 3
-    # elif duration_length <= 35:
-    #     severity_level = 4
-    # elif duration_length <= 40:
-    #     severity_level = 5
-    # elif duration_length <= 45:
-    #     severity_level = 6
-    # elif duration_length <= 50:
-    #     severity_level = 7
-    # elif duration_length <= 55:
-    #     severity_level = 8
-    # elif duration_length <= 60:
-    #     severity_level = 9
-    # elif duration_length <= 65:
-    #     severity_level = 10
-    # elif duration_length <= 70:
-    #     severity_level = 11
-    # elif duration_length <= 75:
-    #     severity_level = 12
-    # elif duration_length <= 80:
-    #     severity_level = 13
-    # else:
-    #     severity_level = 14
-    #################
-    if duration_length <= 20:
-        severity_level = 1
-    elif duration_length <= 40:
-        severity_level = 2
-    elif duration_length <= 60:
-        severity_level = 3
-    elif duration_length <= 80:
-        severity_level = 4
-    elif duration_length <= 100:
-        severity_level = 5
-    else:
-        severity_level = 6
-    # state_list[12] = severity_level
-    number_of_severity_levels = 6
-    if number_of_severity_levels > 2 and wrong_severity_level_with_probability != 0:
-        number = int(np.random.choice([1, 2], size=(1,), p=[wrong_severity_level_with_probability,
-                                                            1 - wrong_severity_level_with_probability]))
-        if number == 1:
-            # then the level is a wrong one
-            severity_level = random.randint(1, number_of_severity_levels)
-    if add_event_types == 1:
-
-        event_type = R_change_dynamic_travel_time['event_types'][0]
-        state_list = [state_list[0], severity_level, event_type]
-    else:
-        state_list = [state_list[0], severity_level]
-    state = np.array([state_list]).astype(float)
-    return state
-
-def check_RL_ALNS_iteraction_bug():
-    if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1 and len(Intermodal_ALNS34959.state_reward_pairs) == 0:
-        print('gfsfsfagsgfd')
-        print('gfsfsfagsgfd')
-class coordinationEnv(Env):
-    def __init__(self):
-        # Actions we can take, wait, go
-        self.action_space = Discrete(2)
-        # Cost array
-        # self.observation_space = Box(low=np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), high=np.array([24, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 24, 14]))
-        if add_event_types == 1:
-            self.observation_space = Box(low=np.array([0, 0, 0]), high=np.array([200, 6, 6]))
-        else:
-            self.observation_space = Box(low=np.array([0, 0]),high=np.array([200, 6]))
-        # self.state = [random.choice(range(0,24)), random.choice(range(0,11))]
-        # Set coordination length
-        self.horizon_length = 0
-        # self.dis = 0
-
-    #@profile()
-    def step(self, action):
-        global state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, iteration_times, RL_drop_finish, episode_length, next_state_reward_time_step, next_state_penalty_time_step, time_s, all_average_reward, all_deviation, timestamps
-
-        # truck picks up containers at A, then go to B to transfer to barge, plan transshipment time is 30
-        # between A and B, 300 km, truck speed 75 km/h, so 4 hour go to terminal B, truck on route 5/h
-        # therefore, when truck arrives before 30, if wait, then 1/h, if store containers 5/h, if arrives after 30, 20/h
-        # new case under uncertainty: but barge delayed, new transshipment time is 35
-        #
-        # Apply action
-        # 0 wait 1/h
-        # 1 go 5/h,
-        # 2 store 20/h
-
-
-        #choose T
-        #Contargo/COSCO has two options, choose Rotterdam or Antwerp
-        #                     Contargo
-        #               Rotterdam  Antwerp
-        #COSCO Rotterdam    (1,2)    (0,0)
-        #      Antwerp      (0,0)    (2,1)
-        # For COSCO's transportation, Rotterdam is the best choice and the profit is 2. For Contargo's transportation, Antwerp is the best choice
-        # if both COSCO and Contargo choose unilateral action, i.e., COSCO choose Rotterdam and Contargo choose Antwerp, then reward is 0.
-        # Only when they choose the same terminal, reward is positive.
-        # if self.state[0][0] >= 10 or self.state[0][0] <= 14:
-            # congestion_duration = random.choice(range(0,4))
-            # congestion_duration = np.random.uniform(low=1, high=5)
-        # if self.state[0][1]
-        if add_ALNS == 1:
-            if time_s >= total_timesteps2:
-                wait_training_finish_last_iteration = 1
-
-
-            #send the action to ALNS, and let it check the feasibility
-            if evaluate == 1:
-                # chosen_pair = state_action_reward_collect[list_of_collect_index[number_of_collect]]
-                reward = state_action_reward_collect_for_evaluate[state_keys[number_of_state_key]][action]
-                all_rewards_list.append(reward)
-                number_of_state_key += 1
-            else:
-                send_action(action)
-
-                #get the reward from ALNS
-                while True:
-                    # print('step 1')
-                    stop_wait()
-                    break_flag = 0
-                    for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
-                        # try:
-                            # print('RL', Intermodal_ALNS34959.state_reward_pairs)
-                        try:
-                        # print(Intermodal_ALNS34959.state_reward_pairs,pair_index)
-                            check = Intermodal_ALNS34959.state_reward_pairs['uncertainty_index'][pair_index] == uncertainty_index and \
-                                Intermodal_ALNS34959.state_reward_pairs['vehicle'][pair_index] == vehicle and Intermodal_ALNS34959.state_reward_pairs['request'][pair_index] == request and Intermodal_ALNS34959.state_reward_pairs['reward'][pair_index] != -10000000
-                        except:
-                            #continue while break current for loop
-                            #IndexError: tuple index out of range may happen and I do not know why. Maybe ALNS is changing it and RL use it, so conflict
-                            break
-                        #     print(pair_index, Intermodal_ALNS34959.state_reward_pairs, 'IndexError: tuple index out of range')
-                        #     sys.exit(-1)
-                        if check:
-                            reward = Intermodal_ALNS34959.state_reward_pairs['reward'][pair_index]
-                            if type(reward).__module__ == 'numpy':
-                                reward = reward[0,0]
-                            all_rewards_list.append(reward)
-                            # parallel_save_excel(path + 'state_reward_pairs.xlsx', state_reward_pairs, 'state_reward_pairs')
-                            uncertainty_type = Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index]
-                            #drop the finish
-                            # Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.drop(
-                            #     labels=pair_index,
-                            #     axis=0)
-                            break_flag = 1
-                            break
-                        elif Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] == -10000000:
-                            send_action(action)
-                        # except:
-                        #     break
-                    if break_flag == 1:
-                        drop_record = 1
-                        if drop_record == 1:
-                            if uncertainty_type == 'finish':
-                                for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
-                                    if Intermodal_ALNS34959.state_reward_pairs['uncertainty_index'][
-                                        pair_index] == uncertainty_index and Intermodal_ALNS34959.state_reward_pairs['request'][
-                                                pair_index] == request and Intermodal_ALNS34959.state_reward_pairs['reward'][pair_index] != -10000000:
-                                        # print('RL_drop', Intermodal_ALNS34959.state_reward_pairs)
-
-                                        # collect the historical state_action_reward pairs
-                                        while True:
-                                            # print('step 2')
-                                            stop_wait()
-                                            try:
-                                                add_row = list(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
-                                                break
-                                            except:
-                                                print("add_row = list(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])")
-                                                continue
-                                        if np.size(state_action_reward_collect) > 0:
-                                            if not any(np.equal(state_action_reward_collect,add_row).all(1)):
-                                                state_action_reward_collect = np.vstack([state_action_reward_collect, add_row])
-                                                table_number_collect[len(state_action_reward_collect)-1] = [Dynamic_ALNS_RL34959.table_number, Intermodal_ALNS34959.request_number_in_R, Intermodal_ALNS34959.duration_type, Intermodal_ALNS34959.dynamic_t_begin]
-                                        else:
-                                            state_action_reward_collect = np.vstack(
-                                                [state_action_reward_collect, add_row])
-                                            table_number_collect[len(state_action_reward_collect)-1] = [Dynamic_ALNS_RL34959.table_number, Intermodal_ALNS34959.request_number_in_R, Intermodal_ALNS34959.duration_type, Intermodal_ALNS34959.dynamic_t_begin]
-                                        break
-                                        # remove two records of uncertainty begin and finish only when uncertainty finishes
-                                        # Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.drop(labels=pair_index,
-                                        #                                                                   axis=0)
-                                #clear all data in pairs
-                                Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.iloc[0:0]
-                                        # print('RL_drop_finish', Intermodal_ALNS34959.state_reward_pairs)
-                        RL_drop_finish = 1
-
-
-                        break
-        else:
-            for terminal in range(10):
-                if time_dependent == 0:
-                    locals()['congestion_duration' + str(int(terminal))] = np.random.normal(eval('congestion_'+str(int(terminal)) + '_mean'),1)
-                else:
-                    locals()['congestion_duration' + str(int(terminal))] = np.random.normal(
-                        self.state[0][11]%24/5, 1)
-            # congestion_duration1 = np.random.normal(congestion_2_mean,1)
-            # congestion_duration2 = np.random.normal(congestion_3_mean,1)
-            # congestion_duration0 = np.random.gamma(congestion_1_mean, 1)
-            # congestion_duration1 = np.random.gamma(congestion_2_mean, 1)
-            time_s += 1
-            if time_s % iteration_multiply == 0:
-                timestamps.append(time_s)
-                time_s_save = time_s
-            #     model.save('congestion_terminal_mean_list' + '_20220220congestion_stochastic100000')
-                # load
-                # model = PPO.load("PPO2021113a0coordination")
-                average_reward, deviation = evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
-                all_average_reward.append(average_reward)
-                all_deviation.append(average_reward)
-                time_s = time_s_save
-
-            if time_s == iteration_numbers_unit * iteration_multiply:
-                # top_line = [a + b for a, b in zip(all_average_reward, all_deviation)]
-                # bottom_line = [a - b for a, b in zip(all_average_reward, all_deviation)]
-                real_average_reward = [element / episode_length for element in all_average_reward]
-                plt.plot(timestamps, all_average_reward)
-                # plt.fill_between(timestamps, bottom_line, top_line)
-                plt.ylabel('Average Reward')
-                plt.xlabel('Timestamp')
-                # plt.title('Congested terminals: ' + str(congested_terminals))
-                # plt.show()
-                if repeat == 4:
-                    plt.savefig(
-                        "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/Average reward plots/finite_horizon_length" + str(episode_length) + "_delay_reward_time_dependent" + str(time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_"  + str(iteration_multiply) + "multiply" + '.pdf',
-                        format='pdf', bbox_inches='tight')
-            influenced_time = 0
-            if non_stationary == 0 or (time_s  <= iteration_numbers_unit * iteration_multiply / 2):
-
-                for i in range(1, 11):
-                    terminal = self.state[0][i]
-                    if terminal == -1:
-                        break
-                    # travel_time = 3
-                    locals()['latter_terminal_influenced_time' + str(int(terminal))] = max(0, eval(
-                        'congestion_duration' + str(int(self.state[0][i]))))
-
-                    for j in range(1,i):
-                        locals()['latter_terminal_influenced_time' + str(int(terminal))] = eval('latter_terminal_influenced_time' + str(int(terminal))) - eval('congestion_duration' + str(int(self.state[0][j]))) - eval('travel_time_' + mode)[int(self.state[0][j]), int(self.state[0][j+1])]
-                    locals()['latter_terminal_influenced_time' + str(int(terminal))] = max(0, eval('latter_terminal_influenced_time' + str(int(terminal))))
-
-                    influenced_time = influenced_time + eval('latter_terminal_influenced_time' +  str(int(terminal)))
-            else:
-                # influenced_time = np.random.normal(2,1)
-                influenced_time = random.choice(range(0, 8))
-            # if self.state[0][11] >= 18 or self.state[0][11] <= 8:
-            #     if action == 0:
-            #         self.state = 2
-            #     else:
-            #         self.state = 0
-            # else:
-            if next_state_reward_time_step == time_s:
-                # reward = 1
-                reward = -1
-            elif next_state_penalty_time_step == time_s:
-                # reward = -1
-                reward = -3
-            else:
-                reward = -2
-
-            if (action == 0 and (self.state[0][0] >= influenced_time)) or (action == 1 and (self.state[0][0] < influenced_time)):
-                next_state_reward_time_step = time_s + 1
-            else:
-                next_state_penalty_time_step = time_s + 1
-
-
-            new_seq = get_new_seq()
-            self.state = np.array([[random.choice(range(0, 4)), new_seq[0], new_seq[1], new_seq[2], new_seq[3],
-                                    new_seq[4], new_seq[5], new_seq[6], new_seq[7], new_seq[8], new_seq[9],
-                                    random.choice(range(0, 24))]]).astype(float)
-
-            # # Calculate reward
-            # if self.state == 2:
-            #     reward = 1
-            # else:
-            #     reward = 0
-        # Reduce coordination length by 1 second
-        self.horizon_length += 1
-        # print(self.horizon_length)
-            # Check if coordination is done
-        if self.horizon_length == episode_length:
-            done = True
-        else:
-            done = False
-
-        # Apply temperature noise
-        # self.state += random.randint(-1,1)
-        # Set placeholder for info
-        info = {}
-        print(time_s)
-        # Return step information
-        print(self.state, 'action', action,  reward)
-        if add_ALNS == 1:
-            time_s += 1
-        return self.state, reward, done, info
-
-    def render(self):
-        # Implement viz
-        pass
-
-    #@profile()
-    def reset(self):
-        global wait_training_finish_last_iteration, number_of_state_key, state_keys, congested_terminals, uncertainty_index, vehicle, request
-        #check_RL_ALNS_iteraction_bug()
-        wait_training_finish_last_iteration = 0
-        # Reset initial cost
-        # self.state = np.array([[random.choice(range(0,24)),random.choice(range(0,4))]]).astype(float)
-        #generate a random terminal sequence
-        if add_ALNS == 0:
-            new_seq = get_new_seq()
-            self.state = np.array([[random.choice(range(0, 4)),new_seq[0],new_seq[1],new_seq[2], new_seq[3],new_seq[4],new_seq[5],new_seq[6],new_seq[7],new_seq[8], new_seq[9], random.choice(range(0, 24))]]).astype(float)
-        else:
-            if evaluate == 1:
-                if number_of_state_key >= len(state_keys):
-                    number_of_state_key = 0
-
-                # chosen_pair = state_action_reward_collect[list_of_collect_index[number_of_collect]]
-                self.state = np.array([tuple(state_keys[number_of_state_key])])
-
-            else:
-                #this is used for both learning and implement
-                #read which terminals a vehicle passes
-                break_flag = 0
-                #check_RL_ALNS_iteraction_bug()
-                while True:
-                    #check_RL_ALNS_iteraction_bug()
-                    # if implement == 1 and ALNS_got_action_in_implementation == 0:
-                    #     print('it should be 1')
-                    # print('reset 1')
-                    stop_wait()
-                    # Intermodal_ALNS34959.state_reward_pairs = parallel_read_excel(path + 'state_reward_pairs.xlsx', 'state_reward_pairs')
-                    for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
-                        #check_RL_ALNS_iteraction_bug()
-                        while True:
-                            #check_RL_ALNS_iteraction_bug()
-                            # print('reset 2')
-                            stop_wait()
-                            try:
-                                Intermodal_ALNS34959.ALNS_end_flag
-                            except:
-                                continue
-                            if Intermodal_ALNS34959.ALNS_end_flag == 1:
-                                save_plot_reward_list()
-                                sys.exit('end_RL_due_ALNS_ends')
-                            break
-                        try:
-                            if Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] == -10000000:
-                                #check_RL_ALNS_iteraction_bug()
-                                chosen_pair = Intermodal_ALNS34959.state_reward_pairs.loc[pair_index]
-                                self.state = get_state(chosen_pair)
-                                uncertainty_index, vehicle, request = Intermodal_ALNS34959.state_reward_pairs['uncertainty_index'][pair_index], Intermodal_ALNS34959.state_reward_pairs['vehicle'][pair_index], Intermodal_ALNS34959.state_reward_pairs['request'][pair_index]
-                                break_flag = 1
-                                break
-                        except:
-                            continue
-
-                    if break_flag == 1:
-                        break
-        # Reset coordination time
-        self.horizon_length = 0
-        # self.dis = 0
-        return self.state
-
-def get_new_seq():
-    sequence = [i for i in range(10)]
-    new_sequence = copy.deepcopy(sequence)
-    new_seq = []
-    for i in range(len(sequence)):
-        a_terminal = random.choice(sequence)
-        sequence.remove(a_terminal)
-        if random.choice([0, 1]) == 1:
-            if len(new_seq) > 1:
-                # continue
-                if eval('travel_time_' + mode)[old_terminal, a_terminal] > 10000:
-                    continue
-            new_seq.append(a_terminal)
-            old_terminal = a_terminal
-    congested_terminals = copy.deepcopy(new_seq)
-    for i in range(len(new_sequence) - len(new_seq)):
-        new_seq.append(-1)
-    return new_seq
-
-def append_new_line(file_name, text_to_append):
-    """Append given text as a new line at the end of file"""
-    # Open the file in append & read mode ('a+')
-    with open(file_name, "a+") as file_object:
-        # Move read cursor to the start of file.
-        file_object.seek(0)
-        # If file is not empty then append '\n'
-        data = file_object.read(100)
-        if len(data) > 0:
-            file_object.write("\n")
-        # Append text at the end of file
-        file_object.write(text_to_append)
-
-def main(algorithm2, mode2):
-    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat
-    add_event_types =0 
-    stop_everything_in_learning_and_go_to_implementation_phase = 0
-    clear_pairs_done = 0
-    # only_stop_once_by_implementation = 0
-    evaluate = 0
-    implement = 0
-    wrong_severity_level_with_probability = 0
-    while True:
-        try:
-            with open(Intermodal_ALNS34959.path + "/" + 'wrong_severity_level_with_probability.txt', 'w') as f:
-                f.write(f"{str(wrong_severity_level_with_probability)}\n")
-            break
-        except:
-            pass
-    RL_drop_finish = 0
-    iteration_times = 0
-    #actual
-    algorithm, mode = algorithm2, mode2
-    episode_length = 1
-    next_state_reward_time_step = -1
-    next_state_penalty_time_step = -1
-    wait_training_finish_last_iteration = 0
-    add_ALNS = 1
-    all_rewards_list = []
-    if add_ALNS == 1:
-        while True:
-            stop_wait()
-            try:
-                Intermodal_ALNS34959.state_reward_pairs
-            except:
-                continue
-            break
-    iteration_numbers_unit = 1
-    time_dependent = 0
-    record_results = pd.DataFrame(columns=['congestion_terminal_mean_list', 'average_reward', 'deviation'])
-    D_path = "A:/MYpython/34959_RL/D_EGS - 10r.xlsx"
-    # algorithm = 'PPO'
-    # mode = 'barge'
-
-    D_origin_barge = pd.read_excel(D_path, 'Barge')
-    D_origin_train = pd.read_excel(D_path, 'Train')
-    D_origin_truck = pd.read_excel(D_path, 'Truck')
-
-    D_origin_barge = D_origin_barge.set_index('N')
-    D_origin_train = D_origin_train.set_index('N')
-    D_origin_truck = D_origin_truck.set_index('N')
-
-    D_origin_barge = D_origin_barge.values
-    D_origin_train = D_origin_train.values
-    D_origin_truck = D_origin_truck.values
-
-    travel_time_barge = D_origin_barge/15
-    travel_time_train = D_origin_train/45
-    travel_time_truck = D_origin_truck/75
-
-    for repeat in range(1):
-        congestion_terminal_mean_list = []
-        for terminal in [i for i in range(10)]:
-            globals()['congestion_' + str(int(terminal)) + '_mean'] = random.choice(range(0,4))
-            congestion_terminal_mean_list.append(eval('congestion_' + str(int(terminal)) + '_mean'))
-            # for congestion_2_mean in range(4):
-            #     for congestion_3_mean in range(10):
-
-        env=coordinationEnv()
-
-        # env.observation_space.sample()
-        # env.reset()
-        # from stable_baselines3.common.env_checker import check_env
-        # # check_env(env, warn=True)
-        # episodes = 5
-        # for episode in range(1, episodes + 1):
-        #     state = env.reset()
-        #     done = False
-        #     score = 0
-        #
-        #     while not done:
-        #         env.render()
-        #         action = env.action_space.sample()
-        #         n_state, reward, done, info = env.step(action)
-        #         score += reward
-        #     print('Episode:{} Score:{}'.format(episode, score))
-        # env.close()
-
-
-        log_path = os.path.join('Training', 'Logs')
-        # model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=log_path)
-        #default n_steps = 2048
-        #while True:
-         #   try:
-        if algorithm == 'PPO':
-            model = eval(algorithm + "('MlpPolicy', env,  n_steps = 10, verbose=1, learning_starts = 10, device='cpu')")
-        else:
-            model = eval(algorithm + "('MlpPolicy', env, verbose=1, learning_starts = 10, device='cpu')")
-            #break
-           # except:
-            #    continue
-        # #########imitation learning both baseline and baseline3 have bugs and can't be solved.
-        # # baseline: ValueError: Cannot feed value of shape (1, 1, 11) for Tensor 'deepq/input/Ob:0', which has shape '(?, 11)'
-        # #           and have error even when run official example
-        # # baseline3's imitation learning need a library only can be used in Linux
-        # generate_expert_traj(model, 'congestion', env, n_timesteps=int(1e5), n_episodes=10)
-        # # Using only one expert trajectory
-        # # you can specify `traj_limitation=-1` for using the whole dataset
-        # dataset = ExpertDataset(expert_path='congestion.npz',
-        #                         traj_limitation=1, batch_size=128)
-        # # Pretrain the PPO2 model
-        # model.pretrain(dataset, n_epochs=iteration_multiply)
-        ############
-        # info["TimeLimit.truncated"] = True
-        time_s = 0
-        all_average_reward = []
-        all_deviation = []
-        timestamps = []
-        # for time_stamp in range(10000):
-        #     model.learn(total_timesteps=10)
-        start_time = timeit.default_timer()
-        non_stationary = 0
-        iteration_multiply = 1
-        total_timesteps2 = iteration_numbers_unit * iteration_multiply
-        sucess_times = 0
-        state_action_reward_collect = np.array(np.empty(shape=(0, 9)))
-        table_number_collect = {}
-        for number_of_learn_evaluate_loops in range(1000000000):
-            if implement == 1:
-                break
-            model.learn(total_timesteps=total_timesteps2)
-            training_time = timeit.default_timer() - start_time
-            try:
-                with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                        episode_length) + "_delay_reward_time_dependent" + str(
-                    time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-                    iteration_multiply) + "multiply" + 'training_time.txt', 'w') as f:
-                    f.write(f"{str(training_time)}\n")
-            except:
-                pass
-            #model.save('congestion_terminal_mean_list' + '_20220220congestion_stochastic100000')
-            #load
-            # model = PPO.load("PPO2021113a0coordination")
-            # iteration_times += 1
-            # if iteration_times > 5:
-            evaluate = 1
-
-            state_action_reward_collect_for_evaluate = {}
-
-            list_of_collect_index = range(len(state_action_reward_collect))
-            for collect_index in list_of_collect_index:
-                chosen_pair = state_action_reward_collect[collect_index]
-                state = get_state(chosen_pair,table_number_collect[collect_index][0],table_number_collect[collect_index][1],table_number_collect[collect_index][2],table_number_collect[collect_index][3])
-                state_key = tuple(state[0])
-                if state_key not in state_action_reward_collect_for_evaluate.keys():
-                    state_action_reward_collect_for_evaluate[state_key] = {}
-                state_action_reward_collect_for_evaluate[state_key][chosen_pair[7]] = chosen_pair[8]
-            delete_keys = []
-            for state_key in state_action_reward_collect_for_evaluate.keys():
-                if len(state_action_reward_collect_for_evaluate[state_key]) < 2:
-                    delete_keys.append(state_key)
-            for state_key in delete_keys:
-                del state_action_reward_collect_for_evaluate[state_key]
-            if state_action_reward_collect_for_evaluate == {}:
-                average_reward, deviation = -1000, -1000
-            else:
-                state_keys = list(state_action_reward_collect_for_evaluate.keys())
-                number_of_state_key = 0
-                for _ in range(1):
-                    average_reward, deviation = evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
-                    print('congestion_terminal_mean_list', congestion_terminal_mean_list, average_reward, deviation)
-            print('evaluation', 'average_reward', average_reward, 'deviation', deviation)# sys.exit('stop_it_in_testing')
-            if average_reward >= 0.9:
-                sucess_times += 1
-                if sucess_times >= 5:
-                    implement = 1
-                    try:
-                        with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                                episode_length) + "_delay_reward_time_dependent" + str(
-                            time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-                            iteration_multiply) + "multiply" + 'time_s.txt', 'w') as f:
-                            f.write(f"{str(time_s)}\n")
-                    except:
-                        pass
-            else:
-                sucess_times = 0
-            if time_s >= 1:
-
-                implement = 1
-                try:
-                    with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                            episode_length) + "_delay_reward_time_dependent" + str(
-                        time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-                        iteration_multiply) + "multiply" + 'time_s_reach_max.txt', 'w') as f:
-                        f.write(f"{str(time_s)}\n")
-                except:
-                    pass
-
-            wait_training_finish_last_iteration = 0
-            evaluate = 0
-            # record_results = record_results.append([travel_time, congestion_1_mean, congestion_2_mean, average_reward, deviation])
-        if implement == 1:
-            stop_everything_in_learning_and_go_to_implementation_phase = 1
-            while True:
-                if os.path.exists('34959.txt'):
-                    sys.exit(78)
-                if Dynamic_ALNS_RL34959.RL_can_start_implementation_phase_from_the_last_table == 1:
-                    stop_everything_in_learning_and_go_to_implementation_phase = 0
-                    break
-            # if Intermodal_ALNS34959.used_interrupt == 1:
-            #     print('I use interrupt here!!')
-                # Intermodal_ALNS34959.interrupt_by_implement_is_one_and_assign_action_once_only == 1, the alns will be stopped because it is transferring training mode to implementation mode, then it will appear this, and then go to next iteration
-            Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.iloc[0:0]
-            clear_pairs_done = 1
-            Intermodal_ALNS34959.ALNS_implement_start_RL_can_move = 0
-            # Intermodal_ALNS34959.used_interrupt = 0  # only use it as 1 once, then always be 0
-            #check_RL_ALNS_iteraction_bug()
-            # continue
-
-            # Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.iloc[0:0]
-            # clear_pairs_done = 1
-
-            while True:
-                while True:
-                    if os.path.exists('34959.txt'):
-                        sys.exit(78)
-                    # if len(Intermodal_ALNS34959.state_reward_pairs) == 1 and implement == 1:
-                    #     print('i should check this wrong')
-                    if Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
-                        Intermodal_ALNS34959.ALNS_implement_start_RL_can_move = 0
-                        break
-                # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
-                #     print('wrong...')
-                #check_RL_ALNS_iteraction_bug()
-                # if time_s == 22:
-                #     print('c')
-                # #check_RL_ALNS_iteraction_bug()
-                # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
-                #     print('wrong...')
-                # if len(Intermodal_ALNS34959.state_reward_pairs) == 1 and implement == 1:
-                #     print('i should check this wrong')
-                obs = env.reset()
-                # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
-                #     print('wrong...')
-                # #check_RL_ALNS_iteraction_bug()
-                # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
-                #     print('gesa')
-                print('obs', obs)
-                # while True:
-                implementation_start_time = timeit.default_timer()
-                action, _states = model.predict(obs)
-                # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
-                #     print('wrong...')
-                # #check_RL_ALNS_iteraction_bug()
-                # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
-                #     print('gesa')
-                implementation_time = timeit.default_timer() - implementation_start_time
-                try:
-                    # Append one line to a file that does not exist
-                    implementation_time_path = Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
-                        episode_length) + "_delay_reward_time_dependent" + str(
-                        time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(
-                        iteration_multiply) + "multiply" + 'implementation_time.txt'
-                    append_new_line(implementation_time_path, str(implementation_time))
-                except:
-                    pass
-                ALNS_got_action_in_implementation = 0
-                #here i do not know why the Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'] is finisih (maybe because implement_or_not is still 0 when it is the first implementation and the previous insertion/removal still unfinished), it should be begin because it is implement, so i set it as begin directly
-                #Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'] = 'begin'
-                clear_pairs_done = 0
-                # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
-                #     print('gesa')
-                #check_RL_ALNS_iteraction_bug()
-                send_action(action[0])
-                #check_RL_ALNS_iteraction_bug()
-                # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
-                #     print('gesa')
-
-                #check_RL_ALNS_iteraction_bug()
-                while True:
-                    # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
-                    #     print('wrong...')
-                    # print('main 1')
-                    # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
-                    #     print('gesa')
-                    if Intermodal_ALNS34959.state_reward_pairs.iloc[0]['action'] == -10000000:
-                        send_action(action[0])
-                    if ALNS_got_action_in_implementation == 1 or len(Intermodal_ALNS34959.state_reward_pairs) == 0:#danger donot know why in rare case Intermodal_ALNS34959.state_reward_pairs is empty when alns got action is 0, but i think i can let it go to next iteration
-                        # clear all data in pairs
-                        if os.path.exists('34959.txt'):
-                            sys.exit(78)
-                        #check_RL_ALNS_iteraction_bug()
-                        ALNS_got_action_in_implementation = 0
-                        Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.iloc[0:0]
-                        # if len(Intermodal_ALNS34959.state_reward_pairs) == 1 and implement == 1:
-                        #     print('i should check this wrong')
-                        Intermodal_ALNS34959.ALNS_implement_start_RL_can_move = 0
-                        clear_pairs_done = 1
-                        break
-                    #check_RL_ALNS_iteraction_bug()
-                    # n_state, reward, done, info = env.step(action)
-                    # env.render()
-                    # if done:
-                        # print('n_state', n_state, 'reward', reward, 'info', info)
-                    # break
-
-        else:
-            df_length = len(record_results)
-            record_results.loc[df_length] = [congestion_terminal_mean_list, average_reward, deviation]
-
-            #evaluate and print
-            obs = env.reset()
-
-            reward_all = 0
-            all_action = 0
-            evaluate_times = iteration_multiply
-            for i in range(evaluate_times):
-                # obs = np.array([random.choice([0,1])])
-                obs = env.reset()
-                print('obs', obs)
-                while True:
-                    # print('main 2')
-                    action, _states = model.predict(obs)
-                    n_state, reward, done, info = env.step(action)
-                    # env.render()
-                    # print('action', action, 'n_state', n_state, 'reward', reward, 'info', info)
-                    all_action = all_action + action
-                    reward_all = reward_all + reward
-                    if done:
-                        # print('n_state', n_state, 'reward', reward, 'info', info)
-                        break
-
-            print(mode, 'remove_proportion', all_action/evaluate_times)
-            print('average_reward', reward_all/evaluate_times)
-
-            #random
-            reward_all = 0
-            for i in range(iteration_multiply):
-                env.reset()
-                action = random.choice(range(0, 2))
-                if env.step(action)[1] == 1:
-                    reward_all += 1
-            average_reward = reward_all / iteration_multiply
-            print('congestion_terminal_mean_list',congestion_terminal_mean_list, average_reward)
-            # record_results = record_results.append([travel_time, congestion_1_mean, congestion_2_mean, average_reward, '-'])
-            df_length = len(record_results)
-            record_results.loc[df_length] = [congestion_terminal_mean_list, average_reward,
-                                             '-']
-            with pd.ExcelWriter(
-                       "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/Average reward plots/compare_algorithms_modes_episode_lenth2/finite_horizon_length" + str(episode_length) + "_delay_reward_time_dependent" + str(time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(iteration_multiply) + "multiply" + '.xlsx',) as writer:  # doctest: +SKIP
-                record_results.to_excel(writer, sheet_name='congestion')
-
-if __name__ == '__main__':
-    # ['A2C', 'DDPG', 'HER', 'SAC', 'TD3', 'PPO', 'DQN']
-    # for algorithm in ['A2C', 'PPO', 'DQN']:
-    for algorithm in ['DQN']:
-        #DDPG AssertionError: The algorithm only supports <class 'gym.spaces.box.Box'> as action spaces but Discrete(2) was provided
-        #Baselines 2.1.0, `HER` is now a replay buffer class `HerReplayBuffer`.\n "
-# ImportError: Since Stable Baselines 2.1.0, `HER` is now a replay buffer class `HerReplayBuffer`.
-#  Please check the documentation for more information: https://stable-baselines3.readthedocs.io/
-#'TD3', SAC AssertionError: The algorithm only supports <class 'gym.spaces.box.Box'> as action spaces but Discrete(2) was provided
-
-        for mode in ['all']:
-            # , 'truck' 'barge'
-            # mode = 'train'
-            # mode = 'truck'
-            main(algorithm, mode)
-
-
-5.generate_un_expected_events_by_stochastic_info_RL
-import pandas as pd
-import numpy as np
-import random
-import os.path
-from openpyxl import load_workbook
-import matplotlib.pyplot as plt
-data_path = "/data/yimeng/Case study/Intermodal_EGS_data_all.xlsx"
-Data = pd.ExcelFile(data_path)
-wb = load_workbook(data_path, read_only=True)
-N = pd.read_excel(Data, 'N')
-T = pd.read_excel(Data, 'T')
-K = pd.read_excel(Data, 'K')
-o = pd.read_excel(Data, 'o')
-target_initial_routes = 1
-if target_initial_routes == 1:
-    #first I need to get the initial routes
-    for r in [5, 10, 20, 30, 50, 100]:
-        #exp number 12793, 12792, 12794
-        exp_numbers = {5:12793, 10:12792, 20:12794, 30: 12816, 50: 12817, 100: 12818}
-
-        routes_path = "/data/yimeng/Figures/experiment" + str(exp_numbers[r]) + "/percentage0parallel_number9dynamic0/best_routespercentage0parallel_number9dynamic0_" + str(exp_numbers[r]) + ".xlsx"
-        xls = pd.ExcelFile(routes_path)
-        routes = pd.read_excel(xls, None, index_col=0)
-        used_ks = []
-        for k in routes.keys():
-            if len(routes[k].loc[0]) > 2:
-                used_ks.append(k)
-        terminal_arrival_time = []
-        for k in used_ks:
-            route = routes[k]
-            print(k)
-            if 'Barge' in k:
-                mode = 1
-
-            elif 'Train' in k:
-                mode = 2
-            elif 'Truck' in k:
-                mode = 3
-            else:
-                print('error')
-            for column_index in route.columns[1:-2]:
-                terminal_arrival_time.append([route[column_index][0],route[column_index][1], mode])
-        terminal_arrival_time_array = np.array(terminal_arrival_time)
-        terminal_arrival_time_array = terminal_arrival_time_array[np.argsort(terminal_arrival_time_array[:, 1])]
-        R = pd.read_excel(Data, 'R_' + str(r))
-        basic_basic_path = "/home/yimeng/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_log_mu_1_1_not_time_dependent"
-        isExist = os.path.exists(basic_basic_path)
-        if not isExist:
-            # Create a new directory because it does not exist
-            os.makedirs(basic_basic_path)
-        basic_path = basic_basic_path + "/R" + str(
-            r)
-        isExist = os.path.exists(basic_path)
-        if not isExist:
-            # Create a new directory because it does not exist
-            os.makedirs(basic_path)
-
-        for table in range(1000):
-            end_time = 0
-            uncertainty_index = 0
-            output_path = basic_path + "/" + "Intermodal_EGS_data_dynamic_congestion" + str(
-                table) + ".xlsx"
-            with pd.ExcelWriter(output_path) as writer:  # doctest: +SKIP
-                N.to_excel(writer, sheet_name='N', index=False)
-                R.to_excel(writer, sheet_name='R_' + str(r), index=False)
-                T.to_excel(writer, sheet_name='T', index=False)
-                K.to_excel(writer, sheet_name='K', index=False)
-                o.to_excel(writer, sheet_name='o', index=False)
-                for _ in range(len(terminal_arrival_time_array)):
-                    # start_time = int(random.choices(range(1, 3))[0])
-
-                    unexpected_events = pd.DataFrame(
-                        columns=['uncertainty_index', 'type', 'location_type', 'vehicle', 'location', 'duration',
-                                 'mode'])
-                    mode_terminal_pairs = []
-                    location = terminal_arrival_time_array[_,0]
-                    start_time = int(terminal_arrival_time_array[_,1])
-                    if start_time < end_time:
-                        #to make the durations of events not overlap, and here the end time is last event's end time
-                        continue
-                    mode = terminal_arrival_time_array[_,2]
-                    if [location, mode] in mode_terminal_pairs:
-                        continue
-                    #low impact one is / 5
-                    #high impact * 5
-                    #medium impact nothing
-                    #high_medium *3
-                    # mu, sigma = start_time % 24 * 3, 1
-                    terminal_dependent = 0
-                    if terminal_dependent == 1:
-                        if location < 5:
-                            mu, sigma = 80, 20  # mean and standard deviation
-                        else:
-                            mu, sigma = 5, 1  # mean and standard deviation
-                    else:
-                        mu, sigma = 1, 1  # mean and standard deviation
-                    duration_ = max(0, int(np.random.lognormal(mu, sigma)))
-                    save_plot_path = basic_path + '/distribution_' + 'start_time' + str(start_time) + 'mu' + str(mu) + 'sigma' + str(
-                        sigma) + '.pdf'
-                    if not os.path.exists(save_plot_path):
-                        s = np.random.lognormal(mu, sigma, 1000)
-                        normal_plot = 0
-                        if normal_plot == 1:
-                            count, bins, ignored = plt.hist(s, 30, density=True)
-                            plt.plot(bins, 1 / (sigma * np.sqrt(2 * np.pi)) *
-                                     np.exp(- (bins - mu) ** 2 / (2 * sigma ** 2)),
-                                     linewidth=2, color='r')
-                            plt.xlabel('Duration (h)')
-                            plt.ylabel('Probability')
-                            plt.title('Durations under normal distribution (mu=' + str(mu) + ', sigma=' + str(sigma) + ')')
-                        else:
-                            count, bins, ignored = plt.hist(s, 100, density=True, align='mid')
-
-                            x = np.linspace(min(bins), max(bins), 10000)
-
-                            pdf = (np.exp(-(np.log(x) - mu) ** 2 / (2 * sigma ** 2))
-
-                                   / (x * sigma * np.sqrt(2 * np.pi)))
-
-                            plt.plot(x, pdf, linewidth=2, color='r')
-
-                            plt.axis('tight')
-                            plt.xlabel('Duration (h)')
-                            plt.ylabel('Probability')
-                            plt.title(
-                                'Durations under lognormal distribution (mu=' + str(mu) + ', sigma=' + str(sigma) + ')')
-                        # plt.show()
-                        plt.savefig(save_plot_path,
-                            format='pdf', bbox_inches='tight')
-                        plt.close()
-
-                    if duration_ == 0:
-                        continue
-
-                    end_time = start_time + duration_
-                    duration = [start_time, end_time]
-
-                    mode_terminal_pairs.append([location, mode])
-                    for type in ['congestion', 'congestion_finish']:
-                        new_row = pd.Series(
-                            data={'uncertainty_index': uncertainty_index, 'type': type, 'location_type': 'node',
-                                  'vehicle': -1, 'location': location, 'duration': duration, 'mode': mode})
-                        unexpected_events = unexpected_events.append(new_row, ignore_index=True)
-
-                    uncertainty_index += 1
-                    if _ < len(terminal_arrival_time_array)-1:
-                        if int(terminal_arrival_time_array[_+1,1]) != start_time:
-                            # with pd.ExcelWriter(output_path) as writer:  # doctest: +SKIP
-
-                            unexpected_events.to_excel(writer, sheet_name='R_' + str(r) + '_' + str(start_time) + ' (2)',
-                                                       index=False)
-                        # start_time = end_time + random.choices(range(10))[0]
-
-else:
-    for r in [5, 10, 20, 30, 50, 100]:
-        R = pd.read_excel(Data, 'R_' + str(r))
-
-        for table in range(1000):
-
-            start_time = int(random.choices(range(1,3))[0])
-            uncertainty_index = 0
-            output_path = "/home/yimeng/Uncertainties Dynamic planning under unexpected events/Instances/" + "R" + str(r) + "/" + "Intermodal_EGS_data_dynamic_congestion" + str(
-                table) + ".xlsx"
-            with pd.ExcelWriter(output_path) as writer:  # doctest: +SKIP
-                N.to_excel(writer, sheet_name='N', index=False)
-                R.to_excel(writer, sheet_name='R_' + str(r), index=False)
-                T.to_excel(writer, sheet_name='T', index=False)
-                K.to_excel(writer, sheet_name='K', index=False)
-                o.to_excel(writer, sheet_name='o', index=False)
-                for _ in range(10):
-                    unexpected_events = pd.DataFrame(
-                        columns=['uncertainty_index', 'type', 'location_type', 'vehicle', 'location', 'duration', 'mode'])
-                    mode_terminal_pairs = []
-                    for __ in range(10):
-                        location = random.choices(range(10))[0]
-                        mode = random.choices([0, 1, 2])[0]
-                        if [location, mode] in mode_terminal_pairs:
-                            continue
-                        duration_ = max(0,int(np.random.lognormal(start_time % 24 / 5, 1)))
-                        if duration_ == 0:
-
-                            continue
-
-                        end_time = start_time + duration_
-                        duration = [start_time, end_time]
-
-                        mode_terminal_pairs.append([location,mode])
-                        for type in ['congestion', 'congestion_finish']:
-                            new_row = pd.Series(data={'uncertainty_index': uncertainty_index, 'type': type, 'location_type': 'node', 'vehicle': -1, 'location': location, 'duration': duration, 'mode':mode})
-                            unexpected_events = unexpected_events.append(new_row, ignore_index=True)
-
-                        uncertainty_index += 1
-                        # with pd.ExcelWriter(output_path) as writer:  # doctest: +SKIP
-
-                    unexpected_events.to_excel(writer, sheet_name='R_' + str(r) + '_' + str(start_time) + ' (2)', index=False)
-                    start_time = end_time + random.choices(range(10))[0]
- 
-6.不确定性分布类型战术表 (The Distribution Matrix)
-为了验证 RL 智能体在不同环境下的鲁棒性，我们设计了梯队化的分布方案。所有参数单位均为分钟 (Minutes)。
-1. 单一分布 (Single Mode)
-代号	分布类型 (Math)	参数设置 (R20 场景建议)	战术目的与物理含义
-Baseline	Log-Normal<br>对数正态	mean=3.0, sigma=0.5<br>(实际均值约 20-30 min)	【基准环境】<br>模拟日常的轻微延误（排队、小故障）。大部分事件很短，偶有长尾。RL 极少介入。
-Stress_Test	Normal<br>正态分布	loc=120, scale=30<br>(均值 2 小时)	【高压测试】<br>模拟严重交通事故或设备大修。拥堵时间极长，ALNS 无法通过微调避开，强制触发 RL。
-Chaos	Uniform<br>均匀分布	low=10, high=100<br>(完全随机)	【混沌环境】<br>模拟信息缺失或极端天气。延误时间毫无规律，测试 RL 的泛化应变能力。
-Wall	Constant<br>常量	value=300<br>(固定 5 小时)	【叹息之墙】<br>用于 Debug。绝对不可逾越的障碍，测试系统在极端条件下的边界行为。
-2. 混合分布 (Hybrid Mode) - 本次重构核心
-通过在 1000 个 Episode 中分段使用不同分布，训练 RL 的适应性。
-场景代号	组成逻辑 (Composition)	预期效果
-mixed_v1	0-249: Stress_Test (120min)<br>250-999: Chaos (10-100min)	先难后易。前 1/4 阶段用重炮轰击，强迫 RL 快速学会“绕行/移除”策略；后 3/4 阶段用随机环境打磨策略，防止过拟合。
-mixed_v2	0-499: Baseline<br>500-999: Stress_Test	温水煮青蛙。先让系统适应低难度，中途突然增加难度，测试模型的在线适应能力（Sim-to-Real 常用测试）。
-
-7.可视化系统
-生成器需要自动绘制以下图表：
-1. 包含元素
-直方图 (Histogram)：显示生成数据的频率分布（蓝色柱状图）。
-KDE 曲线 (Kernel Density Estimation)：平滑的概率密度曲线（深蓝色实线）。对于混合分布，KDE 会呈现明显的**“双峰”**形态。
-基准线 (Baseline Reference)：旧版本（R5/LogNormal）的分布轮廓（红色虚线）。用于直观对比新旧难度差异。
-情报看板 (Stats Board)：图表右上角的文本框，显示核心指标：
-Count: 样本总量
-Mean: 平均延误时长
-Max: 最大延误时长（确认是否达到 300+ 分钟）
-Wasserstein Dist: 与旧数据的距离
-2. 视觉判定标准
-合格：直方图重心明显右移（均值变大），覆盖范围广。
-优秀：混合场景下，清晰可见两个波峰（例如一个在 30 处，一个在 120 处）。
-失败：数据全部集中在 0-10 之间（说明参数设置太小，RL 无法触发）。
-
-8.分布相似度计算原理 (Similarity Metrics)
-为了量化“现在的环境比以前难了多少”，我们引入数学指标。
-1. Wasserstein 距离 (推土机距离) - 核心指标
-定义：将分布 A 的形状通过“推土”变成分布 B 的形状，所需的最小“功”（土量 
-×
-×
- 距离）。
-物理意义：如果旧数据平均延误 5 分钟，新数据平均延误 120 分钟，Wasserstein 距离大约就是 115。
-判断：该值越大，说明新环境变化越剧烈，RL 面临的挑战越大。
-2. KS 统计量 (Kolmogorov-Smirnov)
-定义：两个分布的累积分布函数（CDF）之间的最大垂直距离。
-范围：0（完全相同） 到 1（完全不同）。
-判断：如果我们希望新环境与旧环境截然不同，该值应接近 1.0。
-
-
-9.分析工具代码实现 (Python Specification)
-可以将此模块集成到生成器中
-import numpy as np
-import matplotlib.pyplot as plt
-import scipy.stats as stats
-from scipy.stats import wasserstein_distance, ks_2samp
-
-class DistributionAnalyzer:
-    """
-    【视觉雷达】分布分析与可视化工具
-    """
-    
-    @staticmethod
-    def analyze_and_plot(data_array, scenario_name, r_count, output_dir, baseline_data=None):
-        """
-        :param data_array: 本次生成的所有 Duration 数据 (List or Numpy Array)
-        :param baseline_data: (可选) 旧版本的基准数据，用于对比
-        """
-        data = np.array(data_array)
-        
-        # 1. 基础统计
-        mean_val = np.mean(data)
-        max_val = np.max(data)
-        
-        # 2. 绘图初始化
-        plt.figure(figsize=(10, 6))
-        
-        # 3. 绘制直方图 (新数据)
-        plt.hist(data, bins=50, density=True, alpha=0.6, color='skyblue', label='Current Scenario')
-        
-        # 4. 绘制 KDE 曲线 (新数据)
-        try:
-            kde = stats.gaussian_kde(data)
-            x_grid = np.linspace(min(data), max(data), 500)
-            plt.plot(x_grid, kde(x_grid), 'b-', lw=2, label='KDE (Current)')
-        except: pass
-
-        # 5. 对比基准 (旧数据)
-        sim_text = ""
-        if baseline_data is not None:
-            base = np.array(baseline_data)
-            # 计算距离
-            w_dist = wasserstein_distance(data, base)
-            ks_stat, _ = ks_2samp(data, base)
-            
-            # 绘制基准轮廓
-            try:
-                base_kde = stats.gaussian_kde(base)
-                plt.plot(x_grid, base_kde(x_grid), 'r--', lw=2, label='Baseline (Old)')
-            except: pass
-            
-            sim_text = f"\nWasserstein Dist: {w_dist:.1f}\nKS Stat: {ks_stat:.2f}"
-
-        # 6. 添加情报看板
-        stats_text = (
-            f"[Stats]\nMean: {mean_val:.1f} min\nMax: {max_val:.1f} min"
-            f"{sim_text}"
-        )
-        plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes,
-                 fontsize=10, verticalalignment='top', horizontalalignment='right',
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
-
-        # 7. 保存
-        plt.title(f"Duration Distribution - {scenario_name} (R{r_count})")
-        plt.xlabel("Delay Duration (min)")
-        plt.legend()
-        
-        save_path = f"{output_dir}/analysis_R{r_count}.png"
-        plt.savefig(save_path)
-        plt.close()
-        print(f"[雷达] 分析图已生成: {save_path}")
-
-
-10.ALNS代码
 import pandas as pd
 import numpy as np
 from collections import Counter
@@ -1845,9 +23,38 @@ from collections import defaultdict
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
 import os
 import wrapt
-from line_profiler import LineProfiler
-from numba import jit
+try:
+    from line_profiler import LineProfiler
+except ImportError:
+    class LineProfiler:
+        def __call__(self, *args, **kwargs):
+            def wrapper(func):
+                return func
+            return wrapper
+        def print_stats(self):
+            pass
+try:
+    from numba import jit
+except ImportError:
+    def jit(*args, **kwargs):
+        def wrapper(func):
+            return func
+        return wrapper
 import os.path
+
+def _index_int(value):
+    if pd.isna(value):
+        return value
+    try:
+        return int(value)
+    except Exception:
+        return value
+
+def _index_int_list(values):
+    try:
+        return [_index_int(v) for v in values]
+    except Exception:
+        return values
 
 # kernprof -l Intermodal_ALNS_new_operators_20201005.py
 # python -m line_profiler Intermodal_ALNS_new_operators_20201005.py.lprof
@@ -1856,10 +63,103 @@ import os.path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import pickle
 import hashlib
-import orjson
+try:
+    import orjson
+except ImportError:
+    import json
+    class _OrjsonFallback:
+        def dumps(self, obj, *args, **kwargs):
+            return json.dumps(obj).encode()
+        def loads(self, b, *args, **kwargs):
+            if isinstance(b, bytes):
+                b = b.decode()
+            return json.loads(b)
+    orjson = _OrjsonFallback()
 import json
-import skfuzzy as fuzz
-from skfuzzy import control as ctrl
+try:
+    import skfuzzy as fuzz
+    from skfuzzy import control as ctrl
+    _fuzzy_available = True
+except ImportError:
+    _fuzzy_available = False
+    class _DummyFuzz:
+        def __getattr__(self, item):
+            def _noop(*args, **kwargs):
+                return None
+            return _noop
+    fuzz = _DummyFuzz()
+    class _DummyCtrl:
+        def __getattr__(self, item):
+            def _noop(*args, **kwargs):
+                return None
+            return _noop
+    ctrl = _DummyCtrl()
+import rl_logging
+
+# 日志字段定义（与 RL 侧保持一致）
+TRACE_FIELDS = [
+    "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
+    "table_number", "dynamic_t_begin", "duration_type",
+    "delay_tolerance", "severity", "passed_terminals", "current_time",
+    "action", "reward", "action_meaning", "feasible", "source"
+]
+
+def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source="ALNS"):
+    try:
+        action_val = action if action is not None else row_dict.get("action", "")
+        action_meaning = ""
+        try:
+            if action_val in [-10000000, -10000000.0, ""]:
+                action_meaning = ""
+            else:
+                a_int = int(action_val)
+                if "insert" in stage:
+                    action_meaning = "接受插入" if a_int == 0 else "拒绝插入"
+                else:
+                    action_meaning = "等待/保持" if a_int == 0 else "重新规划"
+        except Exception:
+            action_meaning = ""
+        payload = {
+            "ts": rl_logging.now_ts(),
+            "phase": "implement" if 'dynamic_RL34959' in globals() and getattr(dynamic_RL34959, 'implement', 0) == 1 else "train",
+            "stage": stage,
+            "uncertainty_index": row_dict.get("uncertainty_index", ""),
+            "request": row_dict.get("request", ""),
+            "vehicle": row_dict.get("vehicle", ""),
+            "table_number": globals().get("Dynamic_ALNS_RL34959", None) and getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+            "dynamic_t_begin": globals().get("dynamic_t_begin", ""),
+            "duration_type": globals().get("duration_type", ""),
+            "delay_tolerance": row_dict.get("delay_tolerance", ""),
+            "severity": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "severity_level", ""),
+            "passed_terminals": row_dict.get("passed_terminals", ""),
+            "current_time": row_dict.get("current_time", ""),
+            "action": action_val,
+            "reward": reward if reward is not None else row_dict.get("reward", ""),
+            "action_meaning": action_meaning,
+            "feasible": feasible,
+            "source": source
+        }
+        rl_logging.append_row("rl_trace.csv", TRACE_FIELDS, payload)
+    except Exception as e:
+        print("log_rl_event error", e)
+
+def log_impl_reward(reward):
+    try:
+        step_id = ""
+        if hasattr(dynamic_RL34959, "next_step"):
+            step_id = dynamic_RL34959.next_step()
+        fields = getattr(dynamic_RL34959, "TRAIN_FIELDS", [
+            "ts", "phase", "step_idx", "reward", "avg_reward", "std_reward", "training_time", "implementation_time"
+        ])
+        payload = {
+            "ts": rl_logging.now_ts(),
+            "phase": "implement",
+            "step_idx": step_id,
+            "reward": reward
+        }
+        rl_logging.append_row("rl_training.csv", fields, payload)
+    except Exception as e:
+        print("log_impl_reward error", e)
 #may cause bug list:
 #1. request_flow_t is not updated when finding best solution by hash table
 import fuzzy_HP
@@ -11121,7 +9421,8 @@ def add_r_segment(r_number,new_r_segment_add):
         R_pool = np.vstack([R_pool, new_r_segment_add])
 
 def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward_list_in_implementation):
-    global ALNS_end_flag
+    global ALNS_end_flag, path, exp_number, request_number_in_R
+    print(f"\n>>> [Debug] Attempting to save table. Total rewards: {len(reward_list_in_implementation)}")
     if add_RL == 0:
         if ALNS_greedy_under_unknown_duration_assume_duration != 3:
             stop_segments = number_of_implementation / segment_length_in_RL_or_ALNS_implementation
@@ -11158,12 +9459,87 @@ def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward
                                       insertion_operator_insertion_action, insertion_operator_insertion_action_reward,
                                       insertion_operator_non_insertion_action,
                                       insertion_operator_non_insertion_action_reward, average_reward, std_reward]
-        path_action_reward_table = path + '/action_reward_table' + str(
-            exp_number - 1) + 'R' + str(request_number_in_R) + '.xlsx'
-        with pd.ExcelWriter(path_action_reward_table) as writer:  # doctest: +SKIP
-            action_reward_table.to_excel(writer, sheet_name='RL' + str(add_RL) + 'type' + duration_type + 'strategy' + str(ALNS_greedy_under_unknown_duration_assume_duration))
+        try:
+            summary_fields = [
+                "ts", "reward_count", "average_reward", "std_reward",
+                "removal_action", "removal_action_reward",
+                "removal_wait_action", "removal_wait_action_reward",
+                "insertion_action", "insertion_action_reward",
+                "insertion_non_action", "insertion_non_action_reward"
+            ]
+            rl_logging.append_row("rl_summary.csv", summary_fields, {
+                "ts": rl_logging.now_ts(),
+                "reward_count": len(reward_list_in_implementation),
+                "average_reward": average_reward,
+                "std_reward": std_reward,
+                "removal_action": removal_operator_removal_action,
+                "removal_action_reward": removal_operator_removal_action_reward,
+                "removal_wait_action": removal_operator_waiting_action,
+                "removal_wait_action_reward": removal_operator_waiting_action_reward,
+                "insertion_action": insertion_operator_insertion_action,
+                "insertion_action_reward": insertion_operator_insertion_action_reward,
+                "insertion_non_action": insertion_operator_non_insertion_action,
+                "insertion_non_action_reward": insertion_operator_non_insertion_action_reward
+            })
+        except Exception as e:
+            print("log summary error", e)
+        
+        # === [关键修复] 安全构建路径 ===
+        import os
+        
+        # 不要直接读 global path，先给它起个局部变量名来操作，避免 UnboundLocalError
+        try:
+            current_path_val = path
+        except NameError:
+            current_path_val = None
+            
+        # 强制构建一个安全的绝对路径
+        base_output_dir = r"A:\MYpython\34959_RL\Uncertainties Dynamic planning under unexpected events\Figures"
+        # 确保 exp_number 存在
+        safe_exp_num = exp_number if 'exp_number' in globals() else 34959
+        experiment_dir = f"experiment{safe_exp_num}"
+        
+        safe_path = os.path.join(base_output_dir, experiment_dir)
+        
+        # 覆盖 path
+        path = safe_path
+        
+        # 确保目录存在
+        if not os.path.exists(path):
+            try:
+                os.makedirs(path, exist_ok=True)
+                print(f">>> [Fix] Created directory: {path}")
+            except Exception as e:
+                print(f"!!! [Fix] Failed to create dir: {e}")
+        
+        # 构建文件名
+        # 确保 request_number_in_R 存在
+        safe_r_num = request_number_in_R if 'request_number_in_R' in globals() else 5
+        path_action_reward_table = os.path.join(path, f'action_reward_table{safe_exp_num-1}R{safe_r_num}.xlsx')
+        
+        print(f">>> [Fix] Saving Excel to: {path_action_reward_table}")
+        
+        try:
+            with pd.ExcelWriter(path_action_reward_table) as writer:
+                sheet_name_str = 'RL' + str(add_RL) + 'type' + str(duration_type) + 'strategy' + str(ALNS_greedy_under_unknown_duration_assume_duration)
+                # Excel sheet name 最大长度限制为 31
+                if len(sheet_name_str) > 31:
+                    sheet_name_str = sheet_name_str[:31]
+                action_reward_table.to_excel(writer, sheet_name=sheet_name_str)
+            print(">>> [Fix] Save Successful!")
+        except Exception as e:
+            print(f"!!! [Fix] Save Failed: {e}")
+            # 尝试保存到根目录作为备选，防止数据丢失
+            fallback_path = f"emergency_save_R{request_number_in_R}.xlsx"
+            action_reward_table.to_excel(fallback_path)
+            print(f"!!! [Fix] Saved to fallback: {os.path.abspath(fallback_path)}")
+
         ALNS_end_flag = 1
-        sys.exit('saved_table')
+        
+        # 3. 暴力退出
+        print(">>> [Fix] Force Exiting Process...")
+        import os
+        os._exit(0) # 比 sys.exit() 更强力，直接终止进程
 
 def stop_wait():
     if os.path.exists('34959.txt'):
@@ -11324,7 +9700,7 @@ def prepare_for_dynamic():
                 # else:
                 duration = eval(R_change_dynamic_travel_time['duration'][index])
                 if R_change_dynamic_travel_time['location_type'][index] == 'link':
-                    congestion_link = eval(R_change_dynamic_travel_time['location'][index])
+                    congestion_link = _index_int_list(eval(R_change_dynamic_travel_time['location'][index]))
                     congestion_links.append(congestion_link)
 
                     # for k in D.keys():
@@ -11334,7 +9710,7 @@ def prepare_for_dynamic():
 
                 else:
                     # congestion in node, remove current and future plans that use this node
-                    congestion_node = R_change_dynamic_travel_time['location'][index]
+                    congestion_node = _index_int(R_change_dynamic_travel_time['location'][index])
                     congestion_nodes.append(congestion_node)
                     congestion_nodes_at_begining[congestion_node] = duration
                     congestion_link = -1
@@ -11346,7 +9722,7 @@ def prepare_for_dynamic():
                 for node in remove_node_in_congestion_list:
                     del congestion_nodes_at_begining[node]
                 global influenced_mode_by_current_event
-                influenced_mode_by_current_event = R_change_dynamic_travel_time['mode'][index]
+                influenced_mode_by_current_event = _index_int(R_change_dynamic_travel_time['mode'][index])
                 for k in routes.keys():
                     if len(routes[k][0]) <= 2:
                         continue
@@ -11455,6 +9831,10 @@ def prepare_for_dynamic():
                                             if influenced_passed_terminals[1] != -1:
                                                 print('more than one terminal is congested')
                                             new_row = pd.Series(data={'uncertainty_index': uncertainty_index, 'uncertainty_type': 'begin', 'request': influenced_r, 'vehicle': k, 'delay_tolerance': delay_tolerance, 'passed_terminals': influenced_passed_terminals, 'current_time': duration[0], 'action': -10000000, 'reward': -10000000})
+                                            try:
+                                                log_rl_event(new_row.to_dict(), "begin_removal", action=-10000000, source="ALNS")
+                                            except Exception as e:
+                                                print("log begin_removal error", e)
 
                                             # if len(state_reward_pairs) > 1:
                                             #     print('len > 1')
@@ -11624,17 +10004,18 @@ def prepare_for_dynamic():
                     influenced_requests_lists_different_uncertainties[uncertainty_index] = []
             elif R_change_dynamic_travel_time['type'][index] == 'delay':
                 #delay
-                D[R_change_dynamic_travel_time['vehicle'][index]][eval(R_change_dynamic_travel_time['location'][index])[0],
-                     eval(R_change_dynamic_travel_time['location'][index])[1]] = 100000000000
+                delay_vehicle = _index_int(R_change_dynamic_travel_time['vehicle'][index])
+                delay_link = _index_int_list(eval(R_change_dynamic_travel_time['location'][index]))
+                D[delay_vehicle][delay_link[0], delay_link[1]] = 100000000000
             elif R_change_dynamic_travel_time['type'][index] == 'congestion_finish':
 
                 #check_repeat_r_in_R_pool(), check_T_k_record_and_R()
                 if R_change_dynamic_travel_time['location_type'][index] == 'link':
-                    congestion_link = eval(R_change_dynamic_travel_time['location'][index])
+                    congestion_link = _index_int_list(eval(R_change_dynamic_travel_time['location'][index]))
                     check_terminal = congestion_link[0]
                     congestion_links.remove(congestion_link)
                 else:
-                    congestion_node = R_change_dynamic_travel_time['location'][index]
+                    congestion_node = _index_int(R_change_dynamic_travel_time['location'][index])
                     check_terminal = congestion_node
                     congestion_nodes.remove(congestion_node)
                 duration = eval(R_change_dynamic_travel_time['duration'][index])
@@ -11751,6 +10132,7 @@ def prepare_for_dynamic():
                                     Dynamic_ALNS_RL34959.removal_action_list_in_implementation.append(action)
                                     Dynamic_ALNS_RL34959.removal_reward_list_in_implementation.append(reward)
                                     Dynamic_ALNS_RL34959.reward_list_in_implementation.append(reward)
+                                    log_impl_reward(reward)
                                     print('implementation times', len(Dynamic_ALNS_RL34959.reward_list_in_implementation))
                                     segment_length_in_RL_or_ALNS_implementation = 10
                                     if len(Dynamic_ALNS_RL34959.reward_list_in_implementation) % segment_length_in_RL_or_ALNS_implementation == 0:
@@ -11780,6 +10162,7 @@ def prepare_for_dynamic():
                                         Dynamic_ALNS_RL34959.insertion_action_list_in_implementation.append(action)
                                         Dynamic_ALNS_RL34959.insertion_reward_list_in_implementation.append(reward)
                                         Dynamic_ALNS_RL34959.reward_list_in_implementation.append(reward)
+                                        log_impl_reward(reward)
                                         print('implementation times', len(Dynamic_ALNS_RL34959.reward_list_in_implementation))
                                         segment_length_in_RL_or_ALNS_implementation = 10
                                         if len(Dynamic_ALNS_RL34959.reward_list_in_implementation) % segment_length_in_RL_or_ALNS_implementation == 0:
@@ -11994,6 +10377,10 @@ def insert_r_in_learning_or_implementation(index,check_terminal, new_row, r_numb
             # if dynamic_RL34959.implement == 1:
             #     print('remove it when run it in server')
         new_row['uncertainty_type'] = finish_or_begin
+        try:
+            log_rl_event(new_row.to_dict(), "begin_insertion", action=-10000000, source="ALNS")
+        except Exception as e:
+            print("log begin_insertion error", e)
     # new_row['action'] = -10000000
     # new_row['reward'] = -10000000
     # here I need to let the ALNS finds the good positions
@@ -12357,6 +10744,10 @@ def check_uncertainty_in_insertion_by_RL(implement_or_not, congestion_nodes_in_t
                         RL_insertion_implementation_store[(uncertainty_index, influenced_r)][k] = store_all(2, state_reward_pairs.loc[pair_index], action_insertion)
                     except:
                         print('RL_insertion_implementation_store[(uncertainty_index, influenced_r)][k] = store_all(2, state_reward_pairs.loc[pair_index], action_insertion)')
+                    try:
+                        log_rl_event(state_reward_pairs.loc[pair_index].to_dict(), "finish_insertion", action=action_insertion, reward=state_reward_pairs.loc[pair_index].get('reward', ''), source="ALNS")
+                    except Exception as e:
+                        print("log finish_insertion error", e)
                     if action_insertion == 1:
                         #it means the insertion should be removed
                         #then restore the route to the one that the request is only removed
@@ -12808,9 +11199,17 @@ def get_and_send_rewards(uncertainty_index, R_change_dynamic_travel_time, check_
 
                         reward = get_reward(check_terminal, action, influenced_r, R_change_dynamic_travel_time, index, duration, congestion_link, congestion_node, -1)
                         state_reward_pairs.loc[pair_index]['reward'] = reward
+                    try:
+                        log_rl_event(state_reward_pairs.loc[pair_index].to_dict(), "finish_removal", action=action, reward=reward, source="ALNS")
+                    except Exception as e:
+                        print("log finish_removal error", e)
 
                 else:
                     state_reward_pairs.loc[pair_index]['reward'] = reward
+                    try:
+                        log_rl_event(state_reward_pairs.loc[pair_index].to_dict(), "finish_removal", action=state_reward_pairs.loc[pair_index].get('action', ''), reward=reward, source="ALNS")
+                    except Exception as e:
+                        print("log finish_removal error", e)
                 break_flag = 1
                 break
         if break_flag == 1:
@@ -15211,7 +13610,7 @@ def save_results(round, routes_save, obj_record = -1):
 
 # @profile()
 # @time_me()
-def real_main(parallel_number2, dynamic_t2 = 0):
+def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
     global waiting_times, only_check_this_influenced_r_in_dynamic_uncertainty, used_interrupt, ALNS_implement_start_RL_can_move, interrupt_by_implement_is_one_and_assign_action_once_only, time_dependent_truck_travel_time, dynamic_t_begin, ALNS_greedy_under_unknown_duration_assume_duration, number_of_training, number_of_implementation, re_plan_when_event_finishes_information, ALNS_end_flag, RL_is_trained_or_evaluated_or_ALNS_is_evaluated, delayed_time_table_uncertainty_index, RL_insertion_segment, congestion_nodes_at_begining, RL_removal_implementation_store, RL_insertion_implementation_store, ALNS_removal_implementation_store, ALNS_insertion_implementation_store, vessel_train, combine_insertion_and_removal_operators, state_reward_pairs_insertion, after_action_review, get_reward_by_cost_gap, ALNS_guides_RL, state_reward_pairs, congestion_nodes, congestion_links, path, stochastic, add_RL, request_segment_in_dynamic, delayed_time_table, unexpected_events, VCP_coordination, different_companies, during_iteration, emission_preference_constraints_after_iteration, wtw_emissions, dynamic, dynamic_t, big_r, request_flow_t, percentage, not_initial_in_CP, R, R_pool, parallel_number, carriers_number, auction_round_number, CP_try_r_of_other_carriers, use_speed, get_satisfactory_value_one_by_one, fuzzy_probability, only_eco_label, only_eco_label_add_cost, heterogeneous_preferences_no_constraints, request_segment, data_path, CP, parallel_ALNS, allow_infeasibility, swap_or_not, fuzzy_constraints,real_multi_obj,weight_interval,w1,w2,w3,Demir_barge_free,truck_fleet, forbid_much_delay, two_T, heterogeneous_preferences, Demir,old_current_save,parallel, parallel_thread, max_processors, start_from_best_at_begin_of_segement, belta, truck_time_free, functions_time, Fixed_Data, by_wenjing, T_number, k_number, node_number, processors_number, note, obj_number, exp_number, regret_k, service_time, transshipment_time, c_storage, fuel_cost, has_end_depot2, check_obj, exps_record_path, forbid_T_trucks, get_initial_bymyself, request_number_in_R, multi_obj, c_storage, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, alpha, bundle_or_not, c, devide_value, stop_time, regret_k, regular, insert_multiple_r, bi_obj_cost_emission, bi_obj_cost_time, K
     waiting_times = {}
     only_check_this_influenced_r_in_dynamic_uncertainty = -1
@@ -15289,11 +13688,12 @@ def real_main(parallel_number2, dynamic_t2 = 0):
 
     auction_round_number = 3
     carriers_number = 3
-    exp_number =34959 
+    exp_number =34959
     parallel_number = parallel_number2
     not_initial_in_CP = 0
     Demir = 0
-    request_number_in_R =5 
+    if request_number_in_R2 is not None:
+        request_number_in_R = request_number_in_R2
     request_segment = 0
     big_r = 1000000000000
     heterogeneous_preferences = 0
@@ -15304,6 +13704,8 @@ def real_main(parallel_number2, dynamic_t2 = 0):
 
     three_eco_labels = 0
     fuzzy_constraints = 1
+    if not _fuzzy_available:
+        fuzzy_constraints = 0
     # fuzzy_probability is used to check which method is used in fuzzy preferences, if 1, then old method (before 20210320, which didn't use fuzzy rules & output and only use a membership function which created by myself), otherwise the new method.
     fuzzy_probability = 0
     if Demir == 1:
@@ -15398,10 +13800,11 @@ def real_main(parallel_number2, dynamic_t2 = 0):
                 # if ALNS_greedy_under_unknown_duration_assume_duration == 0 and add_RL == 0:
                 #     table_number = 999 - Dynamic_ALNS_RL34959.table_number#if waiting and RL = 0, then implement start from the end
                 # else:
-                table_number = Dynamic_ALNS_RL34959.table_number; add_event_types =  0 
+                table_number = Dynamic_ALNS_RL34959.table_number; add_event_types =  0
+                table_number = max(0, min(table_number, 999))
                 if add_event_types == 1:
                     data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-    request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                        request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
                 else:
                     data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
                         request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"

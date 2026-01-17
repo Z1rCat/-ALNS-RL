@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "distributions": [
+
+
+
+    {"name": "S1_1", "pattern": "random_mix", "means": {"A": 9, "B": 90}, "display": "S1_1 random mix A=9 B=90"},
+    {"name": "S1_2", "pattern": "random_mix", "means": {"A": 3, "B": 30}, "display": "S1_2 random mix A=3 B=30"},
+    {"name": "S1_3", "pattern": "random_mix", "means": {"A": 6, "B": 60}, "display": "S1_3 random mix A=6 B=60"},
+
+    {"name": "S2_1", "pattern": "aba", "means": {"A": 9, "B": 90}, "display": "S2_1 ABA A=9 B=90"},
+    {"name": "S2_2", "pattern": "aba", "means": {"A": 90, "B": 9}, "display": "S2_2 ABA A=90 B=9"},
+    {"name": "S2_3", "pattern": "aba", "means": {"A": 3, "B": 30}, "display": "S2_3 ABA A=3 B=30"},
+    {"name": "S2_4", "pattern": "aba", "means": {"A": 30, "B": 3}, "display": "S2_4 ABA A=30 B=3"},
+    {"name": "S2_5", "pattern": "aba", "means": {"A": 6, "B": 60}, "display": "S2_5 ABA A=6 B=60"},
+    {"name": "S2_6", "pattern": "aba", "means": {"A": 60, "B": 6}, "display": "S2_6 ABA A=60 B=6"},
+
+    {"name": "S3_1", "pattern": "ab", "means": {"A": 9, "B": 90}, "display": "S3_1 OOD A=9 B=90"},
+    {"name": "S3_2", "pattern": "ab", "means": {"A": 90, "B": 9}, "display": "S3_2 OOD A=90 B=9"},
+    {"name": "S3_3", "pattern": "ab", "means": {"A": 3, "B": 30}, "display": "S3_3 OOD A=3 B=30"},
+    {"name": "S3_4", "pattern": "ab", "means": {"A": 30, "B": 3}, "display": "S3_4 OOD A=30 B=3"},
+    {"name": "S3_5", "pattern": "ab", "means": {"A": 6, "B": 60}, "display": "S3_5 OOD A=6 B=60"},
+    {"name": "S3_6", "pattern": "ab", "means": {"A": 60, "B": 6}, "display": "S3_6 OOD A=60 B=6"},
+
+    {"name": "S4_1", "pattern": "recall", "means": {"A": 9, "B": 90}, "display": "S4_1 recall A=9 B=90"},
+    {"name": "S4_2", "pattern": "recall", "means": {"A": 90, "B": 9}, "display": "S4_2 recall A=90 B=9"},
+    {"name": "S4_3", "pattern": "recall", "means": {"A": 3, "B": 30}, "display": "S4_3 recall A=3 B=30"},
+    {"name": "S4_4", "pattern": "recall", "means": {"A": 30, "B": 3}, "display": "S4_4 recall A=30 B=3"},
+    {"name": "S4_5", "pattern": "recall", "means": {"A": 6, "B": 60}, "display": "S4_5 recall A=6 B=60"},
+    {"name": "S4_6", "pattern": "recall", "means": {"A": 60, "B": 6}, "display": "S4_6 recall A=60 B=6"},
+
+    {"name": "S5_1", "pattern": "adaptation", "means": {"A": 9, "B": 90}, "display": "S5_1 adaptation A=9 B=90"},
+    {"name": "S5_2", "pattern": "adaptation", "means": {"A": 90, "B": 9}, "display": "S5_2 adaptation A=90 B=9"},
+    {"name": "S5_3", "pattern": "adaptation", "means": {"A": 3, "B": 30}, "display": "S5_3 adaptation A=3 B=30"},
+    {"name": "S5_4", "pattern": "adaptation", "means": {"A": 30, "B": 3}, "display": "S5_4 adaptation A=30 B=3"},
+    {"name": "S5_5", "pattern": "adaptation", "means": {"A": 6, "B": 60}, "display": "S5_5 adaptation A=6 B=60"},
+    {"name": "S5_6", "pattern": "adaptation", "means": {"A": 60, "B": 6}, "display": "S5_6 adaptation A=60 B=6"},
+
+    {"name": "S6_1", "pattern": "abc", "means": {"A": 9, "B": 90, "C": 30}, "display": "S6_1 ABC A=9 B=90 C=30"},
+    {"name": "S6_2", "pattern": "abc", "means": {"A": 9, "B": 30, "C": 90}, "display": "S6_2 ABC A=9 B=30 C=90"},
+    {"name": "S6_3", "pattern": "abc", "means": {"A": 90, "B": 30, "C": 9}, "display": "S6_3 ABC A=90 B=30 C=9"},
+
+
+
+    {
+      "name": "V1_1",
+      "pattern": "ab",
+      "means": {"A": 15, "B": 15},
+      "variance": {"A": 1, "B": 4},
+      "display": "V1_1 mean fixed var 1→4"
+    },
+    {
+      "name": "V1_2",
+      "pattern": "ab",
+      "means": {"A": 15, "B": 15},
+      "variance": {"A": 1, "B": 9},
+      "display": "V1_2 mean fixed var 1→9"
+    },
+    {
+      "name": "V1_3",
+      "pattern": "aba",
+      "means": {"A": 15, "B": 15},
+      "variance": {"A": 1, "B": 16},
+      "display": "V1_3 variance spike then recover"
+    },
+
+
+
+    {
+      "name": "T1_1",
+      "pattern": "random_mix",
+      "means": {"A": 9},
+      "variance": 16,
+      "display": "T1_1 heavy tail low mean"
+    },
+    {
+      "name": "T1_2",
+      "pattern": "random_mix",
+      "means": {"A": 15},
+      "variance": 25,
+      "display": "T1_2 extreme heavy tail"
+    },
+    {
+      "name": "T1_3",
+      "pattern": "ab",
+      "means": {"A": 9, "B": 9},
+      "variance": {"A": 1, "B": 25},
+      "display": "T1_3 tail shock without mean shift"
+    },
+
+
+
+    {
+      "name": "M1_1",
+      "pattern": "random_mix",
+      "dist_type": "mixture",
+      "means": {"normal": 9, "disaster": 90},
+      "extra": {"p_disaster": 0.01},
+      "display": "M1_1 1% catastrophic events"
+    },
+    {
+      "name": "M1_2",
+      "pattern": "random_mix",
+      "dist_type": "mixture",
+      "means": {"normal": 9, "disaster": 90},
+      "extra": {"p_disaster": 0.05},
+      "display": "M1_2 5% catastrophic events"
+    },
+    {
+      "name": "M1_3",
+      "pattern": "aba",
+      "dist_type": "mixture",
+      "means": {"normal": 9, "disaster": 90},
+      "extra": {"p_disaster": {"A": 0.01, "B": 0.1}},
+      "display": "M1_3 disaster frequency spike"
+    },
+
+
+
+    {
+      "name": "G1_1",
+      "pattern": "ab",
+      "dist_type": "gamma",
+      "means": {"A": 9, "B": 30},
+      "display": "G1_1 gamma skewed moderate"
+    },
+    {
+      "name": "G1_2",
+      "pattern": "ab",
+      "dist_type": "gamma",
+      "means": {"A": 15, "B": 15},
+      "variance": {"A": 1, "B": 9},
+      "display": "G1_2 gamma variance shift"
+    },
+    {
+      "name": "W1_1",
+      "pattern": "ab",
+      "dist_type": "weibull",
+      "means": {"A": 9, "B": 30},
+      "extra": {"shape": 1.5},
+      "display": "W1_1 weibull hazard-like"
+    },
+
+
+
+    {
+      "name": "C1_1",
+      "pattern": "abc",
+      "means": {"A": 3, "B": 15, "C": 9},
+      "display": "C1_1 simple→stress→adapted"
+    },
+    {
+      "name": "C1_2",
+      "pattern": "abc",
+      "means": {"A": 9, "B": 90, "C": 30},
+      "display": "C1_2 shock then partial recovery"
+    },
+    {
+      "name": "C1_3",
+      "pattern": "abc",
+      "means": {"A": 15, "B": 15, "C": 15},
+      "variance": {"A": 1, "B": 16, "C": 4},
+      "display": "C1_3 pure variance regime switching"
+    }
+
+  ]
+}

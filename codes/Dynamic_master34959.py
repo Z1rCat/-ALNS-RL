@@ -6,6 +6,7 @@ import time
 import warnings
 import sys
 import argparse
+import json
 import subprocess
 import Dynamic_ALNS_RL34959
 import dynamic_RL34959
@@ -41,23 +42,78 @@ if combine_insertion_and_removal_operators == 1:
 else:
     parallel_number = list(range(0, 3))
 
-DIST_DISPLAY = {
-    'mixed_v1': '混合分布 v1 (25% 正态 + 75% 指数)',
-    'stress_test': '压力测试 (100% 拥堵时间大于120)',
-    'chaos_uniform': '混沌测试 (100% 均匀 10-100)',
-    'curriculum_easy': '课程学习-简单 (50% 正常 + 50% 轻微)',
-    'baseline_legacy': '基准测试 (所有拥堵时间设为20)',
-    'normal_mix_8_80_50_50': '正态混合 50/50 (均值8 / 80)',
-    'lognormal_mix_8_80_50_50': '对数正态 50/50 (均值8 / 80)',
-    'normal_mix_8_80_75_25': '正态混合 75/25 (均值8 / 80)',
-    'lognormal_mix_8_80_75_25': '对数正态 75/25 (均值8 / 80)',
-    'normal_mix_80_8_25_75': '正态混合 25/75 (均值80 -> 8)',
-    'normal_mix_80_8_50_50': '正态混合 50/50 (均值80 -> 8)',
-    'normal_mix_80_8_75_25': '正态混合 75/25 (均值80 -> 8)',
-    'lognormal_mix_80_8_25_75': '对数正态 25/75 (均值80 -> 8)',
-    'lognormal_mix_80_8_50_50': '对数正态 50/50 (均值80 -> 8)',
-    'lognormal_mix_9_30_3_30_30_40': '复合分布 30/30/40 (均值9 / 30 / 3)'
-}
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_PATH = os.path.join(ROOT_DIR, "distribution_config.json")
+
+DEFAULT_DISTRIBUTIONS = [
+    {"name": "S1_1", "pattern": "random_mix", "means": {"A": 9, "B": 90}, "display": "S1_1 random mix A=9 B=90"},
+    {"name": "S1_2", "pattern": "random_mix", "means": {"A": 3, "B": 30}, "display": "S1_2 random mix A=3 B=30"},
+    {"name": "S1_3", "pattern": "random_mix", "means": {"A": 6, "B": 60}, "display": "S1_3 random mix A=6 B=60"},
+    {"name": "S2_1", "pattern": "aba", "means": {"A": 9, "B": 90}, "display": "S2_1 ABA A=9 B=90"},
+    {"name": "S2_2", "pattern": "aba", "means": {"A": 90, "B": 9}, "display": "S2_2 ABA A=90 B=9"},
+    {"name": "S2_3", "pattern": "aba", "means": {"A": 3, "B": 30}, "display": "S2_3 ABA A=3 B=30"},
+    {"name": "S2_4", "pattern": "aba", "means": {"A": 30, "B": 3}, "display": "S2_4 ABA A=30 B=3"},
+    {"name": "S2_5", "pattern": "aba", "means": {"A": 6, "B": 60}, "display": "S2_5 ABA A=6 B=60"},
+    {"name": "S2_6", "pattern": "aba", "means": {"A": 60, "B": 6}, "display": "S2_6 ABA A=60 B=6"},
+    {"name": "S3_1", "pattern": "ab", "means": {"A": 9, "B": 90}, "display": "S3_1 OOD A=9 B=90"},
+    {"name": "S3_2", "pattern": "ab", "means": {"A": 90, "B": 9}, "display": "S3_2 OOD A=90 B=9"},
+    {"name": "S3_3", "pattern": "ab", "means": {"A": 3, "B": 30}, "display": "S3_3 OOD A=3 B=30"},
+    {"name": "S3_4", "pattern": "ab", "means": {"A": 30, "B": 3}, "display": "S3_4 OOD A=30 B=3"},
+    {"name": "S3_5", "pattern": "ab", "means": {"A": 6, "B": 60}, "display": "S3_5 OOD A=6 B=60"},
+    {"name": "S3_6", "pattern": "ab", "means": {"A": 60, "B": 6}, "display": "S3_6 OOD A=60 B=6"},
+    {"name": "S4_1", "pattern": "recall", "means": {"A": 9, "B": 90}, "display": "S4_1 recall A=9 B=90"},
+    {"name": "S4_2", "pattern": "recall", "means": {"A": 90, "B": 9}, "display": "S4_2 recall A=90 B=9"},
+    {"name": "S4_3", "pattern": "recall", "means": {"A": 3, "B": 30}, "display": "S4_3 recall A=3 B=30"},
+    {"name": "S4_4", "pattern": "recall", "means": {"A": 30, "B": 3}, "display": "S4_4 recall A=30 B=3"},
+    {"name": "S4_5", "pattern": "recall", "means": {"A": 6, "B": 60}, "display": "S4_5 recall A=6 B=60"},
+    {"name": "S4_6", "pattern": "recall", "means": {"A": 60, "B": 6}, "display": "S4_6 recall A=60 B=6"},
+    {"name": "S5_1", "pattern": "adaptation", "means": {"A": 9, "B": 90}, "display": "S5_1 adaptation A=9 B=90"},
+    {"name": "S5_2", "pattern": "adaptation", "means": {"A": 90, "B": 9}, "display": "S5_2 adaptation A=90 B=9"},
+    {"name": "S5_3", "pattern": "adaptation", "means": {"A": 3, "B": 30}, "display": "S5_3 adaptation A=3 B=30"},
+    {"name": "S5_4", "pattern": "adaptation", "means": {"A": 30, "B": 3}, "display": "S5_4 adaptation A=30 B=3"},
+    {"name": "S5_5", "pattern": "adaptation", "means": {"A": 6, "B": 60}, "display": "S5_5 adaptation A=6 B=60"},
+    {"name": "S5_6", "pattern": "adaptation", "means": {"A": 60, "B": 6}, "display": "S5_6 adaptation A=60 B=6"},
+    {"name": "S6_1", "pattern": "abc", "means": {"A": 9, "B": 90, "C": 30}, "display": "S6_1 ABC A=9 B=90 C=30"},
+    {"name": "S6_2", "pattern": "abc", "means": {"A": 9, "B": 30, "C": 90}, "display": "S6_2 ABC A=9 B=30 C=90"},
+    {"name": "S6_3", "pattern": "abc", "means": {"A": 90, "B": 30, "C": 9}, "display": "S6_3 ABC A=90 B=30 C=9"},
+]
+
+PHYSICAL_TOTAL_FILES = 500
+
+def load_distribution_config():
+    dist_entries = DEFAULT_DISTRIBUTIONS
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("distributions"), list):
+            dist_entries = data["distributions"]
+    except Exception:
+        pass
+    normalized = []
+    for item in dist_entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        pattern = str(item.get("pattern", "")).strip()
+        means = item.get("means", {})
+        if not name or not pattern or not isinstance(means, dict):
+            continue
+        display = str(item.get("display", "")).strip()
+        normalized.append({
+            "name": name,
+            "pattern": pattern,
+            "means": means,
+            "display": display,
+        })
+    return normalized or DEFAULT_DISTRIBUTIONS
+
+def get_distribution_display_map():
+    dist_map = {}
+    for item in load_distribution_config():
+        display = item.get("display") or item["name"]
+        dist_map[item["name"]] = display
+    return dist_map
+
 
 
 def select_request_number():
@@ -92,52 +148,32 @@ def select_distribution_mode():
     """
     交互式选择拥堵事件生成的分布模式
     """
+    dist_entries = load_distribution_config()
+    dist_display = get_distribution_display_map()
     print("")
     print("=" * 50)
     print(" ALNS-RL 分布模式选择 ".center(50, "="))
     print("=" * 50)
     print(" 请选择生成的分布：")
-    print("  [1] 混合分布 v1         (25% 正态 + 75% 指数)")
-    print("  [2] 压力测试            (100% 拥堵时间大于120)")
-    print("  [3] 混沌测试            (100% 均匀 10-100)")
-    print("  [4] 课程学习-简单       (50% 正常 + 50% 轻微)")
-    print("  [5] 基准测试            (所有拥堵时间设为20)")
-    print("  [6] 正态混合 50/50      (均值8 / 80)")
-    print("  [7] 对数正态 50/50      (均值8 / 80)")
-    print("  [8] 正态混合 75/25      (均值8 / 80)")
-    print("  [9] 对数正态 75/25      (均值8 / 80)")
-    print("  [10] 正态混合 25/75     (均值80 -> 8)")
-    print("  [11] 正态混合 50/50     (均值80 -> 8)")
-    print("  [12] 正态混合 75/25     (均值80 -> 8)")
-    print("  [13] 对数正态 25/75     (均值80 -> 8)")
-    print("  [14] 对数正态 50/50     (均值80 -> 8)")
-    print("  [15] 复合分布 30/30/40  (均值9 / 30 / 3)")
+    for idx, item in enumerate(dist_entries, start=1):
+        name = item["name"]
+        label = dist_display.get(name, name)
+        print(f"  [{idx}] {label}")
     print("=" * 50)
 
-    mapping = {
-        '1': 'mixed_v1',
-        '2': 'stress_test',
-        '3': 'chaos_uniform',
-        '4': 'curriculum_easy',
-        '5': 'baseline_legacy',
-        '6': 'normal_mix_8_80_50_50',
-        '7': 'lognormal_mix_8_80_50_50',
-        '8': 'normal_mix_8_80_75_25',
-        '9': 'lognormal_mix_8_80_75_25',
-        '10': 'normal_mix_80_8_25_75',
-        '11': 'normal_mix_80_8_50_50',
-        '12': 'normal_mix_80_8_75_25',
-        '13': 'lognormal_mix_80_8_25_75',
-        '14': 'lognormal_mix_80_8_50_50',
-        '15': 'lognormal_mix_9_30_3_30_30_40'
-    }
+    mapping = {}
+    for idx, item in enumerate(dist_entries, start=1):
+        mapping[str(idx)] = item["name"]
 
     while True:
-        choice = input("请输入编号 [1-15] (默认 1): ").strip()
+        choice = input(f"Choose [1-{len(dist_entries)}] or name (default 1): ").strip()
         if choice == "":
-            return "mixed_v1"
+            return dist_entries[0]["name"] if dist_entries else "S1_1"
         if choice in mapping:
             return mapping[choice]
+        choice_upper = choice.upper()
+        if choice_upper in dist_display:
+            return choice_upper
         print("输入无效，请重新输入。")
 
 
@@ -159,7 +195,61 @@ def select_run_count():
         print("输入无效，请重新输入。")
 
 
-def collect_batch_plan(run_count):
+def select_worker_count():
+    print("")
+    print("=" * 50)
+    print(" 设置 CPU 核心数 ".center(50, "="))
+    print("=" * 50)
+    print("  [Enter] 默认/自动")
+    print("  [1]     单核")
+    print("  [N]     N 核并行")
+    print("=" * 50)
+    while True:
+        choice = input("请输入核心数(留空自动): ").strip()
+        if choice == "":
+            return None
+        try:
+            value = int(choice)
+            if value >= 1:
+                return value
+        except ValueError:
+            pass
+        print("输入无效，请重新输入。")
+
+
+def select_algorithm():
+    print("")
+    print("=" * 50)
+    print(" 选择 RL 算法 ".center(50, "="))
+    print("=" * 50)
+    print("  [1] DQN")
+    print("  [2] PPO")
+    print("  [3] A2C")
+    print("=" * 50)
+    mapping = {"1": "DQN", "2": "PPO", "3": "A2C"}
+    while True:
+        choice = input("请选择算法 (默认 1=DQN): ").strip()
+        if choice == "":
+            return "DQN"
+        if choice.upper() in mapping.values():
+            return choice.upper()
+        if choice in mapping:
+            return mapping[choice]
+        print("输入无效，请重新输入。")
+
+
+def resolve_worker_count(args):
+    if getattr(args, "workers", None) is not None:
+        if args.workers < 1:
+            print("workers 参数必须 >= 1，强制使用 1")
+            return 1
+        return args.workers
+    if getattr(args, "single_core", False):
+        return 1
+    return None
+
+
+def collect_batch_plan(run_count, algorithm):
     plan = []
     for idx in range(run_count):
         print("")
@@ -168,15 +258,15 @@ def collect_batch_plan(run_count):
         print("-" * 50)
         dist_name = select_distribution_mode()
         request_number = select_request_number()
-        plan.append((dist_name, request_number))
+        plan.append((dist_name, request_number, algorithm))
     return plan
 
 
-def run_generator(dist_name, request_number):
+def run_generator(dist_name, request_number, workers=None):
     """
     运行生成器生成分布
     """
-    dist_label = DIST_DISPLAY.get(dist_name, "未知分布")
+    dist_label = get_distribution_display_map().get(dist_name, dist_name)
     print("")
     print(f">>> [阶段1] 正在生成随机分布事件 ({dist_label})")
     print(f"    目标文件夹: {LEGACY_FOLDER_NAME}")
@@ -190,9 +280,11 @@ def run_generator(dist_name, request_number):
         sys.executable, generator_script,
         "--dist_name", dist_name,
         "--target_folder", LEGACY_FOLDER_NAME,
-        "--total_files", "1000",
+        "--total_files", str(PHYSICAL_TOTAL_FILES),
         "--request_numbers", str(request_number)
     ]
+    if workers is not None:
+        cmd.extend(["--workers", str(workers)])
 
     try:
         subprocess.run(cmd, check=True)
@@ -225,22 +317,35 @@ def run_simulation(request_number):
                     print(traceback.format_exc())
 
 
-def run_single(dist_name, request_number):
+def run_single(dist_name, request_number, workers=None, algorithm="DQN"):
+    os.environ["SCENARIO_NAME"] = dist_name
+    os.environ["RL_ALGORITHM"] = algorithm
+    Dynamic_ALNS_RL34959.SCENARIO_NAME = dist_name
+    Dynamic_ALNS_RL34959.RL_ALGORITHM = algorithm
+    dynamic_RL34959.SCENARIO_NAME = dist_name
     run_id = datetime.datetime.now().strftime(f"run_%Y%m%d_%H%M%S_R{request_number}_{dist_name}")
     rl_logging.set_run_dir(run_id)
-    rl_logging.write_meta({"distribution": dist_name, "request_number": request_number})
+    rl_logging.write_meta({
+        "distribution": dist_name,
+        "request_number": request_number,
+        "generator_workers": workers if workers is not None else "auto",
+        "algorithm": algorithm,
+    })
 
-    run_generator(dist_name, request_number)
+    run_generator(dist_name, request_number, workers)
     run_simulation(request_number)
 
 
-def run_single_in_subprocess(dist_name, request_number):
+def run_single_in_subprocess(dist_name, request_number, workers=None, algorithm="DQN"):
     script_path = os.path.abspath(__file__)
     cmd = [
         sys.executable, script_path,
         "--dist_name", dist_name,
-        "--request_number", str(request_number)
+        "--request_number", str(request_number),
+        "--algorithm", algorithm,
     ]
+    if workers is not None:
+        cmd.extend(["--workers", str(workers)])
     subprocess.run(cmd, check=True)
 
 
@@ -248,30 +353,54 @@ def parse_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--dist_name", type=str)
     parser.add_argument("--request_number", type=int)
+    parser.add_argument("--run_count", type=int)
+    parser.add_argument("--algorithm", type=str, help="DQN/PPO/A2C")
+    parser.add_argument("--workers", type=int, help="generator workers (1=single core)")
+    parser.add_argument("--single_core", action="store_true", help="force generator single core")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    workers = resolve_worker_count(args)
+    algorithm = args.algorithm.upper() if args.algorithm else None
+    if algorithm is not None and algorithm not in {"DQN", "PPO", "A2C"}:
+        print(f"未知算法 {algorithm}，回退为 DQN")
+        algorithm = "DQN"
+
     if args.dist_name and args.request_number:
-        run_single(args.dist_name, args.request_number)
+        run_count = args.run_count or 1
+        if algorithm is None:
+            algorithm = select_algorithm()
+        if run_count <= 1:
+            run_single(args.dist_name, args.request_number, workers, algorithm)
+        else:
+            for _ in range(run_count):
+                run_single_in_subprocess(args.dist_name, args.request_number, workers, algorithm)
         return
 
-    run_count = select_run_count()
+    if workers is None:
+        workers = select_worker_count()
+
+    if algorithm is None:
+        algorithm = select_algorithm()
+
+    run_count = args.run_count if args.run_count is not None else select_run_count()
     if run_count <= 1:
         dist_name = select_distribution_mode()
         request_number = select_request_number()
-        run_single(dist_name, request_number)
+        run_single(dist_name, request_number, workers, algorithm)
         return
 
-    plan = collect_batch_plan(run_count)
-    for idx, (dist_name, request_number) in enumerate(plan, start=1):
-        dist_label = DIST_DISPLAY.get(dist_name, "未知分布")
+    plan = collect_batch_plan(run_count, algorithm)
+    for idx, (dist_name, request_number, algorithm) in enumerate(plan, start=1):
+        dist_label = get_distribution_display_map().get(dist_name, dist_name)
         print("")
         print("=" * 50)
-        print(f">>> [批处理] 第 {idx}/{run_count} 轮: 分布[{dist_label}] | R={request_number}")
+        print(f">>> [批量计划] 正在运行第 {idx}/{run_count} 轮: 分布模式[{dist_label}] | R={request_number}")
         print("=" * 50)
-        run_single_in_subprocess(dist_name, request_number)
+        run_single_in_subprocess(dist_name, request_number, workers, algorithm)
+
 
 
 if __name__ == '__main__':

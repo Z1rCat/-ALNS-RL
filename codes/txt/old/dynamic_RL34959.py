@@ -76,21 +76,13 @@ MAX_STEPS = 20000
 SLIDING_WINDOW = 100
 TARGET_REWARD = 0.5
 recent_rewards = deque(maxlen=SLIDING_WINDOW)
-CURRICULUM_REWARD_THRESHOLD = 0.9
-CURRICULUM_SUCCESS_REQUIRED = 3
-curriculum_converged = 0
-curriculum_last_avg_reward = ""
-SCENARIO_NAME = os.environ.get("SCENARIO_NAME", "")
 
 TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
-    "table_number", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label",
+    "table_number", "dynamic_t_begin", "duration_type",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
     "action", "reward", "action_meaning", "feasible", "source"
 ]
-
-current_gt_mean = ""
-current_phase_label = ""
 
 TRAIN_FIELDS = [
     "ts", "phase", "step_idx", "reward", "avg_reward", "std_reward",
@@ -122,8 +114,6 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
             "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
             "dynamic_t_begin": getattr(Intermodal_ALNS34959, "dynamic_t_begin", ""),
             "duration_type": getattr(Intermodal_ALNS34959, "duration_type", ""),
-            "gt_mean": current_gt_mean,
-            "phase_label": current_phase_label,
             "delay_tolerance": row.get("delay_tolerance", ""),
             "severity": globals().get("severity_level", ""),
             "passed_terminals": row.get("passed_terminals", ""),
@@ -204,13 +194,9 @@ def stop_wait():
 #@profile()
 def send_action(action):
     # global only_stop_once_by_implementation
-    if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-        return
     # get the index first
     break_flag = 0
     while True:
-        if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-            return
         if len(Intermodal_ALNS34959.state_reward_pairs) != 0:
             break
         else:
@@ -222,8 +208,6 @@ def send_action(action):
         #         only_stop_once_by_implementation = 1
         #         break
         stop_wait()
-        if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-            return
         for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
             try:
                 check = Intermodal_ALNS34959.state_reward_pairs['uncertainty_index'][pair_index] == uncertainty_index and \
@@ -241,8 +225,6 @@ def send_action(action):
                 while True:
                     # print('send action 2')
                     stop_wait()
-                    if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                        return
                     try:
                         Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
                         try:
@@ -261,8 +243,6 @@ def send_action(action):
             while True:
                 # print('send action 3')
                 stop_wait()
-                if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                    return
                 if Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] != -10000000:
                     break
                 else:
@@ -297,19 +277,6 @@ def get_state(chosen_pair, table_number=-1, request_number_in_R=-1, duration_typ
         data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
             request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
     Data = pd.ExcelFile(data_path)
-    global current_gt_mean, current_phase_label
-    try:
-        meta_df = pd.read_excel(Data, "__meta__")
-        if "Property" in meta_df.columns and "Value" in meta_df.columns:
-            meta_map = dict(zip(meta_df["Property"].astype(str), meta_df["Value"]))
-            current_gt_mean = meta_map.get("gt_mean", "")
-            current_phase_label = meta_map.get("phase_label", "")
-        else:
-            current_gt_mean = meta_df["gt_mean"].iloc[0] if "gt_mean" in meta_df.columns and len(meta_df) else ""
-            current_phase_label = meta_df["phase_label"].iloc[0] if "phase_label" in meta_df.columns and len(meta_df) else ""
-    except Exception:
-        current_gt_mean = ""
-        current_phase_label = ""
     # check_repeat_r_in_R_pool(), check_T_k_record_and_R()
     # below are travel time uncertainty, including delay and congestion at nodes and arcs
     R_change_dynamic_travel_time = pd.read_excel(Data, 'R_' + str(request_number_in_R) + '_' + str(
@@ -449,8 +416,6 @@ class coordinationEnv(Env):
             # congestion_duration = np.random.uniform(low=1, high=5)
         # if self.state[1]
         if add_ALNS == 1:
-            if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                return self.state, 0, True, {}
             if time_s >= total_timesteps2:
                 wait_training_finish_last_iteration = 1
 
@@ -462,16 +427,12 @@ class coordinationEnv(Env):
                 all_rewards_list.append(reward)
                 number_of_state_key += 1
             else:
-                if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                    return self.state, 0, True, {}
                 send_action(action)
 
                 #get the reward from ALNS
                 while True:
                     # print('step 1')
                     stop_wait()
-                    if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                        return self.state, 0, True, {}
                     break_flag = 0
                     for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
                         # try:
@@ -525,8 +486,6 @@ class coordinationEnv(Env):
                                         while True:
                                             # print('step 2')
                                             stop_wait()
-                                            if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                                                return self.state, 0, True, {}
                                             try:
                                                 add_row = list(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
                                                 break
@@ -683,9 +642,6 @@ class coordinationEnv(Env):
                 self.state = np.array(state_keys[number_of_state_key], dtype=float)
 
             else:
-                if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                    self.state = np.zeros(self.observation_space.shape, dtype=float)
-                    return self.state
                 #this is used for both learning and implement
                 #read which terminals a vehicle passes
                 break_flag = 0
@@ -696,9 +652,6 @@ class coordinationEnv(Env):
                     #     print('it should be 1')
                     # print('reset 1')
                     stop_wait()
-                    if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                        self.state = np.zeros(self.observation_space.shape, dtype=float)
-                        return self.state
                     # Intermodal_ALNS34959.state_reward_pairs = parallel_read_excel(path + 'state_reward_pairs.xlsx', 'state_reward_pairs')
                     for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
                         #check_RL_ALNS_iteraction_bug()
@@ -765,7 +718,7 @@ def append_new_line(file_name, text_to_append):
         file_object.write(text_to_append)
 
 def main(algorithm2, mode2):
-    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward
+    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat
     add_event_types =0 
     stop_everything_in_learning_and_go_to_implementation_phase = 0
     clear_pairs_done = 0
@@ -886,8 +839,6 @@ def main(algorithm2, mode2):
         iteration_multiply = 1
         total_timesteps2 = iteration_numbers_unit * iteration_multiply
         sucess_times = 0
-        curriculum_converged = 0
-        curriculum_last_avg_reward = ""
         state_action_reward_collect = np.array(np.empty(shape=(0, 9)))
         table_number_collect = {}
         for number_of_learn_evaluate_loops in range(1000000000):
@@ -937,13 +888,13 @@ def main(algorithm2, mode2):
                     print('congestion_terminal_mean_list', congestion_terminal_mean_list, average_reward, deviation)
             log_training_row("eval", step_idx=global_step, avg_reward=average_reward, std_reward=deviation)
             print('evaluation', 'average_reward', average_reward, 'deviation', deviation)# sys.exit('stop_it_in_testing')
-            # Curriculum convergence: used for jumps only
-            curriculum_last_avg_reward = average_reward
-            if average_reward >= CURRICULUM_REWARD_THRESHOLD:
-                sucess_times += 1
+            # 收敛判断：步数+滑窗均值
+            if len(recent_rewards) > 0:
+                sliding_avg = np.mean(recent_rewards)
             else:
-                sucess_times = 0
-            curriculum_converged = 1 if sucess_times >= CURRICULUM_SUCCESS_REQUIRED else 0
+                sliding_avg = -999
+            if (global_step >= MIN_STEPS and sliding_avg >= TARGET_REWARD) or (global_step >= MAX_STEPS):
+                implement = 1
 
             wait_training_finish_last_iteration = 0
             evaluate = 0
