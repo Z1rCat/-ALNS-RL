@@ -31,6 +31,47 @@ try:
 except Exception:
     pass
 
+
+class TeeStream:
+    def __init__(self, *streams):
+        self.streams = streams
+        self.encoding = getattr(streams[0], "encoding", "utf-8") if streams else "utf-8"
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        self.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self):
+        return False
+
+
+def stream_subprocess_output(cmd):
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    try:
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+        return proc.wait()
+    finally:
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except Exception:
+            pass
+
 # 默认 R 值
 DEFAULT_REQUEST_NUMBER = 5
 
@@ -289,7 +330,9 @@ def run_generator(dist_name, request_number, workers=None, target_folder=None):
         cmd.extend(["--workers", str(workers)])
 
     try:
-        subprocess.run(cmd, check=True)
+        return_code = stream_subprocess_output(cmd)
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, cmd)
         print(">>> 生成器运行成功，旧数据已覆盖。")
     except subprocess.CalledProcessError:
         print(">>> 错误：分布生成器运行失败。")
@@ -336,9 +379,21 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN"):
         "algorithm": algorithm,
         "data_root": str(run_data_dir),
     })
-
-    run_generator(dist_name, request_number, workers, str(run_data_dir))
-    run_simulation(request_number)
+    log_file = None
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    try:
+        log_path = os.path.join(str(rl_logging.get_run_dir()), "console_output.txt")
+        log_file = open(log_path, "a", encoding="utf-8")
+        sys.stdout = TeeStream(original_stdout, log_file)
+        sys.stderr = TeeStream(original_stderr, log_file)
+        run_generator(dist_name, request_number, workers, str(run_data_dir))
+        run_simulation(request_number)
+    finally:
+        if log_file is not None:
+            log_file.close()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
 
 
 def run_single_in_subprocess(dist_name, request_number, workers=None, algorithm="DQN"):

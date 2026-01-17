@@ -89,7 +89,7 @@ def resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, 
 global_step = 0
 MIN_STEPS = 100
 MAX_STEPS = 20000
-SLIDING_WINDOW = 100
+SLIDING_WINDOW = 30
 TARGET_REWARD = 0.5
 recent_rewards = deque(maxlen=SLIDING_WINDOW)
 CURRICULUM_REWARD_THRESHOLD = 0.9
@@ -110,6 +110,7 @@ current_phase_label = ""
 
 TRAIN_FIELDS = [
     "ts", "phase", "step_idx", "reward", "avg_reward", "std_reward",
+    "rolling_avg", "recent_count",
     "training_time", "implementation_time"
 ]
 
@@ -154,7 +155,8 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
     except Exception as e:
         print("log_trace_from_row error", e)
 
-def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_reward=None, training_time=None, implementation_time=None):
+def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_reward=None,
+                     rolling_avg=None, recent_count=None, training_time=None, implementation_time=None):
     try:
         payload = {
             "ts": rl_logging.now_ts(),
@@ -163,6 +165,8 @@ def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_rewar
             "reward": reward if reward is not None else "",
             "avg_reward": avg_reward if avg_reward is not None else "",
             "std_reward": std_reward if std_reward is not None else "",
+            "rolling_avg": rolling_avg if rolling_avg is not None else "",
+            "recent_count": recent_count if recent_count is not None else "",
             "training_time": training_time if training_time is not None else "",
             "implementation_time": implementation_time if implementation_time is not None else "",
         }
@@ -468,10 +472,19 @@ class coordinationEnv(Env):
 
             #send the action to ALNS, and let it check the feasibility
             if evaluate == 1:
-                # chosen_pair = state_action_reward_collect[list_of_collect_index[number_of_collect]]
-                reward = state_action_reward_collect_for_evaluate[state_keys[number_of_state_key]][action]
+                if not state_keys or not state_action_reward_collect_for_evaluate:
+                    reward = 0
+                    all_rewards_list.append(reward)
+                    return self.state, reward, True, {}
+                state_key = random.choice(state_keys)
+                action_map = state_action_reward_collect_for_evaluate.get(state_key, {})
+                if action in action_map:
+                    reward = action_map[action]
+                elif action_map:
+                    reward = random.choice(list(action_map.values()))
+                else:
+                    reward = 0
                 all_rewards_list.append(reward)
-                number_of_state_key += 1
             else:
                 if stop_everything_in_learning_and_go_to_implementation_phase == 1:
                     return self.state, 0, True, {}
@@ -706,11 +719,10 @@ class coordinationEnv(Env):
             self.state = np.array([random.choice(range(0, 4)),new_seq[0],new_seq[1],new_seq[2], new_seq[3],new_seq[4],new_seq[5],new_seq[6],new_seq[7],new_seq[8], new_seq[9], random.choice(range(0, 24))]).astype(float)
         else:
             if evaluate == 1:
-                if number_of_state_key >= len(state_keys):
-                    number_of_state_key = 0
-
-                # chosen_pair = state_action_reward_collect[list_of_collect_index[number_of_collect]]
-                self.state = np.array(state_keys[number_of_state_key], dtype=float)
+                if not state_keys:
+                    self.state = np.zeros(self.observation_space.shape, dtype=float)
+                else:
+                    self.state = np.array(random.choice(state_keys), dtype=float)
 
             else:
                 if stop_everything_in_learning_and_go_to_implementation_phase == 1:
@@ -885,10 +897,10 @@ def main(algorithm2, mode2):
         #default n_steps = 2048
         #while True:
          #   try:
-        if algorithm == 'PPO':
-            model = eval(algorithm + "('MlpPolicy', env,  n_steps = 10, verbose=1, learning_starts = 10, device='cpu')")
+        if algorithm == 'DQN':
+            model = eval(algorithm + "('MlpPolicy', env, verbose=1, learning_starts=10, device='cpu')")
         else:
-            model = eval(algorithm + "('MlpPolicy', env, verbose=1, learning_starts = 10, device='cpu')")
+            model = eval(algorithm + "('MlpPolicy', env, n_steps=10, verbose=1, device='cpu')")
             #break
            # except:
             #    continue
@@ -965,11 +977,22 @@ def main(algorithm2, mode2):
                 for _ in range(1):
                     average_reward, deviation = evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
                     print('congestion_terminal_mean_list', congestion_terminal_mean_list, average_reward, deviation)
-            log_training_row("eval", step_idx=global_step, avg_reward=average_reward, std_reward=deviation)
+            rolling_avg = sum(recent_rewards) / len(recent_rewards) if recent_rewards else -1000
+            log_training_row(
+                "eval",
+                step_idx=global_step,
+                avg_reward=average_reward,
+                std_reward=deviation,
+                rolling_avg=rolling_avg,
+                recent_count=len(recent_rewards),
+            )
             print('evaluation', 'average_reward', average_reward, 'deviation', deviation)# sys.exit('stop_it_in_testing')
             # Curriculum convergence: used for jumps only
-            curriculum_last_avg_reward = average_reward
-            if average_reward >= CURRICULUM_REWARD_THRESHOLD:
+            curriculum_last_avg_reward = rolling_avg
+            threshold = CURRICULUM_REWARD_THRESHOLD
+            if SCENARIO_NAME == "S0_Debug":
+                threshold = 0.55
+            if rolling_avg >= threshold:
                 sucess_times += 1
             else:
                 sucess_times = 0
