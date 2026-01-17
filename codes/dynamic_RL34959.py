@@ -69,6 +69,22 @@ def profile():
 
     return wrapper
 
+# ===== 路径配置 =====
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types):
+    dynamic_root = os.environ.get("DYNAMIC_DATA_ROOT", "").strip()
+    if dynamic_root:
+        return os.path.join(dynamic_root, f"R{request_number_in_R}", f"Intermodal_EGS_data_dynamic_congestion{table_number}.xlsx")
+    base_dir = os.path.join(
+        ROOT_DIR,
+        "Uncertainties Dynamic planning under unexpected events",
+        f"plot_distribution_targetInstances_disruption_{duration_type}_not_time_dependent",
+    )
+    if add_event_types == 1:
+        base_dir = base_dir + "_event_types"
+    return os.path.join(base_dir, f"R{request_number_in_R}", f"Intermodal_EGS_data_dynamic_congestion{table_number}.xlsx")
+
 # ===== 日志工具 =====
 global_step = 0
 MIN_STEPS = 100
@@ -290,12 +306,7 @@ def get_state(chosen_pair, table_number=-1, request_number_in_R=-1, duration_typ
     # 防止索引越界：文件从 0 到 999
     table_number = max(0, min(table_number, 999))
 
-    if add_event_types == 1:
-        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent" + "_event_types" + "/R" + str(
-            request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
-    else:
-        data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-            request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+    data_path = resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types)
     Data = pd.ExcelFile(data_path)
     global current_gt_mean, current_phase_label
     try:
@@ -586,9 +597,28 @@ class coordinationEnv(Env):
                 # plt.title('Congested terminals: ' + str(congested_terminals))
                 # plt.show()
                 if repeat == 4:
-                    plt.savefig(
-                        "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/Average reward plots/finite_horizon_length" + str(episode_length) + "_delay_reward_time_dependent" + str(time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_"  + str(iteration_multiply) + "multiply" + '.pdf',
-                        format='pdf', bbox_inches='tight')
+                    plot_dir = os.path.join(
+                        ROOT_DIR,
+                        "Uncertainties Dynamic planning under unexpected events",
+                        "Average reward plots",
+                    )
+                    os.makedirs(plot_dir, exist_ok=True)
+                    plot_path = os.path.join(
+                        plot_dir,
+                        "finite_horizon_length"
+                        + str(episode_length)
+                        + "_delay_reward_time_dependent"
+                        + str(time_dependent)
+                        + "_tenterminal_"
+                        + algorithm
+                        + "_"
+                        + mode
+                        + "_"
+                        + str(iteration_multiply)
+                        + "multiply"
+                        + ".pdf",
+                    )
+                    plt.savefig(plot_path, format="pdf", bbox_inches="tight")
             influenced_time = 0
             if non_stationary == 0 or (time_s  <= iteration_numbers_unit * iteration_multiply / 2):
 
@@ -801,7 +831,7 @@ def main(algorithm2, mode2):
     iteration_numbers_unit = 1
     time_dependent = 0
     record_results = pd.DataFrame(columns=['congestion_terminal_mean_list', 'average_reward', 'deviation'])
-    D_path = "A:/MYpython/34959_RL/D_EGS - 10r.xlsx"
+    D_path = os.path.join(ROOT_DIR, "D_EGS - 10r.xlsx")
     # algorithm = 'PPO'
     # mode = 'barge'
 
@@ -1100,8 +1130,29 @@ def main(algorithm2, mode2):
             df_length = len(record_results)
             record_results.loc[df_length] = [congestion_terminal_mean_list, average_reward,
                                              '-']
-            with pd.ExcelWriter(
-                       "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/Average reward plots/compare_algorithms_modes_episode_lenth2/finite_horizon_length" + str(episode_length) + "_delay_reward_time_dependent" + str(time_dependent) + "_tenterminal_" + algorithm + "_" + mode + "_" + str(iteration_multiply) + "multiply" + '.xlsx',) as writer:  # doctest: +SKIP
+            compare_dir = os.path.join(
+                ROOT_DIR,
+                "Uncertainties Dynamic planning under unexpected events",
+                "Average reward plots",
+                "compare_algorithms_modes_episode_lenth2",
+            )
+            os.makedirs(compare_dir, exist_ok=True)
+            compare_path = os.path.join(
+                compare_dir,
+                "finite_horizon_length"
+                + str(episode_length)
+                + "_delay_reward_time_dependent"
+                + str(time_dependent)
+                + "_tenterminal_"
+                + algorithm
+                + "_"
+                + mode
+                + "_"
+                + str(iteration_multiply)
+                + "multiply"
+                + ".xlsx",
+            )
+            with pd.ExcelWriter(compare_path) as writer:  # doctest: +SKIP
                 record_results.to_excel(writer, sheet_name='congestion')
 
 if __name__ == '__main__':

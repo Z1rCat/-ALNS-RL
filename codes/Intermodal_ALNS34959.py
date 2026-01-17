@@ -40,6 +40,29 @@ except ImportError:
         def wrapper(func):
             return func
         return wrapper
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIGURES_DIR = os.path.join(ROOT_DIR, "Uncertainties Dynamic planning under unexpected events", "Figures")
+
+def resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types):
+    dynamic_root = os.environ.get("DYNAMIC_DATA_ROOT", "").strip()
+    if dynamic_root:
+        return os.path.join(dynamic_root, f"R{request_number_in_R}", f"Intermodal_EGS_data_dynamic_congestion{table_number}.xlsx")
+    base_dir = os.path.join(
+        ROOT_DIR,
+        "Uncertainties Dynamic planning under unexpected events",
+        f"plot_distribution_targetInstances_disruption_{duration_type}_not_time_dependent",
+    )
+    if add_event_types == 1:
+        base_dir = base_dir + "_event_types"
+    return os.path.join(base_dir, f"R{request_number_in_R}", f"Intermodal_EGS_data_dynamic_congestion{table_number}.xlsx")
+
+def ensure_nonempty_file(path):
+    try:
+        if os.path.exists(path) and os.path.getsize(path) == 0:
+            os.remove(path)
+    except Exception:
+        pass
 import os.path
 
 def _index_int(value):
@@ -3252,7 +3275,7 @@ def read_D(what, K):
         if Demir == 1:
             D_path = "/data/yimeng/Case study/Demir/D_Demir - 5r.xlsx"
         else:
-            D_path = "A:/MYpython/34959_RL/D_EGS - 10r.xlsx"
+            D_path = os.path.join(ROOT_DIR, "D_EGS - 10r.xlsx")
     D_origin_barge = pd.read_excel(D_path, 'Barge')
     D_origin_train = pd.read_excel(D_path, 'Train')
     D_origin_truck = pd.read_excel(D_path, 'Truck')
@@ -3297,7 +3320,7 @@ def read_no_route():
     if Demir == 1:
         Barge_no_land_path = "/data/yimeng/Case study/Demir/Barge_no_land_Demir.xlsx"
     else:
-        Barge_no_land_path = "A:/MYpython/34959_RL/Barge_no_land.xlsx"
+        Barge_no_land_path = os.path.join(ROOT_DIR, "Barge_no_land.xlsx")
     no_route_barge = pd.read_excel(Barge_no_land_path, 'Barge')
     no_route_truck = pd.read_excel(Barge_no_land_path, 'Truck')
     names = revert_names()
@@ -3312,7 +3335,7 @@ def read_Fixed(request_number_in_R, percentage, Fixed=None):
     if Fixed == None:
         if different_companies == 1:
             if parallel_number == 1:
-                fixed_data_path = 'A:/MYpython/34959_RL/Fixed_right_real.xlsx'
+                fixed_data_path = os.path.join(ROOT_DIR, "Fixed_right_real.xlsx")
             elif parallel_number == 2:
                 fixed_data_path = "C:\Intermodal\Case study\CP\EGS Contargo CTT\Fixed_services_Contargo.xlsx"
             elif parallel_number == 3:
@@ -3323,7 +3346,7 @@ def read_Fixed(request_number_in_R, percentage, Fixed=None):
             if Demir == 1:
                 fixed_data_path = "/data/yimeng/Case study/Demir/Fixed_Demir.xlsx"
             else:
-                fixed_data_path = 'A:/MYpython/34959_RL/Fixed_right_real.xlsx'
+                fixed_data_path = os.path.join(ROOT_DIR, "Fixed_right_real.xlsx")
         Fixed_Data = pd.ExcelFile(fixed_data_path)
         Fixed = pd.read_excel(Fixed_Data, None)
         revert_Fixed = Fixed['FixedK']['FixedK'][0]
@@ -9496,7 +9519,7 @@ def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward
             current_path_val = None
             
         # 强制构建一个安全的绝对路径
-        base_output_dir = r"A:\MYpython\34959_RL\Uncertainties Dynamic planning under unexpected events\Figures"
+        base_output_dir = FIGURES_DIR
         # 确保 exp_number 存在
         safe_exp_num = exp_number if 'exp_number' in globals() else 34959
         experiment_dir = f"experiment{safe_exp_num}"
@@ -13804,12 +13827,7 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
                 # else:
                 table_number = Dynamic_ALNS_RL34959.table_number; add_event_types =  0
                 table_number = max(0, min(table_number, 999))
-                if add_event_types == 1:
-                    data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-                        request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
-                else:
-                    data_path = "A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/plot_distribution_targetInstances_disruption_" + duration_type + "_not_time_dependent/R" + str(
-                        request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(table_number) + ".xlsx"
+                data_path = resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types)
                 # data_path = "/data/yimeng/Uncertainties Dynamic planning under unexpected events/Instances/R" + str(request_number_in_R) + "/Intermodal_EGS_data_dynamic_congestion" + str(Dynamic_ALNS_RL34959.table_number) + ".xlsx"
             else:
                 if CP == 1:
@@ -13881,8 +13899,13 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
     r_number = 1
 
     Fixed = read_Fixed(request_number_in_R, percentage)
-    exps_record_path = 'A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/Figures/exps_record/exps_record_all_parallel' + 'exp' + str(
-        exp_number) + 'parallel' + str(parallel_number) + '.xlsx'
+    exps_record_dir = os.path.join(FIGURES_DIR, "exps_record")
+    os.makedirs(exps_record_dir, exist_ok=True)
+    exps_record_path = os.path.join(
+        exps_record_dir,
+        "exps_record_all_parallel" + "exp" + str(exp_number) + "parallel" + str(parallel_number) + ".xlsx",
+    )
+    ensure_nonempty_file(exps_record_path)
 
     get_initial_bymyself = 1
     by_wenjing = 0
@@ -13918,7 +13941,7 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
             for c in [0.99]:
                 for repeat_number in [1]:
 
-                    path = 'A:/MYpython/34959_RL/Uncertainties Dynamic planning under unexpected events/Figures/experiment' + str(exp_number) + '/'
+                    path = os.path.join(FIGURES_DIR, "experiment" + str(exp_number))
                     exp_number = exp_number + 1
 
                     Path(path).mkdir(parents=True, exist_ok=True)

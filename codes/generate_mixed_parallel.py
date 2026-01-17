@@ -388,7 +388,7 @@ def main():
 
     dist_label = DIST_DISPLAY.get(args.dist_name, "????")
     print(f"=== ?????: {dist_label} ===")
-    print(f"   ????: .../{os.path.basename(args.target_folder)}")
+    print(f"   target: {args.target_folder}")
     print(f"   ?? R ???: {args.total_files}")
     print(f"   ????: {args.workers}")
     print(f"   R 集合: {target_rs}")
@@ -400,7 +400,10 @@ def main():
     full_matrix, meta_rows = get_distribution_matrix(args.dist_name, args.total_files, MAX_EVT)
     
     # 2. 准备输出路径
-    base_out = os.path.join(OUTPUT_ROOT, args.target_folder)
+    if os.path.isabs(args.target_folder):
+        base_out = args.target_folder
+    else:
+        base_out = os.path.join(OUTPUT_ROOT, args.target_folder)
     if not os.path.exists(base_out):
         os.makedirs(base_out, exist_ok=True)
         

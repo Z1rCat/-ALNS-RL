@@ -19,6 +19,17 @@ def set_run_dir(run_name: str):
     global RUN_DIR
     RUN_DIR = LOG_ROOT / run_name
     RUN_DIR.mkdir(parents=True, exist_ok=True)
+    (RUN_DIR / "data").mkdir(parents=True, exist_ok=True)
+
+
+def get_run_dir():
+    return RUN_DIR
+
+
+def get_run_data_dir():
+    data_dir = RUN_DIR / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
 
 
 def write_meta(meta: dict):

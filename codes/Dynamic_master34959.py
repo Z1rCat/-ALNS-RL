@@ -262,14 +262,16 @@ def collect_batch_plan(run_count, algorithm):
     return plan
 
 
-def run_generator(dist_name, request_number, workers=None):
+def run_generator(dist_name, request_number, workers=None, target_folder=None):
     """
     运行生成器生成分布
     """
     dist_label = get_distribution_display_map().get(dist_name, dist_name)
     print("")
     print(f">>> [阶段1] 正在生成随机分布事件 ({dist_label})")
-    print(f"    目标文件夹: {LEGACY_FOLDER_NAME}")
+    if target_folder is None:
+        target_folder = LEGACY_FOLDER_NAME
+    print(f"    目标文件夹: {target_folder}")
 
     generator_script = os.path.join(os.path.dirname(__file__), "generate_mixed_parallel.py")
     if not os.path.exists(generator_script):
@@ -279,7 +281,7 @@ def run_generator(dist_name, request_number, workers=None):
     cmd = [
         sys.executable, generator_script,
         "--dist_name", dist_name,
-        "--target_folder", LEGACY_FOLDER_NAME,
+        "--target_folder", target_folder,
         "--total_files", str(PHYSICAL_TOTAL_FILES),
         "--request_numbers", str(request_number)
     ]
@@ -325,14 +327,17 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN"):
     dynamic_RL34959.SCENARIO_NAME = dist_name
     run_id = datetime.datetime.now().strftime(f"run_%Y%m%d_%H%M%S_R{request_number}_{dist_name}")
     rl_logging.set_run_dir(run_id)
+    run_data_dir = rl_logging.get_run_data_dir()
+    os.environ["DYNAMIC_DATA_ROOT"] = str(run_data_dir)
     rl_logging.write_meta({
         "distribution": dist_name,
         "request_number": request_number,
         "generator_workers": workers if workers is not None else "auto",
         "algorithm": algorithm,
+        "data_root": str(run_data_dir),
     })
 
-    run_generator(dist_name, request_number, workers)
+    run_generator(dist_name, request_number, workers, str(run_data_dir))
     run_simulation(request_number)
 
 
