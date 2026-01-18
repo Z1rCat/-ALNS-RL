@@ -63,8 +63,9 @@ analysis_results/
 Uncertainties Dynamic planning under unexpected events/
 
 # RL 汇总图/表（可由脚本重建）
+ALNS_Research_Documentation/figures/
 ALNS_Research_Documentation/figures_rl_logs/
-ALNS_Research_Documentation/rl_logs_aggregate.csv
+ALNS_Research_Documentation/data/rl_logs_aggregate.csv
 
 # 训练过程重文件
 Training/Logs/

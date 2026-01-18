@@ -17,24 +17,50 @@ This project provides a comprehensive analysis of Adaptive Large Neighborhood Se
 ```
 ALNS_Research_Documentation/
 ├── README.md                           # 本文件
-├── ALNS_Comprehensive_Research_Report.md # 主研究报告
-├── Technical_Implementation_Analysis.md # 技术实现分析
-├── visualization_code.py               # 完整可视化代码
-├── visualization_simple.py            # 简化版可视化代码
-└── figures/                           # 生成的图表文件夹
-    ├── alns_framework.png              # ALNS算法框架图
-    ├── performance_comparison.png      # 算法性能对比图
-    ├── operator_weights_evolution.png  # 算子权重演化图
-    ├── transportation_network.png      # 多式联运网络图
-    └── rl_training_curves.png          # 强化学习训练曲线
+├── reports/                           # 研究报告与摘要
+│   ├── ALNS_Comprehensive_Research_Report.md
+│   ├── PROJECT_SUMMARY.md
+│   └── rl_alns_run_report.md
+├── analysis/                          # 技术与诊断分析
+│   ├── Technical_Implementation_Analysis.md
+│   ├── dynamic_RL_analysis_report.md
+│   └── RL_Diagnostics_Report.md
+├── config/                            # 配置与说明
+│   ├── Distribution_Config_Guide.md
+│   └── 分布.md
+├── scripts/                           # 可视化与日志脚本
+│   ├── visualization_simple.py
+│   ├── visualization_code.py
+│   ├── collect_rl_logs.py
+│   └── plot_rl_logs_summary.py
+├── data/                              # 汇总数据
+│   └── rl_logs_aggregate.csv
+├── figures/                           # 生成的图表
+│   ├── alns_framework.png
+│   ├── performance_comparison.png
+│   ├── operator_weights_evolution.png
+│   ├── transportation_network.png
+│   └── rl_training_curves.png
+└── figures_rl_logs/                   # RL日志图表
+    ├── overall_implement_avg_reward_heatmap.png
+    └── overall_reward_vs_action_ratio.png
 ```
+
+---
+
+## 运行日志与数据 (Run Logs & Data)
+
+- 每次运行都会生成 `codes/logs/run_*/` 目录。
+- `console_output.txt` 保存完整控制台输出，便于排错。
+- `rl_training.csv` 含 `rolling_avg` 与 `recent_count`，用于收敛判断记录。
+- `data/` 为本次运行的 Excel 环境文件（回放实验必须复用）。
 
 ---
 
 ## 主要内容 (Main Contents)
 
 ### 1. 主研究报告 (Main Research Report)
-**文件**: `ALNS_Comprehensive_Research_Report.md`
+**文件**: `reports/ALNS_Comprehensive_Research_Report.md`
 
 包含完整的研究报告，涵盖：
 - 算法理论基础和数学模型
@@ -44,7 +70,7 @@ ALNS_Research_Documentation/
 - 结论和未来研究方向
 
 ### 2. 技术实现分析 (Technical Implementation Analysis)
-**文件**: `Technical_Implementation_Analysis.md`
+**文件**: `analysis/Technical_Implementation_Analysis.md`
 
 详细的技术实现细节：
 - 核心数据结构设计
@@ -55,7 +81,7 @@ ALNS_Research_Documentation/
 - 性能优化策略
 
 ### 3. 可视化代码 (Visualization Code)
-**文件**: `visualization_simple.py` (推荐使用) 和 `visualization_code.py`
+**文件**: `scripts/visualization_simple.py` (推荐使用) 和 `scripts/visualization_code.py`
 
 提供美观的科研风格图表生成功能：
 - ALNS算法框架图
@@ -75,14 +101,14 @@ ALNS_Research_Documentation/
 cd A:/MYpython/34959_RL/ALNS_Research_Documentation
 
 # 运行可视化代码生成图表
-python visualization_simple.py
+python scripts/visualization_simple.py
 ```
 
 ### 查看文档 (View Documentation)
 
 1. 阅读主研究报告了解整体算法框架
 2. 查看技术实现分析了解代码细节
-3. 查看figures文件夹了解可视化结果
+3. 查看figures/与figures_rl_logs/文件夹了解可视化结果
 
 ---
 
