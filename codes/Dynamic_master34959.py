@@ -9,6 +9,7 @@ import argparse
 import json
 import subprocess
 import Dynamic_ALNS_RL34959
+import Intermodal_ALNS34959
 import dynamic_RL34959
 import rl_logging
 import datetime
@@ -303,7 +304,7 @@ def collect_batch_plan(run_count, algorithm):
     return plan
 
 
-def run_generator(dist_name, request_number, workers=None, target_folder=None):
+def run_generator(dist_name, request_number, workers=None, target_folder=None, seed=None):
     """
     运行生成器生成分布
     """
@@ -328,6 +329,9 @@ def run_generator(dist_name, request_number, workers=None, target_folder=None):
     ]
     if workers is not None:
         cmd.extend(["--workers", str(workers)])
+    if seed is not None:
+        cmd.extend(["--seed", str(seed)])
+    cmd.append("--verify")
 
     try:
         return_code = stream_subprocess_output(cmd)
@@ -344,8 +348,9 @@ def run_simulation(request_number):
     print(">>> [阶段2] 正在启动主仿真程序 (ALNS + RL)...")
     print("=" * 50)
 
-    if os.path.exists('34959.txt'):
-        os.remove('34959.txt')
+    stop_flag = os.environ.get("STOP_FLAG_FILE", "34959.txt")
+    if os.path.exists(stop_flag):
+        os.remove(stop_flag)
 
     if add_RL == 0:
         Dynamic_ALNS_RL34959.main(0)
@@ -357,27 +362,49 @@ def run_simulation(request_number):
             for future in concurrent.futures.as_completed(futures):
                 try:
                     data = future.result()
+                except SystemExit as exc:
+                    # Worker threads may call sys.exit() (e.g., stop flag / normal termination).
+                    # Swallow it here so we can join other threads cleanly.
+                    code = getattr(exc, "code", None)
+                    print(f"线程任务请求退出: SystemExit({code})")
                 except Exception as exc:
                     print(f"线程任务产生异常: {exc}")
                     print(traceback.format_exc())
 
 
-def run_single(dist_name, request_number, workers=None, algorithm="DQN"):
+def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=None, run_name=None):
     os.environ["SCENARIO_NAME"] = dist_name
     os.environ["RL_ALGORITHM"] = algorithm
+    if seed is None:
+        os.environ.pop("RL_SEED", None)
+    else:
+        os.environ["RL_SEED"] = str(seed)
     Dynamic_ALNS_RL34959.SCENARIO_NAME = dist_name
     Dynamic_ALNS_RL34959.RL_ALGORITHM = algorithm
     dynamic_RL34959.SCENARIO_NAME = dist_name
-    run_id = datetime.datetime.now().strftime(f"run_%Y%m%d_%H%M%S_R{request_number}_{dist_name}")
+    if run_name:
+        run_id = run_name
+    else:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        seed_tag = f"S{seed}" if seed is not None else "SNA"
+        run_id = f"run_{timestamp}_R{request_number}_{dist_name}_{algorithm}_{seed_tag}"
     rl_logging.set_run_dir(run_id)
+    stop_flag_path = str(rl_logging.get_run_dir() / "34959.txt")
+    os.environ["STOP_FLAG_FILE"] = stop_flag_path
     run_data_dir = rl_logging.get_run_data_dir()
     os.environ["DYNAMIC_DATA_ROOT"] = str(run_data_dir)
+    os.environ["ALNS_OUTPUT_ROOT"] = str(rl_logging.get_run_dir())
+    Intermodal_ALNS34959.refresh_figures_dir()
     rl_logging.write_meta({
         "distribution": dist_name,
         "request_number": request_number,
         "generator_workers": workers if workers is not None else "auto",
         "algorithm": algorithm,
+        "seed": seed,
+        "run_name": run_id,
+        "stop_flag_file": stop_flag_path,
         "data_root": str(run_data_dir),
+        "alns_output_root": str(rl_logging.get_run_dir()),
     })
     log_file = None
     original_stdout = sys.stdout
@@ -387,7 +414,7 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN"):
         log_file = open(log_path, "a", encoding="utf-8")
         sys.stdout = TeeStream(original_stdout, log_file)
         sys.stderr = TeeStream(original_stderr, log_file)
-        run_generator(dist_name, request_number, workers, str(run_data_dir))
+        run_generator(dist_name, request_number, workers, str(run_data_dir), seed)
         run_simulation(request_number)
     finally:
         if log_file is not None:
@@ -396,7 +423,7 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN"):
         sys.stderr = original_stderr
 
 
-def run_single_in_subprocess(dist_name, request_number, workers=None, algorithm="DQN"):
+def run_single_in_subprocess(dist_name, request_number, workers=None, algorithm="DQN", seed=None, run_name=None):
     script_path = os.path.abspath(__file__)
     cmd = [
         sys.executable, script_path,
@@ -406,6 +433,10 @@ def run_single_in_subprocess(dist_name, request_number, workers=None, algorithm=
     ]
     if workers is not None:
         cmd.extend(["--workers", str(workers)])
+    if seed is not None:
+        cmd.extend(["--seed", str(seed)])
+    if run_name:
+        cmd.extend(["--run-name", run_name])
     subprocess.run(cmd, check=True)
 
 
@@ -417,6 +448,8 @@ def parse_args():
     parser.add_argument("--algorithm", type=str, help="DQN/PPO/A2C")
     parser.add_argument("--workers", type=int, help="generator workers (1=single core)")
     parser.add_argument("--single_core", action="store_true", help="force generator single core")
+    parser.add_argument("--seed", type=int, help="random seed")
+    parser.add_argument("--run-name", type=str, help="override run folder name")
     return parser.parse_args()
 
 
@@ -424,6 +457,8 @@ def main():
     args = parse_args()
     workers = resolve_worker_count(args)
     algorithm = args.algorithm.upper() if args.algorithm else None
+    seed = args.seed
+    run_name = args.run_name
     if algorithm is not None and algorithm not in {"DQN", "PPO", "A2C"}:
         print(f"未知算法 {algorithm}，回退为 DQN")
         algorithm = "DQN"
@@ -433,10 +468,11 @@ def main():
         if algorithm is None:
             algorithm = select_algorithm()
         if run_count <= 1:
-            run_single(args.dist_name, args.request_number, workers, algorithm)
+            run_single(args.dist_name, args.request_number, workers, algorithm, seed, run_name)
         else:
-            for _ in range(run_count):
-                run_single_in_subprocess(args.dist_name, args.request_number, workers, algorithm)
+            for idx in range(run_count):
+                child_run_name = f"{run_name}_{idx + 1}" if run_name else None
+                run_single_in_subprocess(args.dist_name, args.request_number, workers, algorithm, seed, child_run_name)
         return
 
     if workers is None:
@@ -449,7 +485,7 @@ def main():
     if run_count <= 1:
         dist_name = select_distribution_mode()
         request_number = select_request_number()
-        run_single(dist_name, request_number, workers, algorithm)
+        run_single(dist_name, request_number, workers, algorithm, seed, run_name)
         return
 
     plan = collect_batch_plan(run_count, algorithm)
@@ -459,7 +495,7 @@ def main():
         print("=" * 50)
         print(f">>> [批量计划] 正在运行第 {idx}/{run_count} 轮: 分布模式[{dist_label}] | R={request_number}")
         print("=" * 50)
-        run_single_in_subprocess(dist_name, request_number, workers, algorithm)
+        run_single_in_subprocess(dist_name, request_number, workers, algorithm, seed)
 
 
 

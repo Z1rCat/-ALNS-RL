@@ -54,6 +54,34 @@ def profile(func):
 builtins.__dict__['profile'] = profile
 
 
+def resolve_seed():
+    seed_val = os.environ.get("RL_SEED", "").strip()
+    if not seed_val:
+        return None
+    try:
+        return int(seed_val)
+    except ValueError:
+        return None
+
+
+def set_global_seed(seed_val):
+    if seed_val is None:
+        return
+    random.seed(seed_val)
+    np.random.seed(seed_val)
+    try:
+        import torch
+        torch.manual_seed(seed_val)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed_val)
+    except Exception:
+        pass
+
+
+def get_stop_flag_path():
+    return os.environ.get("STOP_FLAG_FILE", "34959.txt")
+
+
 def profile():
 
     lp = LineProfiler()
@@ -214,11 +242,11 @@ def save_plot_reward_list():
 
 def stop_wait():
     try:
-        if os.path.exists('34959.txt') and Intermodal_ALNS34959.ALNS_end_flag != 1:
+        if os.path.exists(get_stop_flag_path()) and Intermodal_ALNS34959.ALNS_end_flag != 1:
             save_plot_reward_list()
             sys.exit(78)
     except:
-        if os.path.exists('34959.txt'):
+        if os.path.exists(get_stop_flag_path()):
             save_plot_reward_list()
             sys.exit(78)
 #@profile()
@@ -826,6 +854,8 @@ def main(algorithm2, mode2):
     iteration_times = 0
     #actual
     algorithm, mode = algorithm2, mode2
+    seed_val = resolve_seed()
+    set_global_seed(seed_val)
     episode_length = 1
     next_state_reward_time_step = -1
     next_state_penalty_time_step = -1
@@ -872,6 +902,11 @@ def main(algorithm2, mode2):
             #     for congestion_3_mean in range(10):
 
         env=coordinationEnv()
+        if seed_val is not None:
+            try:
+                env.seed(seed_val)
+            except Exception:
+                pass
 
         # env.observation_space.sample()
         # env.reset()
@@ -898,7 +933,11 @@ def main(algorithm2, mode2):
         #while True:
          #   try:
         if algorithm == 'DQN':
-            model = eval(algorithm + "('MlpPolicy', env, verbose=1, learning_starts=10, device='cpu')")
+            model = DQN('MlpPolicy', env, verbose=1, learning_starts=10, device='cpu', seed=seed_val)
+        elif algorithm == 'PPO':
+            model = PPO('MlpPolicy', env, n_steps=10, verbose=1, device='cpu', seed=seed_val)
+        elif algorithm == 'A2C':
+            model = A2C('MlpPolicy', env, n_steps=10, verbose=1, device='cpu', seed=seed_val)
         else:
             model = eval(algorithm + "('MlpPolicy', env, n_steps=10, verbose=1, device='cpu')")
             #break
@@ -991,7 +1030,7 @@ def main(algorithm2, mode2):
             curriculum_last_avg_reward = rolling_avg
             threshold = CURRICULUM_REWARD_THRESHOLD
             if SCENARIO_NAME == "S0_Debug":
-                threshold = 0.55
+                threshold = 0.3
             if rolling_avg >= threshold:
                 sucess_times += 1
             else:
@@ -1004,7 +1043,7 @@ def main(algorithm2, mode2):
         if implement == 1:
             stop_everything_in_learning_and_go_to_implementation_phase = 1
             while True:
-                if os.path.exists('34959.txt'):
+                if os.path.exists(get_stop_flag_path()):
                     sys.exit(78)
                 if Dynamic_ALNS_RL34959.RL_can_start_implementation_phase_from_the_last_table == 1:
                     stop_everything_in_learning_and_go_to_implementation_phase = 0
@@ -1024,7 +1063,7 @@ def main(algorithm2, mode2):
 
             while True:
                 while True:
-                    if os.path.exists('34959.txt'):
+                    if os.path.exists(get_stop_flag_path()):
                         sys.exit(78)
                     # if len(Intermodal_ALNS34959.state_reward_pairs) == 1 and implement == 1:
                     #     print('i should check this wrong')
@@ -1094,7 +1133,7 @@ def main(algorithm2, mode2):
                         send_action(action_scalar)
                     if ALNS_got_action_in_implementation == 1 or len(Intermodal_ALNS34959.state_reward_pairs) == 0:#danger donot know why in rare case Intermodal_ALNS34959.state_reward_pairs is empty when alns got action is 0, but i think i can let it go to next iteration
                         # clear all data in pairs
-                        if os.path.exists('34959.txt'):
+                        if os.path.exists(get_stop_flag_path()):
                             sys.exit(78)
                         #check_RL_ALNS_iteraction_bug()
                         ALNS_got_action_in_implementation = 0

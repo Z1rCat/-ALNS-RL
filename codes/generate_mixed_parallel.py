@@ -5,6 +5,7 @@ import json
 import math
 import pandas as pd
 import numpy as np
+import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import warnings
 import sys
@@ -99,6 +100,7 @@ def load_distribution_config():
         name = str(item.get("name", "")).strip()
         pattern = str(item.get("pattern", "")).strip()
         means = item.get("means", {})
+        variance = item.get("variance")
         if not name or not pattern or not isinstance(means, dict):
             continue
         display = str(item.get("display", "")).strip()
@@ -106,6 +108,7 @@ def load_distribution_config():
             "name": name,
             "pattern": pattern,
             "means": means,
+            "variance": variance,
             "display": display,
         })
     return normalized or DEFAULT_DISTRIBUTIONS
@@ -139,8 +142,9 @@ def build_scenario_configs():
         name = item["name"]
         pattern = item["pattern"]
         means = item["means"]
+        variance = item.get("variance")
         display_str = item["display"] or build_display(name, pattern, means)
-        SCENARIO_CONFIGS[name] = {"pattern": pattern, "means": means}
+        SCENARIO_CONFIGS[name] = {"pattern": pattern, "means": means, "variance": variance}
         DIST_DISPLAY[name] = display_str
 
 build_scenario_configs()
@@ -204,18 +208,55 @@ def parse_phase_spec(spec):
         return {"mean": float(mean_val), "std": float(std) if std is not None else None, "dist": dist}
     return {"mean": float(spec), "std": None, "dist": "normal"}
 
+def resolve_phase_variance(variance_spec, phase_label):
+    if variance_spec is None:
+        return None
+    if isinstance(variance_spec, dict):
+        value = variance_spec.get(phase_label)
+    else:
+        value = variance_spec
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 def build_scenario_matrix_and_meta(dist_name, total_files, max_events):
     config = SCENARIO_CONFIGS[dist_name]
     labels = build_phase_labels(config["pattern"], total_files)
     matrix = np.zeros((total_files, max_events), dtype=int)
     meta_rows = []
+    variance_spec = config.get("variance")
     for i, label in enumerate(labels):
         phase_spec = config["means"][label]
         phase_params = parse_phase_spec(phase_spec)
         mean_val = phase_params["mean"]
-        matrix[i] = sample_durations(mean_val, max_events, std=phase_params["std"], dist=phase_params["dist"])
+        std_val = phase_params["std"]
+        if std_val is None:
+            var_val = resolve_phase_variance(variance_spec, label)
+            if var_val is not None:
+                std_val = math.sqrt(var_val)
+        matrix[i] = sample_durations(mean_val, max_events, std=std_val, dist=phase_params["dist"])
         meta_rows.append({"gt_mean": mean_val, "phase_label": label})
     return matrix, meta_rows
+
+def verify_excel_file(path):
+    try:
+        with zipfile.ZipFile(path) as zf:
+            bad = zf.testzip()
+            return bad is None
+    except (zipfile.BadZipFile, EOFError, OSError):
+        return False
+
+def verify_output_dir(r_dir, total_files):
+    failures = 0
+    for idx in range(total_files):
+        fpath = os.path.join(r_dir, f"Intermodal_EGS_data_dynamic_congestion{idx}.xlsx")
+        if not os.path.exists(fpath) or not verify_excel_file(fpath):
+            failures += 1
+            print(f"!! Corrupted or missing file: {fpath}")
+    return failures
 
 def build_default_meta(matrix, phase_label):
     meta_rows = []
@@ -284,10 +325,11 @@ def init_worker(base_data_path, exp_mapping, figures_dir):
 
 def generate_single_file(args):
     """写入单个 Excel"""
-    idx, r, duration_row, out_dir, meta_row = args
+    idx, r, duration_row, out_dir, meta_row, seed = args
     
     fname = f"Intermodal_EGS_data_dynamic_congestion{idx}.xlsx"
     fpath = os.path.join(out_dir, fname)
+    tmp_path = f"{fpath}.tmp.xlsx"
     
     # 获取缓存
     N, T, K, o = GLOBAL_DATA['N'], GLOBAL_DATA['T'], GLOBAL_DATA['K'], GLOBAL_DATA['o']
@@ -295,7 +337,7 @@ def generate_single_file(args):
     triggers = GLOBAL_DATA['triggers'][r]
     
     try:
-        with pd.ExcelWriter(fpath) as writer:
+        with pd.ExcelWriter(tmp_path) as writer:
             # 基础 Sheets
             N.to_excel(writer, 'N', index=False)
             R_df.to_excel(writer, f'R_{r}', index=False)
@@ -320,6 +362,7 @@ def generate_single_file(args):
             
             # 确定事件源
             loop_range = range(limit)
+            rng = np.random.RandomState(seed + idx) if seed is not None else np.random
             
             for i in loop_range:
                 # 1. 确定 Location, StartTime, Mode
@@ -327,9 +370,9 @@ def generate_single_file(args):
                     loc, start_t, mode = int(triggers[i][0]), int(triggers[i][1]), int(triggers[i][2])
                 else:
                     # Fallback Random
-                    loc = np.random.randint(0, 10)
-                    start_t = last_end + np.random.randint(1, 5)
-                    mode = np.random.choice([1,2,3])
+                    loc = rng.randint(0, 10)
+                    start_t = last_end + rng.randint(1, 5)
+                    mode = rng.choice([1, 2, 3])
                 
                 if start_t < last_end: continue
                 if [loc, mode] in used_pairs: continue
@@ -357,9 +400,16 @@ def generate_single_file(args):
                 sheet_name = f"R_{r}_{start_t} (2)"
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 u_idx += 1
-                
+
+        os.replace(tmp_path, fpath)
         return True
-    except Exception:
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        print(f"!! Failed to write {fpath}: {exc}")
         return False
 
 def main():
@@ -370,6 +420,8 @@ def main():
     parser.add_argument("--workers", type=int, default=os.cpu_count())
     parser.add_argument("--request_numbers", type=str, default="5",
                         help="指定要生成的R数量，单个值如'5'或逗号分隔如'5,10'")
+    parser.add_argument("--seed", type=int, default=None, help="random seed for generator")
+    parser.add_argument("--verify", action="store_true", help="verify generated excel files")
     args = parser.parse_args()
 
     try:
@@ -392,8 +444,12 @@ def main():
     print(f"   ?? R ???: {args.total_files}")
     print(f"   ????: {args.workers}")
     print(f"   R 集合: {target_rs}")
+    if args.seed is not None:
+        print(f"   seed: {args.seed}")
 
     start_all = time.time()
+    if args.seed is not None:
+        np.random.seed(args.seed)
     
     # 1. 生成数据矩阵
     MAX_EVT = 60
@@ -420,23 +476,39 @@ def main():
             # 准备任务
             tasks = []
             for i in range(args.total_files):
-                tasks.append((i, r, full_matrix[i], r_dir, meta_rows[i]))
+                tasks.append((i, r, full_matrix[i], r_dir, meta_rows[i], args.seed))
             
             # 提交并监控进度
             futures = [executor.submit(generate_single_file, t) for t in tasks]
-            
+            failures = 0
             if HAS_TQDM:
-                for _ in tqdm(as_completed(futures), total=len(futures), unit="file", ncols=80):
-                    pass
+                iterator = tqdm(as_completed(futures), total=len(futures), unit="file", ncols=80)
             else:
-                # 简易进度条
-                done = 0
-                for _ in as_completed(futures):
-                    done += 1
-                    if done % 100 == 0:
-                        sys.stdout.write(f"\r   ??: {done}/{len(futures)}")
-                        sys.stdout.flush()
+                iterator = as_completed(futures)
+            done = 0
+            for future in iterator:
+                done += 1
+                try:
+                    ok = future.result()
+                except Exception:
+                    ok = False
+                if not ok:
+                    failures += 1
+                if not HAS_TQDM and done % 100 == 0:
+                    sys.stdout.write(f"\r   ??: {done}/{len(futures)}")
+                    sys.stdout.flush()
+            if not HAS_TQDM:
                 print("")
+            if failures:
+                print(f"!! Generator failed on {failures} files.")
+                sys.exit(1)
+
+            if args.verify:
+                print(">> Verifying generated Excel files...")
+                verify_failures = verify_output_dir(r_dir, args.total_files)
+                if verify_failures:
+                    print(f"!! Verification failed on {verify_failures} files.")
+                    sys.exit(1)
                 
     print(f"\n=== ??????? {time.time() - start_all:.2f} ? ===")
 

@@ -26,6 +26,7 @@ PHASE_LABELS = {"train": "训练", "implement": "实施", "eval": "评估"}
 PHASE_LABEL_TITLES = {"phase": "阶段", "phase_label": "环境阶段"}
 METRIC_LABELS = {
     "gt_mean": "环境均值(gt_mean)",
+    "gt_std": "环境标准差(gt_std)",
     "severity": "严重度",
 }
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -489,6 +490,7 @@ def _plot_adaptation_curve(
     baseline_reroute: pd.DataFrame,
     out_path: Path,
     window: int,
+    dist_name: Optional[str] = None,
 ) -> None:
     if aligned.empty:
         raise ValueError("Unable to align rewards to decision trace.")
@@ -554,37 +556,98 @@ def _plot_adaptation_curve(
 
     ax_left.set_xlabel("决策步")
     ax_left.set_ylabel("平滑奖励")
-    ax_left.set_title("适应性S曲线")
+    ax_left.set_title("适应性S曲线", pad=28)
     ax_left.set_ylim(-0.05, 1.05)
-
 
     ax_right = ax_left.twinx()
     gt_mean = pd.Series(dtype=float)
     if "gt_mean" in aligned.columns:
         _coerce_numeric(aligned, ["gt_mean"])
         gt_mean = aligned["gt_mean"]
-    if gt_mean.notna().any():
-        if gt_mean.nunique(dropna=True) <= 1:
+    mean_changes = bool(gt_mean.notna().any() and gt_mean.nunique(dropna=True) > 1)
+
+    variance_changes = False
+    gt_std = pd.Series(dtype=float)
+    if "gt_std" in aligned.columns:
+        _coerce_numeric(aligned, ["gt_std"])
+        gt_std = aligned["gt_std"]
+        variance_changes = bool(gt_std.notna().any() and gt_std.nunique(dropna=True) > 1)
+    elif dist_name:
+        spec = _get_distribution_spec(dist_name)
+        variance_spec = spec.get("variance")
+        std_map: Dict[str, float] = {}
+        if isinstance(variance_spec, dict):
+            for k, v in variance_spec.items():
+                try:
+                    std_map[str(k)] = math.sqrt(max(0.0, float(v)))
+                except Exception:
+                    continue
+        else:
+            means_spec = spec.get("means")
+            if isinstance(means_spec, dict):
+                for k, v in means_spec.items():
+                    if isinstance(v, dict) and "std" in v:
+                        try:
+                            std_map[str(k)] = float(v["std"])
+                        except Exception:
+                            continue
+        if std_map and "phase_label" in aligned.columns:
+            phase_vals = aligned["phase_label"].dropna().astype(str).unique().tolist()
+            present = [std_map.get(v) for v in phase_vals if v in std_map]
+            present = [v for v in present if v is not None and not math.isnan(v)]
+            variance_changes = len(set(present)) > 1 if present else False
+            gt_std = aligned["phase_label"].map(lambda v: std_map.get(str(v)) if pd.notna(v) else np.nan)
+            gt_std = pd.to_numeric(gt_std, errors="coerce")
+
+    use_gt_std = bool(variance_changes and not mean_changes and gt_std.notna().any())
+    env_series = gt_std if use_gt_std else gt_mean
+    env_label = "gt_std" if use_gt_std else "gt_mean"
+
+    if env_series.notna().any():
+        if env_label == "gt_mean" and env_series.nunique(dropna=True) <= 1:
             print("Warning: gt_mean has no variance in this run.", file=sys.stderr)
-        x_gt = np.arange(len(gt_mean))
-        mask = gt_mean.notna()
+        x_env = np.arange(len(env_series))
+        mask = env_series.notna()
         ax_right.step(
-            x_gt[mask],
-            gt_mean[mask],
+            x_env[mask],
+            env_series[mask],
             where="post",
             color="black",
             linewidth=1.4,
             linestyle=":",
-            label="gt_mean",
+            label=env_label,
         )
-        ax_right.set_ylabel("环境难度(gt_mean)")
+        ax_right.set_ylabel(_metric_label(env_label))
+        if use_gt_std and gt_mean.notna().any():
+            const_mean = float(gt_mean.dropna().iloc[0])
+            ax_right.text(
+                0.02,
+                0.95,
+                f"均值恒定: {const_mean:.1f}",
+                transform=ax_right.transAxes,
+                ha="left",
+                va="top",
+                fontsize=11,
+                bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.85, "edgecolor": "#999999"},
+            )
 
     handles_left, labels_left = ax_left.get_legend_handles_labels()
     handles_right, labels_right = ax_right.get_legend_handles_labels()
-    ax_left.legend(handles_left + handles_right, labels_left + labels_right, loc="upper right")
+    handles = handles_left + handles_right
+    labels = labels_left + labels_right
+    ncol = max(3, len(labels))
+    ax_left.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=ncol,
+        frameon=False,
+        borderaxespad=0,
+    )
 
     sns.despine(fig=fig)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
     fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)
 
@@ -696,10 +759,11 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
 def _plot_cumulative_advantage(
     aligned: pd.DataFrame,
     baseline_wait: pd.DataFrame,
+    baseline_reroute: pd.DataFrame,
     out_path: Path,
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(10, 4.2), dpi=DEFAULT_DPI)
-    if aligned.empty or baseline_wait.empty:
+    if aligned.empty or (baseline_wait.empty and baseline_reroute.empty):
         ax.text(
             0.5,
             0.5,
@@ -714,11 +778,51 @@ def _plot_cumulative_advantage(
         plt.close(fig)
         return
 
-    baseline_wait = _sort_by_phase_table(baseline_wait)
     rl_rewards = aligned["reward"].to_numpy()
-    wait_rewards = baseline_wait["reward"].to_numpy()
-    n = min(len(rl_rewards), len(wait_rewards))
-    if n == 0:
+    x = np.arange(len(rl_rewards))
+
+    def _cum_adv(rl: np.ndarray, baseline: np.ndarray) -> np.ndarray:
+        rl_series = pd.Series(rl, dtype=float)
+        baseline_series = pd.Series(baseline, dtype=float).reindex(rl_series.index)
+        diff = (rl_series - baseline_series).fillna(0.0)
+        return diff.cumsum().to_numpy()
+
+    any_line = False
+    if not baseline_wait.empty:
+        baseline_wait = _sort_by_phase_table(baseline_wait)
+        wait_rewards = baseline_wait["reward"].to_numpy()
+        if len(rl_rewards) != len(wait_rewards):
+            print(
+                f"Warning: cumulative advantage length mismatch (RL={len(rl_rewards)}, wait={len(wait_rewards)}).",
+                file=sys.stderr,
+            )
+        ax.plot(
+            x,
+            _cum_adv(rl_rewards, wait_rewards),
+            color="#1F4E79",
+            linewidth=2.2,
+            label="vs. Always Wait",
+        )
+        any_line = True
+
+    if not baseline_reroute.empty:
+        baseline_reroute = _sort_by_phase_table(baseline_reroute)
+        reroute_rewards = baseline_reroute["reward"].to_numpy()
+        if len(rl_rewards) != len(reroute_rewards):
+            print(
+                f"Warning: cumulative advantage length mismatch (RL={len(rl_rewards)}, reroute={len(reroute_rewards)}).",
+                file=sys.stderr,
+            )
+        ax.plot(
+            x,
+            _cum_adv(rl_rewards, reroute_rewards),
+            color="#55A868",
+            linewidth=2.2,
+            label="vs. Always Reroute",
+        )
+        any_line = True
+
+    if not any_line:
         ax.text(
             0.5,
             0.5,
@@ -733,19 +837,11 @@ def _plot_cumulative_advantage(
         plt.close(fig)
         return
 
-    if len(rl_rewards) != len(wait_rewards):
-        print(
-            f"Warning: cumulative advantage length mismatch (RL={len(rl_rewards)}, wait={len(wait_rewards)}).",
-            file=sys.stderr,
-        )
-
-    diff = rl_rewards[:n] - wait_rewards[:n]
-    cum_adv = np.cumsum(diff)
-    ax.plot(np.arange(n), cum_adv, color="#1F4E79", linewidth=2.2)
     ax.axhline(0, color="#999999", linewidth=1, linestyle="--")
     ax.set_title("累积优势")
     ax.set_xlabel("决策步")
-    ax.set_ylabel("累计(RL - Wait)奖励")
+    ax.set_ylabel("累计(Reward_RL - Reward_Baseline)")
+    ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)
@@ -768,6 +864,17 @@ def main() -> None:
     trace = _read_csv(trace_path)
     _coerce_numeric(trace, ["table_number", "gt_mean", "severity", "action", "reward", "ts"])
 
+    dist_name: Optional[str] = None
+    meta_path = run_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+        value = meta.get("distribution")
+        if value:
+            dist_name = str(value)
+
     training = _load_rl_training(run_dir)
     baseline_wait = _load_baseline_events(run_dir / "baseline_wait.csv", "wait")
     baseline_reroute = _load_baseline_events(run_dir / "baseline_reroute.csv", "reroute")
@@ -789,9 +896,10 @@ def main() -> None:
         baseline_reroute,
         out_dir / "fig2_adaptation.pdf",
         args.window,
+        dist_name,
     )
     _plot_policy_heatmap(trace, aligned, out_dir / "fig3_policy_heatmap.pdf")
-    _plot_cumulative_advantage(aligned, baseline_wait, out_dir / "fig4_cumulative_advantage.pdf")
+    _plot_cumulative_advantage(aligned, baseline_wait, baseline_reroute, out_dir / "fig4_cumulative_advantage.pdf")
 
     print("Saved figures to:", out_dir)
     print("  fig1_environment.pdf")

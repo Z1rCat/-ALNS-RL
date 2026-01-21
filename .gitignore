@@ -90,3 +90,32 @@ action_reward_table*.xlsx
 
 # Excel 数据（默认不提交）
 *.xlsx
+
+# ===========================
+# LaTeX build artifacts (keep .tex/.pdf, ignore aux/log/toc etc.)
+# ===========================
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+*.bcf
+*.run.xml
+*.nav
+*.snm
+*.vrb
+_minted*/
+
+# LaTeX 输出 PDF（可由 .tex 重新生成；不影响 paper_figures/ 子目录中的图）
+ALNS_Research_Documentation/latex/*.pdf
+ALNS_Research_Documentation/latex/old/*.pdf
+
+# Office documents (reports are generated artifacts by default)
+*.docx
+*.pptx

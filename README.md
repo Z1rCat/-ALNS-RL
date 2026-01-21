@@ -21,6 +21,7 @@
 ├── distribution_config.json        # 分布配置（菜单自动读取）
 ├── ALNS_Research_Documentation/    # 文档与可视化脚本
 │   ├── reports/
+│   ├── latex/                      # 论文 LaTeX（可选，建议忽略编译中间产物）
 │   ├── analysis/
 │   ├── config/
 │   ├── scripts/
@@ -49,12 +50,30 @@ python codes/Dynamic_master34959.py --dist_name S1_1 --request_number 10 --run_c
 - `--algorithm`: `DQN` / `PPO` / `A2C`。
 - `--workers`: 生成器进程数（`1` 为单核）。
 - `--single_core`: 强制生成器使用单核。
+- `--seed`: 随机种子（同时作用于数据生成与 RL）。
+- `--run-name`: 覆盖默认的 run 目录名（用于脚本编排与并发）。
 
 ## 推荐流程（端到端）
 1. 运行实验：使用 `Dynamic_master34959.py` 生成 `run_*` 目录与日志。
 2. 基准回放：用 `run_benchmark_replay.py` 生成 `baseline_*.csv`。
 3. 论文图表：用 `plot_paper_figure.py` 输出到 `paper_figures/`。
 4. 汇总分析：用 `ALNS_Research_Documentation/scripts/*.py` 汇总跨运行结果。
+5. 技术接口说明：见 `ALNS_Research_Documentation/reports/实现报告.md`（环境/日志/跳级/可扩展点）。
+
+## 批量运行（本地/服务器）
+### 服务器版本（Top 6 + 全算法 + 3 seeds）
+```bash
+python codes/run_experiments_server.py
+```
+可选参数：
+- `--max-workers`: 覆盖默认并发数（默认=物理核数-2）。
+- `--dry-run`: 只打印命令，不实际执行。
+
+### 本地版本（调试用）
+```bash
+python codes/run_experiments_local.py
+```
+默认配置：`S5_1/S3_1/V1_3`、`R=30`、算法 `DQN+A2C`、`seed=42`。
 
 ## 分布配置（distribution_config.json）
 - 配置文件控制可选分布，主控面板自动读取，增删分布无需改代码。
@@ -63,6 +82,7 @@ python codes/Dynamic_master34959.py --dist_name S1_1 --request_number 10 --run_c
   - `"A": {"mean": 9, "var": 4}`
   - `"A": {"mean": 9, "std": 2}`
   - `"A": {"mean": 9, "dist": "lognormal", "std": 2}`
+- 顶层 `variance` 支持标量或分阶段字典（用于 V1 变方差场景）。
 - 详细说明见：`ALNS_Research_Documentation/config/Distribution_Config_Guide.md`。
 
 ## 输出与分析
@@ -85,10 +105,18 @@ python ALNS_Research_Documentation/scripts/plot_rl_logs_summary.py
 python codes/plot_paper_figure.py --run-dir codes/logs/run_20260117_184322_R5_S0_Debug
 ```
 
+### 批量重绘图（多次运行）
+```bash
+python codes/redraw_paper_figures.py --dry-run
+python codes/redraw_paper_figures.py --clean --window 30
+python codes/redraw_paper_figures.py --runs run_20260120_123246_371223_R30_V1_3_DQN_S42
+```
+
 ### 基准策略回放
 ```bash
 python codes/run_benchmark_replay.py --run-dir codes/logs/run_20260117_184322_R5_S0_Debug --policy wait
 python codes/run_benchmark_replay.py --run-dir codes/logs/run_20260117_184322_R5_S0_Debug --policy reroute
+python codes/run_benchmark_replay.py --run-dir codes/logs/run_20260117_184322_R5_S0_Debug --policy all
 ```
 
 ## 部署提示
@@ -96,7 +124,8 @@ python codes/run_benchmark_replay.py --run-dir codes/logs/run_20260117_184322_R5
 - 生成数据与日志跟随 `run_*` 目录，支持并行运行的物理隔离。
 
 ## 收敛与跳级机制（简述）
-- 收敛判定基于近期奖励滑动平均（`rolling_avg`），默认窗口长度为 30。
-- 默认阈值为 0.7；调试场景 `S0_Debug` 使用 0.55 以便验证跳级逻辑。
-- 跳级触发后会直接将 `table_number` 切换到下一阶段起点或测试起点（499）。
+- 收敛判定基于近期奖励滑动平均（`rolling_avg`），默认窗口长度为 30，且需连续满足阈值若干次才算收敛。
+- 默认阈值为 0.7；调试场景 `S0_Debug` 使用 0.3 以便快速验证跳级/切换逻辑。
+- 训练阶段默认使用 `table_number=0..349`；测试阶段为 `table_number=499..350`（倒序，用于与训练阶段物理隔离）。
+- 跳级触发由 ALNS 线程执行：会将 `table_number` 切换到下一阶段起点或测试起点（499），并切换 `implement=1`。
 

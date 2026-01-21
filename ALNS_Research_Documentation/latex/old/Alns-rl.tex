@@ -1,0 +1,645 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{ctex}
+\usepackage{float}
+\setlength{\parskip}{0.6em}
+\setlength{\parindent}{0pt}
+
+\title{分布漂移可视化与课程式跳级机制的实现\\
+\large ALNS--RL 组会汇报稿（偏汇报，轻论文）}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{任务背景：把“分布变换”显式展示在 RL Reward 曲线中}
+
+本工作的系统背景是 \textbf{ALNS--RL 协同的多式联运动态优化框架}。
+
+\begin{itemize}
+\item \textbf{ALNS}：负责仿真与路径/调度优化。每一个环境实例对应一个独立的 Excel 文件；
+\item \textbf{RL（DQN / A2C / PPO）}：在运行过程中，当出现不确定事件（如拥堵、延误）时，做高层离散决策；
+\item \textbf{动作空间}：
+\begin{itemize}
+\item $a=0$：等待 / 保持当前方案（Keep / Wait）；
+\item $a=1$：触发重规划（Reroute）。
+\end{itemize}
+\item \textbf{智能跳级（Curriculum Jumping）}：当 RL 达到阶段性收敛条件后，不必按 $0\ldots499$ 的顺序跑完整个环境序列，而是根据场景结构跳转到下一个阶段或直接进入测试；
+\item \textbf{物理隔离（\texttt{run\_dir}）}：每一次运行都输出到独立目录
+\texttt{codes/logs/run\_*/}，包含 \texttt{data/}、日志 CSV 与元配置文件，用于复现实验与对比分析。
+\end{itemize}
+
+在上一次组会上，老师提出了一个关键意见：
+
+\begin{quote}
+\emph{在最终绘制 RL reward 曲线时，需要把环境的分布切换也明确展示出来，否则 reward 曲线缺乏环境背景。}
+\end{quote}
+
+这一意见直接推动了我后续的一系列实现与反思。本次汇报的核心工作，正是围绕
+\textbf{“分布漂移如何被正确展示、以及这暴露了哪些原有机制的问题”}展开。
+
+\section{实现可视化后暴露的问题：RL 可能“过早收敛”}
+
+在将分布切换显式画入 reward 曲线之后（Fig.~2 右轴 + 背景分段），我发现了一个此前被忽略的重要漏洞。
+
+原有的智能跳级逻辑是：
+\begin{itemize}
+\item 只要 RL 的 rolling average reward 达到阈值，就认为当前阶段已经学会；
+\item 一旦满足该条件，就允许直接进入测试阶段。
+\end{itemize}
+
+这一逻辑在 \textbf{单阶段或 OOD 设计} 中是合理的，
+但在 \textbf{多阶段场景}（如 A$\to$B 或 A$\to$B$\to$A）下会产生严重偏差：
+
+\begin{itemize}
+\item RL 可能在阶段 A 很快达标；
+\item 但尚未充分经历阶段 B（甚至完全没进入 B）；
+\item 就直接切换到测试阶段，导致“适应性”“记忆能力”等结论不再严谨。
+\end{itemize}
+
+因此，我将“跳级”从 \textbf{仅由收敛触发}，
+升级为 \textbf{由场景结构与收敛条件共同决定}。
+
+\section{关键改动一：为环境实例打标签并写入日志}
+
+\subsection{训练与测试的实例划分}
+
+每一次实验统一生成 500 个环境实例
+（\texttt{table\_number = 0\ldots499}）。
+
+\begin{itemize}
+\item 训练阶段：前 350 个实例（概念上对应 $0\ldots349$）；
+\item 测试阶段：后 150 个实例（概念上对应 $350\ldots499$）。
+\end{itemize}
+
+系统内部实现中，测试阶段采用 \textbf{倒序运行}（从 499 递减到 350）。
+
+在近期调试中，我发现当 \texttt{implement=1} 切换发生时，
+如果 ALNS 线程继续自增/自减 \texttt{table\_number} 但并未真正运行实例，
+会出现“看似进入测试、但立刻触及边界”的假象。
+
+为此，我补充了 \textbf{implement 切换时的索引同步与等待机制}，
+确保测试阶段确实从 499 开始运行
+（对应 \texttt{Dynamic\_ALNS\_RL34959.py} 中的
+\texttt{implement\_start\_synced} 逻辑）。
+
+\subsection{环境标签的生成与传递}
+
+每一个 Excel 环境文件都包含一个 \texttt{\_\_meta\_\_} sheet，至少记录：
+
+\begin{itemize}
+\item \texttt{gt\_mean}：该实例所属分布的均值；
+\item \texttt{phase\_label}：阶段标签（如 A / B / C）。
+\end{itemize}
+
+RL 在构建状态时读取该 sheet，并将对应信息写入日志。
+
+\section{关键改动二：基于时序结构特性的六类分布设计与能力假设}
+
+为了全面评估 RL 在动态环境下的鲁棒性与适应性，我们基于 \texttt{distribution\_config.json} 构建了六类典型的分布模式。
+
+本设计的核心创新在于：\textbf{将 500 个环境实例的时序生成逻辑（Pattern）与 $0\ldots349$（训练集）/ $350\ldots499$（测试集）的切分点进行精确对齐}。通过控制分布切换点相对于测试切分点的位置，我们为每一类场景赋予了明确的“能力探针”语义。
+
+\subsection{分布类型定义与验证目标}
+
+表 \ref{tab:distribution_design} 展示了六类分布的具体结构及其对应的核心假设。所有分布生成均基于 $N=500$ 的总长度，其中索引 $350$ 为训练与测试的硬性物理隔离界限。
+
+\begin{table}[h]
+\centering
+\caption{六类分布的时序结构设计与核心验证目标}
+\label{tab:distribution_design}
+\renewcommand{\arraystretch}{1.3} % 增加行高
+\resizebox{\textwidth}{!}{% 自适应宽度
+\begin{tabular}{lp{2cm}p{5cm}p{6cm}}
+\toprule
+\textbf{类别} & \textbf{Pattern} & \textbf{时序结构 (Indices $0 \to 499$)} & \textbf{核心验证目标 (Hypothesis)} \\
+\midrule
+\textbf{基准} (S1) & \texttt{random\_mix} & \textbf{全程混合} \newline A/B 以 50/50 概率随机交替 & \textbf{IID 鲁棒性}：验证 RL 能否在无时序规律的噪声中，学到一种“平均最优”策略，而非过拟合某一次特定的波动。 \\
+\hline
+\textbf{泛化} (S3) & \texttt{ab} & \textbf{分布阶跃} \newline A: $0\ldots349$ (Train) \newline B: $350\ldots499$ (Test) & \textbf{OOD 零样本泛化}：训练阶段从未见过分布 B。验证当环境发生结构性突变时，RL 是否具备基本的通用性（Generalization），还是会因过拟合 A 而彻底失效。 \\
+\hline
+\textbf{适应} (S5) & \texttt{adaptation} & \textbf{早期突变陷阱} \newline A: $0\ldots99$ \newline B: $100\ldots499$ (覆盖测试段) & \textbf{克服过早收敛}：A 阶段极短，RL 易在此处误判为收敛并停止。此场景专门验证“跳级机制”能否识别环境变化，强制 RL 继续学习 B 分布。 \\
+\hline
+\textbf{记忆} (S2) & \texttt{aba} & \textbf{回归结构} \newline A($0\ldots174$) $\to$ B($175\ldots349$) $\to$ \textbf{A($350\ldots499$)} & \textbf{灾难性遗忘}：测试集回归到初始分布 A。验证 RL 在为了适应中间的 B 阶段而调整参数后，能否“回想起”旧策略，还是发生了灾难性遗忘？ \\
+\hline
+\textbf{演变} (S6) & \texttt{abc} & \textbf{连续漂移} \newline A $\to$ B $\to$ \textbf{C($350\ldots499$)} & \textbf{持续学习能力}：训练经历 A$\to$B，测试进入全新的 C。模拟现实中不断恶化的复杂非平稳环境。 \\
+\hline
+\textbf{风险} (V1) & \texttt{aba} (均值恒定) & \textbf{方差突变} \newline $\mu_A = \mu_B$，但 $\sigma_A \neq \sigma_B$ & \textbf{风险敏感性}：当期望收益（均值）不变时，验证 RL 是风险厌恶（偏向 Wait）还是风险寻求（偏向 Reroute）。 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\subsection{关键设计逻辑解析}
+
+\begin{enumerate}
+    \item \textbf{OOD 的绝对隔离 (S3\_1 \texttt{ab})：} 
+    我们将 A 分布严格限制在 $0\ldots349$，这意味着在训练阶段，RL \textbf{绝对无法}接触到 B 分布的数据。测试阶段的性能完全取决于算法对状态空间的\textit{外推能力}，而非插值记忆。这是最严苛的测试场景。
+    
+    \item \textbf{适应性的陷阱设计 (S5\_1 \texttt{adaptation})：}
+    设计 $A(0\ldots99) \to B$ 的初衷是制造一个“收敛陷阱”。传统的 Early Stopping 往往会在 Index $50\ldots80$ 左右因为 Reward 趋稳而触发停止，从而完全错过后续的 B 分布。该模式强迫系统必须引入\textbf{基于环境特征的跳级检查}，否则训练出的模型在测试集（全为 B）将表现极差。
+    
+    \item \textbf{记忆与遗忘的博弈 (S2\_1 \texttt{aba})：}
+    测试集被刻意安排为回归 A 分布（$350\ldots499$）。这要求 RL 模型不仅要适应中间的 B，还必须在神经网络权重中保留 A 的特征映射。如果模型为了适应 B 而“覆写”了 A 的知识，测试得分将显著低于基准策略。
+\end{enumerate}
+\section{关键改动三：按分布类型定制跳级逻辑}
+
+\subsection{RL 侧的阶段性收敛判定}
+
+RL 侧维护一个用于跳级的阶段性收敛信号（\texttt{curriculum\_converged}）：
+
+\begin{itemize}
+\item 滑动窗口长度：30；
+\item 收敛阈值：0.7（Debug 模式下降为 0.3）；
+\item 连续达标次数：3 次。
+\end{itemize}
+
+需要强调的是：该信号\textbf{并不代表最终最优收敛}，而仅用于控制算力在不同阶段之间的分配。
+
+\subsection{ALNS--RL 协同的跳级控制}
+
+跳级控制逻辑位于 \texttt{Dynamic\_ALNS\_RL34959.py}，
+由 ALNS 线程维护当前 \texttt{table\_number}。
+
+一旦 RL 达到阶段性收敛，就根据 \texttt{distribution\_config.json} 中定义的 \texttt{pattern} 决定下一步：
+
+\begin{itemize}
+\item 多阶段场景：跳转到下一阶段的起点；
+\item OOD 场景（S3）：训练只跑 A，达标后直接进入测试（B）；
+\item 记忆 / 风险场景：训练覆盖所有关键阶段，再在测试中验证回归行为。
+\end{itemize}
+
+\section{典型场景的跳级示例}
+
+\subsection{S5\_1：适应场景（A$\to$B）}
+
+目标是避免 RL 在 A 阶段快速学会后直接进入测试，从而使“适应性”论证失效。
+
+具体逻辑为：
+
+\begin{enumerate}
+\item 在 A 阶段达标后，不进入测试；
+\item 将 \texttt{table\_number} 跳转到 B 的起点；
+\item 在 B 中满足最小训练量后，才允许进入测试；
+\item 测试阶段从 499 开始倒序运行。
+\end{enumerate}
+
+\subsection{V1\_3：风险场景（均值恒定，方差突变）}
+
+由于均值不变，单独绘制 \texttt{gt\_mean} 无法体现环境切换。
+
+因此在可视化中采用自动指标切换：
+
+\begin{itemize}
+\item 若检测到方差变化且均值恒定，则右轴绘制 \texttt{gt\_std}；
+\item 图内显式标注“均值恒定为 $X$”。
+\end{itemize}
+
+\section{机制创新：基准策略回放与反事实对比验证体系}
+
+在强化学习（RL）模型的评估中，单纯依赖平均奖励（Average Reward）往往难以全面衡量智能体的真实能力。例如，在低干扰环境（如对数正态分布均值为 3 的场景）中，简单的“始终等待（Always-Wait）”策略即可获得理论最优解。若 RL 仅获得高分，无法证明其具备了状态感知与复杂决策能力。
+
+因此，为了量化 RL 相对于启发式规则的“智能溢价（Intelligence Premium）”，本研究构建了包含三种基准策略（Always-Wait, Always-Reroute, Random）的对比体系。同时，针对本框架特有的“智能跳级（Curriculum Jumping）”机制导致的训练序列非线性问题，设计并实现了**基准策略回放（Benchmark Replay）**机制，以确保在完全一致的上下文环境中进行公平对比。
+
+\subsection{基准策略回放机制：轨迹对齐与环境复用}
+
+由于本研究引入了基于收敛阈值的跳级机制，RL Agent 在训练和测试阶段经历的算例序列（\texttt{table\_number}）是动态变化的（例如，模型可能在 Index 100 快速收敛后直接跳跃至 Index 350）。传统的静态测试集评估法无法复现 RL 做出决策时的时序上下文。
+
+为此，本研究提出了一种**轨迹对齐（Trajectory Alignment）**的回放机制，通过脚本 \texttt{run\_benchmark\_replay.py} 实现反事实评估（Counterfactual Evaluation）：
+
+\begin{enumerate}
+    \item \textbf{环境强复用（Environment Persistence）}：回放过程直接读取 RL 运行时生成的沙盒目录（\texttt{run\_dir/data/}）下的 Excel 环境文件，严格禁止重新生成不确定性事件。这确保了基准策略与 RL 面对的是完全相同的“试卷”，消除了随机种子带来的环境噪音。
+    \item \textbf{序列重放（Sequence Replay）}：系统解析 RL 的运行日志 \texttt{rl\_trace.csv}，提取出 RL 实际经历的 $(table\_number, phase)$ 精确时序序列。基准策略将严格按照此顺序执行，包括相同的跳级点和倒序测试路径。
+    \item \textbf{闭环同步（Closed-loop Synchronization）}：基准脚本并非简单地离线计算，而是像 RL Agent 一样与 ALNS 仿真器进行实时交互。它根据历史 Phase 设置仿真参数，发出固定的基准动作，并轮询等待 ALNS 返回真实的 Reward。这保证了底层仿真器的状态转移与 RL 运行时完全一致。
+\end{enumerate}
+
+\subsection{三级基准策略体系}
+
+为了全方位评估 RL 的智能程度，我们定义了三种不同层级的基准策略 $\pi_{base}$：
+
+\begin{itemize}
+    \item \textbf{保守基准：总是选择 0 (Always-Wait, $\pi_{wait}$)}：
+    \begin{equation}
+        a_t = 0, \quad \forall s_t
+    \end{equation}
+    始终选择“等待/保持原计划”。该策略在低均值、低方差的简单环境中往往是最优解。引入此基准旨在验证 RL 是否学会了“懒惰”——即在不必要重规划时，能否像保守策略一样节省计算成本和操作成本，避免过度反应。
+    
+    \item \textbf{激进基准：总是选择 1 (Always-Reroute, $\pi_{reroute}$)}：
+    \begin{equation}
+        a_t = 1, \quad \forall s_t
+    \end{equation}
+    始终触发“重规划”。该策略在高均值、高风险的复杂环境中通常能通过绕路减少延误损失。引入此基准旨在验证 RL 在面对严重干扰时，能否逼近甚至超越激进策略的收益上限，体现对风险的响应能力。
+    
+    \item \textbf{噪声基准：随机策略 (Random, $\pi_{rand}$)}：
+    \begin{equation}
+        a_t \sim \text{Bernoulli}(0.5)
+    \end{equation}
+    以 50\% 的概率随机选择动作。用于排除环境自身的偶然性（例如某些死局下无论如何选择收益均相同），确立性能下界（Lower Bound），证明 RL 的优势来源于有效的特征学习而非运气。
+\end{itemize}
+
+\subsection{深度对比目标与累计优势指标}
+
+通过将 RL 的性能曲线与上述基准策略进行同坐标系对比（参见实验结果部分的 Fig 4 等），本研究旨在回答以下三个核心问题：
+
+\begin{enumerate}
+    \item \textbf{有效性（Effectiveness）}：RL 是否在绝大多数时间步中击败了 Random 和表现较差的那个确定性基准？
+    \item \textbf{状态敏感性（State Sensitivity）}：RL 是否展现出了动态切换能力？即在低风险区逼近 Always-Wait 的表现，而在高风险区逼近 Always-Reroute 的表现。
+    \item \textbf{分布适应性（Distribution Adaptation）}：当环境发生分布漂移（如 OOD 场景）导致某一固定基准策略系统性崩溃时，RL 是否能保持鲁棒性？
+\end{enumerate}
+
+为了直观量化 RL 相对于基准策略的持续性收益，我们定义了**“累计优势（Cumulative Advantage）”**指标 $\mathcal{V}_t$。该指标计算 RL 累积获得的奖励与基准策略累积奖励的差值，其定义如下：
+
+\begin{equation}
+    \mathcal{V}_t(\pi_{base}) = \sum_{k=0}^{t} \left( r_k(\pi_{RL}) - r_k(\pi_{base}) \right)
+\end{equation}
+
+其中，$r_k(\pi)$ 表示策略 $\pi$ 在第 $k$ 个决策步（对应同一环境文件）获得的单步奖励。
+\begin{itemize}
+    \item 当曲线斜率为正（$\nearrow$）时，表明 RL 在该阶段持续优于基准；
+    \item 当曲线走平（$\rightarrow$）时，表明 RL 表现与基准持平（通常意味着 RL 收敛到了该环境下的最优基准策略）；
+    \item 当曲线斜率为负（$\searrow$）时，表明 RL 表现劣于基准（通常发生在探索初期）。
+\end{itemize}
+这一指标能够清晰地展示 RL 在环境突变前后的损益变化过程。
+\section{多维可视化验证体系}
+
+为了从机制、现象到量化结果全方位验证 ALNS-RL 框架的有效性，本研究升级了可视化脚本 \texttt{plot\_paper\_figure.py}。该系统针对每个实验 Run 生成四张核心图表，构成了完整的证据链。
+
+以下以 S3\_1 场景（OOD 泛化测试：训练于常态分布，测试于未见过的瘫痪分布）为例进行说明：
+
+\subsection{图 1：环境分布漂移全景图 (Environment Shift)}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{A:/MYpython/34959_RL/ALNS_Research_Documentation/latex/paper_figures/run_S3_1_A2C/fig1_environment.pdf}
+    \caption{环境生成机制验证：时序漂移（左）与统计分布特征（右）}
+    \label{fig:env_shift}
+\end{figure}
+
+\textbf{解读指南：}
+\begin{itemize}
+    \item \textbf{左子图（时序散点）}：展示了算例序列（Table Number）对应的环境压力（Severity/Mean）。蓝色点群代表训练阶段（低压常态），红色点群代表测试阶段（高压瘫痪）。虚线清晰标记了分布发生结构性突变（Shift）的时刻。
+    \item \textbf{右子图（核密度估计 KDE）}：展示了环境参数的概率分布。双峰（或明显分离的单峰）形态证明了训练集与测试集存在显著的 \textbf{Covariate Shift}，确立了 OOD（Out-of-Distribution）实验的物理基础。
+\end{itemize}
+
+\subsection{图 2：适应性 S 曲线 (Adaptation Dynamics)}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{A:/MYpython/34959_RL/ALNS_Research_Documentation/latex/paper_figures/run_S3_1_A2C/fig2_adaptation.pdf}
+    \caption{RL 适应性轨迹与基准策略对比}
+    \label{fig:adaptation_curve}
+\end{figure}
+
+\textbf{解读指南：}
+\begin{itemize}
+    \item \textbf{双轴设计}：左轴为平滑奖励（Reward），右轴（黑色点状阶梯线）为环境真实均值（GT Mean）。
+    \item \textbf{核心看点}：
+    \begin{enumerate}
+        \item \textbf{突变响应}：当右轴黑线阶梯式上升（环境变难）时，观察蓝色 RL 曲线是否出现短暂下跌（Shock）；
+        \item \textbf{恢复斜率}：观察 RL 曲线是否能快速回升并收敛，形成 S 型适应曲线；
+        \item \textbf{基准压制}：对比 RL 曲线是否显著高于灰色虚线（Always-Wait）和橙色虚线（Always-Reroute）。在 S3\_1 中，我们期望看到 RL 在测试阶段（灰色背景区）依然保持高位，而 Wait 策略应大幅崩盘。
+    \end{enumerate}
+\end{itemize}
+
+\subsection{图 3：细粒度策略热力图 (Granular Policy Shift)}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{A:/MYpython/34959_RL/ALNS_Research_Documentation/latex/paper_figures/run_S3_1_A2C/fig3_policy_heatmap.pdf}
+    \caption{策略行为模式演变分析}
+    \label{fig:policy_heatmap}
+\end{figure}
+
+\textbf{解读指南：}
+\begin{itemize}
+    \item \textbf{图表含义}：展示了 RL Agent 在不同阶段（Y轴：Train vs Implement）对四种细分动作（X轴）的选择频率。
+    \item \textbf{机制证明}：这是解释 RL \textbf{“学到了什么”} 的关键。
+    \item \textbf{预期现象}：在 S3\_1 中，训练阶段（低压）颜色应集中在 \texttt{Removal-Wait}（倾向保守）；而进入测试阶段（高压）后，高亮区域应显著转移至 \texttt{Removal-Reroute}（倾向激进）。这种 \textbf{策略漂移 (Policy Shift)} 证明了模型具备状态感知能力，而非盲目记忆。
+\end{itemize}
+
+\subsection{图 4：累计优势趋势图 (Cumulative Advantage)}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{A:/MYpython/34959_RL/ALNS_Research_Documentation/latex/paper_figures/run_S3_1_A2C/fig4_cumulative_advantage.pdf}
+    \caption{RL 相对于基准策略的累计净收益}
+    \label{fig:cumulative_advantage}
+\end{figure}
+
+\textbf{解读指南：}
+\begin{itemize}
+    \item \textbf{指标定义}：$\mathcal{V}_t = \sum (R_{RL} - R_{Baseline})$。
+    \item \textbf{趋势判断}：
+    \begin{itemize}
+        \item \textbf{向上倾斜（正斜率）}：RL 持续优于基准策略，差距不断扩大（碾压优势）。
+        \item \textbf{水平直线}：RL 表现与基准持平（通常发生在最优解显而易见的简单场景）。
+        \item \textbf{向下倾斜}：RL 表现劣于基准（通常仅在训练初期的探索阶段出现）。
+    \end{itemize}
+    \item \textbf{价值证明}：如果在测试阶段（曲线后半段）呈现持续上升趋势，即证明了 RL 算法在应对不确定性时具有显著的工程价值与鲁棒性。
+\end{itemize}
+\section{工程实现：批量实验编排与并行计算架构}
+
+面对“多分布模式 $\times$ 多算法类型 $\times$ 多请求规模（$R$） $\times$ 多基准策略”带来的组合爆炸式计算需求，本研究构建了一套分层级、高鲁棒的自动化实验编排系统。该系统旨在实现从本地开发环境（MVP）到服务器高性能计算环境（HPC）的无缝迁移。
+
+\subsection{分层调度体系}
+为平衡调试灵活性与大规模计算效率，我们实现了三级调度脚本：
+\begin{itemize}
+    \item \textbf{公共调度内核 (\texttt{run\_experiments\_common.py})}：封装了实验配置解析、任务队列管理与异常捕获逻辑，作为核心库被上层调用。
+    \item \textbf{本地调试入口 (\texttt{run\_experiments\_local.py})}：面向开发环境优化，默认采用小规模样本与低并发度，用于快速验证代码逻辑与数据流闭环（即“最小可跑样例”）。
+    \item \textbf{服务器全量入口 (\texttt{run\_experiments\_server.py})}：面向生产环境优化，支持全量参数矩阵的一键部署，并集成了自动重试与断点续跑机制。
+\end{itemize}
+
+\subsection{原子任务全链路闭环}
+系统将单次实验定义为一个不可分割的“原子任务单元（Atomic Task Unit）”，每个单元严格执行以下标准化闭环流程：
+\begin{enumerate}
+    \item \textbf{主程序执行}：调用 \texttt{Dynamic\_master34959.py}，完成从环境生成、RL 模型训练到测试阶段的全过程，并将所有运行数据落盘至独立的沙盒目录（Sandbox Directory）。
+    \item \textbf{反事实评估}：自动触发 \texttt{run\_benchmark\_replay.py --policy all}，在相同的环境序列下回放 Wait/Reroute/Random 等基准策略，生成对比数据。
+    \item \textbf{自动化绘图}：调用 \texttt{plot\_paper\_figure.py}，基于生成的日志自动产出符合期刊标准的四张核心图表，实现“无人值守”的证据生成。
+\end{enumerate}
+
+\subsection{并发策略与 IO 安全机制}
+为了在最大化利用算力的同时保证数据完整性，本系统设计了特定的并发控制策略：
+
+\begin{itemize}
+    \item \textbf{沙盒隔离并发}：以“独立 Run ID 目录”为最小并发单元。不同实验进程在物理文件系统上完全隔离，彻底消除了写冲突（Write Conflicts）风险。
+    \item \textbf{资源感知调度}：基于 \texttt{ThreadPoolExecutor} 构建进程池。默认并发数动态设定为 $N_{cpu} - 2$，既充分压榨算力，又预留核心用于系统 IO 与调度开销，防止系统假死。
+    \item \textbf{IO 安全生成模式}：针对 Excel 文件并发写入极易导致损坏（如 \texttt{BadZipFile/EOFError}）的工程痛点，系统在“不确定性事件生成”阶段强制启用\textbf{单核模式}（\texttt{generator\_workers=1}）。虽然牺牲了微小的生成速度，但保证了二进制文件的绝对安全，实现了计算效率与数据稳定性的最优平衡。
+\end{itemize}
+
+
+\section{结果展示与分析（六组实验，24 张图）}
+
+本节对六次代表性运行的实验结果进行完整展示与分析。每一次运行均包含四类图像：
+环境结构（Fig1）、reward 适应曲线（Fig2）、动作策略分布（Fig3）以及相对基准策略的累计优势（Fig4）。
+所有图像均来自对应 run 的 \texttt{paper\_figures/} 子目录。
+
+为避免混淆，下文每一小节均明确给出 \textbf{分布类型 + 算法 + run ID}，
+并且所有 “Fig1–Fig4” 均指该 run 目录下的同名文件：
+\texttt{fig1\_environment.pdf}，
+\texttt{fig2\_adaptation.pdf}，
+\texttt{fig3\_policy\_heatmap.pdf}，
+\texttt{fig4\_cumulative\_advantage.pdf}。
+
+% ============================================================
+\subsection{V1\_3：均值恒定、方差突变（风险敏感性）}
+% ============================================================
+
+\subsubsection{V1\_3 + DQN\\
+(run\_20260120\_123246\_371223\_R30\_V1\_3\_DQN\_S42)}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_DQN/fig1_environment.pdf}
+\caption{V1\_3 场景的环境结构：均值恒定，方差在中段突变}
+\end{figure}
+
+Fig1 显示该场景在整个过程中环境均值保持不变，仅在中段引入显著更高的方差。
+这意味着从理论上看，高层最优决策策略在不同阶段并不存在结构性变化，
+该场景主要用于检验 RL 对不确定性“方差变化”的风险敏感性。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_DQN/fig2_adaptation.pdf}
+\caption{DQN 在 V1\_3 场景下的 reward 适应曲线（右轴为环境方差）}
+\end{figure}
+
+Fig2 表明，在方差显著增大的阶段，DQN 的 reward 并未出现系统性下降，
+整体曲线保持平稳，说明该场景下不存在明显的适应失败问题。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_DQN/fig3_policy_heatmap.pdf}
+\caption{DQN 在 V1\_3 场景下的动作频率与条件平均奖励}
+\end{figure}
+
+Fig3 显示，实施阶段策略几乎完全塌缩为“等待”动作。
+结合条件平均奖励可以看到，在该场景下等待本身就是收益最高的决策，
+因此这种策略塌缩是\textbf{合理且正确的最优行为}，而非策略失效。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_DQN/fig4_cumulative_advantage.pdf}
+\caption{DQN 在 V1\_3 场景下相对基准策略的累计优势}
+\end{figure}
+
+Fig4 中，相对 Always-Wait 的累计优势接近 0，
+而相对 Always-Reroute 的优势持续累积，
+进一步验证了该策略在风险场景下的合理性。
+
+% ------------------------------------------------------------
+
+\subsubsection{V1\_3 + A2C\\
+(run\_20260120\_175128\_674609\_R30\_V1\_3\_A2C\_S42)}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_A2C/fig1_environment.pdf}
+\caption{V1\_3 场景的环境结构（A2C）}
+\end{figure}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_A2C/fig2_adaptation.pdf}
+\caption{A2C 在 V1\_3 场景下的 reward 适应曲线}
+\end{figure}
+
+与 DQN 类似，A2C 在该场景下的 reward 表现同样稳定，
+说明两种算法在“均值不变”的环境中都不会出现系统性失效。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_A2C/fig3_policy_heatmap.pdf}
+\caption{A2C 在 V1\_3 场景下的动作策略分布}
+\end{figure}
+
+不同之处在于，Fig3 显示 A2C 并未将重规划动作完全压制，
+而是保留了少量高收益但低频的探索行为，
+体现出相较 DQN 更为细腻的风险—收益权衡。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_V1_3_A2C/fig4_cumulative_advantage.pdf}
+\caption{A2C 在 V1\_3 场景下的累计优势}
+\end{figure}
+
+% ============================================================
+\subsection{S3\_1：中等均值漂移（OOD 泛化）}
+% ============================================================
+
+\subsubsection{S3\_1 + DQN\\
+(run\_20260120\_113326\_895986\_R30\_S3\_1\_DQN\_S42)}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_DQN/fig1_environment.pdf}
+\caption{S3\_1 场景的环境结构：训练 A，测试 B}
+\end{figure}
+
+Fig1 显示该场景在训练阶段仅暴露低均值分布 A，
+而测试阶段切换到更高均值的分布 B，
+这是一个典型的分布外（OOD）泛化测试。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_DQN/fig2_adaptation.pdf}
+\caption{DQN 在 S3\_1 场景下的 reward 变化}
+\end{figure}
+
+Fig2 表明在分布切换发生后，DQN 的 reward 明显下降，
+且在后续过程中长期停留在中低水平，缺乏明显的二次适应迹象。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_DQN/fig3_policy_heatmap.pdf}
+\caption{DQN 在 S3\_1 场景下的动作策略分布}
+\end{figure}
+
+Fig3 显示 DQN 的策略高度偏向等待，
+尽管在条件平均奖励意义下重规划具有更高收益，
+但该动作被系统性抑制，体现出明显的保守性。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_DQN/fig4_cumulative_advantage.pdf}
+\caption{DQN 在 S3\_1 场景下的累计优势}
+\end{figure}
+
+累计优势结果显示，DQN 虽整体优于弱基准（Always-Wait），
+但相对强基准（Always-Reroute）的优势有限，
+反映其在 OOD 场景下的泛化能力不足。
+
+% ------------------------------------------------------------
+
+\subsubsection{S3\_1 + A2C\\
+(run\_20260120\_113326\_897492\_R30\_S3\_1\_A2C\_S42)}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_A2C/fig1_environment.pdf}
+\caption{S3\_1 场景的环境结构（A2C）}
+\end{figure}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_A2C/fig2_adaptation.pdf}
+\caption{A2C 在 S3\_1 场景下的 reward 适应曲线}
+\end{figure}
+
+与 DQN 相比，A2C 在分布切换后虽经历初期下降，
+但随后 reward 出现明显回升并趋于稳定，
+表明其具备一定的分布外再适应能力。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_A2C/fig3_policy_heatmap.pdf}
+\caption{A2C 在 S3\_1 场景下的动作策略分布}
+\end{figure}
+
+Fig3 显示 A2C 的策略并未完全塌缩，
+等待与重规划在实施阶段的条件平均奖励接近，
+说明其能够在新分布下重新组织策略结构。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S3_1_A2C/fig4_cumulative_advantage.pdf}
+\caption{A2C 在 S3\_1 场景下的累计优势}
+\end{figure}
+
+% ============================================================
+\subsection{S5\_1：强均值漂移（快速适应极限）}
+% ============================================================
+
+\subsubsection{S5\_1 + DQN\\
+(run\_20260119\_233229\_651769\_R30\_S5\_1\_DQN\_S42)}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_DQN/fig1_environment.pdf}
+\caption{S5\_1 场景的环境结构：强均值漂移}
+\end{figure}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_DQN/fig2_adaptation.pdf}
+\caption{DQN 在 S5\_1 场景下的 reward 变化}
+\end{figure}
+
+Fig2 显示在强分布切换发生后，DQN 的 reward 明显下探，
+且几乎不存在后续恢复过程。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_DQN/fig3_policy_heatmap.pdf}
+\caption{DQN 在 S5\_1 场景下的动作策略分布}
+\end{figure}
+
+Fig3 表明 DQN 的策略几乎完全塌缩为等待，
+即便重规划在条件平均奖励上显著更优，
+仍然很少被选择，体现出明显的过度保守性。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_DQN/fig4_cumulative_advantage.pdf}
+\caption{DQN 在 S5\_1 场景下的累计优势}
+\end{figure}
+
+% ------------------------------------------------------------
+
+% 【修复1】使用 [] 作为 PDF 书签标题，避免 \\ 报错
+\subsubsection[S5\_1 + A2C]{S5\_1 + A2C \\ (run\_20260119\_233229\_651769\_R30\_S5\_1\_A2C\_S42)}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_A2C/fig1_environment.pdf}
+\caption{S5\_1 场景的环境结构（A2C）}
+\end{figure}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_A2C/fig2_adaptation.pdf}
+\caption{A2C 在 S5\_1 场景下的 reward 变化}
+\end{figure}
+
+A2C 在该场景下同样经历性能下降，
+但 reward 并未完全失控，表现出一定的鲁棒性。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_A2C/fig3_policy_heatmap.pdf}
+\caption{A2C 在 S5\_1 场景下的动作策略分布}
+\end{figure}
+
+Fig3 显示 A2C 在高压阶段仍保留一定的动作结构，
+能够在部分情形下重新利用重规划或插入动作。
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.9\textwidth]{paper_figures/run_S5_1_A2C/fig4_cumulative_advantage.pdf}
+\caption{A2C 在 S5\_1 场景下的累计优势}
+\end{figure}
+
+\section{阶段性实验结论与深度洞察}
+
+通过对 DQN 与 A2C 两种典型强化学习算法在不同分布漂移场景（S3\_1, S5\_1, V1\_3）下的系统性对比，结合基准策略回放机制生成的累计优势曲线，本研究得出以下具有重要方法论意义的结论：
+
+\subsection{1. 策略塌缩的双重性：从“最优收敛”到“灾难性过拟合”}
+实验通过对比 V1\_3（方差突变）与 S3\_1/S5\_1（均值突变）揭示了“策略塌缩（Policy Collapse）”现象的本质差异：
+
+\begin{itemize}
+    \item \textbf{良性塌缩（Optimal Convergence）}：在 V1\_3 场景（均值恒定为 15，仅方差增大）中，DQN 的策略完全塌缩为“等待（Wait）”（Fig 7），A2C 也高度倾向于等待（Fig 11）。结合累计优势图（Fig 8, Fig 12）可见，此时 RL 表现与 Always-Wait 基准持平且优于 Always-Reroute。这表明：\textbf{在均值未发生结构性改变的场景下，单一动作往往就是全局最优解}。此时的策略塌缩是算法成功收敛到最优启发式规则的体现，而非失效。
+    \item \textbf{恶性塌缩（Catastrophic Overfitting）}：在 S3\_1 和 S5\_1 场景（均值从 9 突变至 90）中，DQN 依然塌缩在“等待”动作上（Fig 15, Fig 23），导致 Reward 断崖式下跌且无法恢复（Fig 14, Fig 22）。与之形成鲜明对比的是，Always-Reroute 基准在测试段表现优异（Fig 16）。这证明 DQN \textbf{过拟合了训练阶段的低压环境特征}，丧失了探索新最优策略的能力。这种塌缩在分布发生结构性漂移（Structural Shift）时是致命的。
+\end{itemize}
+
+\subsection{2. 算法适应性差异机理：DQN 的刚性 vs. A2C 的柔性}
+在应对强均值漂移（S3\_1, S5\_1）时，A2C 展现出了显著优于 DQN 的鲁棒性（Fig 18 vs Fig 14）：
+
+\begin{itemize}
+    \item \textbf{DQN (Value-based)}：由于依赖 $\epsilon$-greedy 策略进行探索，在训练后期 $\epsilon$ 衰减后，DQN 极易陷入局部极小值。当环境从“无需重规划”突变为“必须重规划”时，DQN 仍基于旧有的 Q 值表过高估计“等待”的价值，导致其无法感知新环境下的动作优势反转。
+    \item \textbf{A2C (Actor-Critic)}：得益于其显式的策略建模（Policy Gradient）和熵正则化（Entropy Regularization），A2C 在测试阶段仍保留了非零的动作概率分布（Fig 19, Fig 27 展示了 A2C 在高压区保留了约 15\%-20\% 的 Reroute 动作）。这种\textbf{策略的“柔性”}使其在环境突变后能够快速试错并捕捉到重规划带来的高额回报，从而实现了 S 型适应曲线的爬升。
+\end{itemize}
+
+\subsection{3. 环境漂移类型的敏感度分级}
+实验表明 ALNS-RL 框架对不同统计特征变化的敏感度存在显著层级：
+
+\begin{itemize}
+    \item \textbf{均值漂移（Mean Shift）是核心挑战}：环境均值的数量级变化（如 9 $\to$ 90）直接改变了最优策略的性质（从 Wait $\to$ Reroute）。这是导致模型泛化失败的主因，也是验证“适应性”的最有效试金石。
+    \item \textbf{方差漂移（Variance Shift）主要影响风险偏好}：在 V1\_3 中，方差的剧增并未导致模型性能崩溃。这说明在期望值不变的情况下，当前的 RL 算法能够保持鲁棒，并未因环境噪声的增加而迷失方向。
+\end{itemize}
+
+\subsection{4. 基准回放体系的验证价值}
+引入 \texttt{baseline\_wait} 和 \texttt{baseline\_reroute} 的反事实对比，为归因分析提供了决定性证据：
+\begin{itemize}
+    \item 如果没有 Always-Reroute 作为参照（绿色曲线），我们可能误以为 S5\_1 测试段的低分是由于环境本身“无解”造成的。
+    \item 通过 Fig 16（DQN vs Baselines），我们清晰地看到 RL 跑输了 Always-Reroute，从而确凿地判定这是\textbf{算法适应性失败}，而非环境不可行。这一机制成功排除了环境噪音干扰，准确定位了算法缺陷。
+\end{itemize}
+
+\section{后续计划与讨论问题}
+
+下一步计划包括：
+
+\begin{itemize}
+\item Docker 化部署，固定依赖与绘图环境；
+\item 服务器全量实验：多分布 $\times$ 多算法 $\times$ 多随机种子；
+\item 汇总 Mean$\pm$Std 结果并形成对比表格。
+\end{itemize}
+
+% 【修复2】删除了这里多余的 \end{itemize}
+
+\end{document}

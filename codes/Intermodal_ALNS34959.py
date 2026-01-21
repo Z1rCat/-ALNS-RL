@@ -19,6 +19,7 @@ from sympy.solvers import solve
 from sympy import Symbol, exp
 import sys
 from collections import defaultdict
+import zipfile
 # This import registers the 3D projection, but is otherwise unused.
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
 import os
@@ -42,7 +43,18 @@ except ImportError:
         return wrapper
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FIGURES_DIR = os.path.join(ROOT_DIR, "Uncertainties Dynamic planning under unexpected events", "Figures")
+
+def resolve_figures_dir():
+    output_root = os.environ.get("ALNS_OUTPUT_ROOT", "").strip()
+    if output_root:
+        return os.path.join(output_root, "alns_outputs")
+    return os.path.join(ROOT_DIR, "Uncertainties Dynamic planning under unexpected events", "Figures")
+
+FIGURES_DIR = resolve_figures_dir()
+
+def refresh_figures_dir():
+    global FIGURES_DIR
+    FIGURES_DIR = resolve_figures_dir()
 
 def resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types):
     dynamic_root = os.environ.get("DYNAMIC_DATA_ROOT", "").strip()
@@ -63,6 +75,107 @@ def ensure_nonempty_file(path):
             os.remove(path)
     except Exception:
         pass
+
+def wait_for_unlock(path, timeout_s=60.0, poll_s=0.2):
+    lock_path = f"{path}.lock"
+    start = time.time()
+    while os.path.exists(lock_path):
+        if time.time() - start >= timeout_s:
+            break
+        time.sleep(poll_s)
+
+def replace_with_retry(tmp_path, path, retries=5, sleep_s=0.2):
+    last_exc = None
+    for _ in range(retries):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(sleep_s)
+    if last_exc is not None:
+        raise last_exc
+
+def acquire_file_lock(path, poll_s=0.2, stale_s=600.0):
+    lock_path = f"{path}.lock"
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.close(fd)
+            return lock_path
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > stale_s:
+                    os.remove(lock_path)
+                    continue
+            except FileNotFoundError:
+                continue
+            time.sleep(poll_s)
+
+def release_file_lock(lock_path):
+    if not lock_path:
+        return
+    try:
+        os.remove(lock_path)
+    except Exception:
+        pass
+
+def safe_read_excel(path, sheet_name, retries=5, sleep_s=0.5):
+    for attempt in range(retries):
+        try:
+            wait_for_unlock(path)
+            return pd.read_excel(path, sheet_name)
+        except (zipfile.BadZipFile, EOFError, ValueError, OSError):
+            if attempt == retries - 1:
+                return None
+            time.sleep(sleep_s)
+    return None
+
+def safe_excel_file(path, retries=5, sleep_s=0.5):
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            wait_for_unlock(path)
+            return pd.ExcelFile(path)
+        except (zipfile.BadZipFile, EOFError, ValueError, OSError) as exc:
+            last_exc = exc
+            if attempt == retries - 1:
+                break
+            time.sleep(sleep_s)
+    if last_exc is not None:
+        raise last_exc
+    return pd.ExcelFile(path)
+
+def atomic_write_excel(df, path, sheet_name):
+    tmp_path = f"{path}.tmp.{os.getpid()}.xlsx"
+    lock_path = acquire_file_lock(path)
+    try:
+        with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        replace_with_retry(tmp_path, path)
+    finally:
+        release_file_lock(lock_path)
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+def atomic_write_excel_writer(path, write_callback):
+    tmp_path = f"{path}.tmp.{os.getpid()}.xlsx"
+    lock_path = acquire_file_lock(path)
+    try:
+        with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+            write_callback(writer)
+        replace_with_retry(tmp_path, path)
+    finally:
+        release_file_lock(lock_path)
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 import os.path
 
 def _index_int(value):
@@ -8884,7 +8997,7 @@ def Graph(routes, draw_non_dominated, path_change = 'a', non_dominated_index=0):
 
 def create_routes_R_pool_initial(xls):
     global routes, R_pool, request_flow_t
-    routes = pd.read_excel(xls, None, index_col=0)
+    routes = read_routes_with_retry(xls)
     routes_new = {}
     names = revert_names()
     # if VCP_coordination == 1:
@@ -8905,6 +9018,23 @@ def create_routes_R_pool_initial(xls):
         update_request_flow_t_and_T_k_record(k)
 
     return routes, R_pool
+
+def read_routes_with_retry(xls, retries=3, sleep_sec=1.0):
+    last_exc = None
+    for _ in range(retries):
+        try:
+            return pd.read_excel(xls, None, index_col=0)
+        except (EOFError, zipfile.BadZipFile, OSError) as exc:
+            last_exc = exc
+            time.sleep(sleep_sec)
+            try:
+                if hasattr(xls, "io"):
+                    xls = pd.ExcelFile(xls.io)
+            except Exception:
+                pass
+    if last_exc is not None:
+        raise last_exc
+    return pd.read_excel(xls, None, index_col=0)
 
 def update_request_flow_t_and_T_k_record(k):
     global routes, request_flow_t, T_k_record
@@ -9567,7 +9697,7 @@ def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward
         os._exit(0) # 比 sys.exit() 更强力，直接终止进程
 
 def stop_wait():
-    if os.path.exists('34959.txt'):
+    if os.path.exists(os.environ.get('STOP_FLAG_FILE', '34959.txt')):
         sys.exit(78)
 
 
@@ -9610,7 +9740,7 @@ def prepare_for_dynamic():
         # close file
         text_file.close()
         # get the routes at last time stamp
-    xls = pd.ExcelFile(path + old_current_save + '/best_routes' + old_current_save + '_' + str(
+    xls = safe_excel_file(path + old_current_save + '/best_routes' + old_current_save + '_' + str(
         exp_number - 1) + '.xlsx')
     routes, R_pool = create_routes_R_pool_initial(xls)
     # get changed R
@@ -11377,7 +11507,7 @@ def initial_solution():
             xls = pd.ExcelFile(xls_path + str(request_number_in_R) + "r_result_correct_right.xlsx")
 
         else:
-            xls = pd.ExcelFile(path + old_current_save + '/best_routes' + old_current_save + str(
+            xls = safe_excel_file(path + old_current_save + '/best_routes' + old_current_save + str(
                 exp_number - 1) + '.xlsx')
         routes, R_pool = create_routes_R_pool_initial(xls)
     #check_satisfy_constraints()
@@ -11919,10 +12049,11 @@ def Adaptive():
                             parallel_best_cost['best_cost'][parallel_number] = lowest_cost
                             with pd.ExcelWriter(parallel_best_cost_path) as writer:  # doctest: +SKIP
                                 parallel_best_cost.to_excel(writer, sheet_name='best_cost', index=False)
-                            with pd.ExcelWriter(best_routes_path) as writer:  # doctest: +SKIP
+                            def _write_parallel_best_routes(writer):
                                 for key, value in routes_lowest_cost.items():
                                     route_df = pd.DataFrame(value[0:4, :], columns=value[4])
                                     route_df.to_excel(writer, str(key))
+                            atomic_write_excel_writer(best_routes_path, _write_parallel_best_routes)
                         else:
                             parallel_best_cost = pd.read_excel(parallel_best_cost_path, 'best_cost')
                             parallel_lowest_cost = parallel_best_cost['best_cost'].dropna().min()
@@ -11933,9 +12064,10 @@ def Adaptive():
                                     parallel_best_cost['best_cost'][parallel_number] = lowest_cost
 
                                     # write the current route to file
-                                    with pd.ExcelWriter(best_routes_path) as writer:  # doctest: +SKIP
+                                    def _write_parallel_lowest_routes(writer):
                                         for key, value in routes_lowest_cost.items():
                                             value.to_excel(writer, key)
+                                    atomic_write_excel_writer(best_routes_path, _write_parallel_lowest_routes)
 
                                     with pd.ExcelWriter(parallel_best_cost_path) as writer:  # doctest: +SKIP
                                         parallel_best_cost.to_excel(writer, sheet_name='best_cost', index=False)
@@ -11947,7 +12079,7 @@ def Adaptive():
                                 parallel_lowest_cost_routes_path = path + current_save_parallel + '/best_routes' + current_save_parallel + '_' + str(
                                     exp_number - 1) + '.xlsx'
                                 #lost_r()
-                                routes = pd.read_excel(parallel_lowest_cost_routes_path, None, index_col=0)
+                                routes = read_routes_with_retry(safe_excel_file(parallel_lowest_cost_routes_path))
                                 #lost_r()
                     else:
                         if current_cost > lowest_cost:
@@ -12820,70 +12952,69 @@ def main(R_pool2, parallel_number2, SA2, combination2, only_T2, has_end_depot2, 
         Path(path + current_save).mkdir(parents=True, exist_ok=True)
 
     number_used_vehicles, all_number, barge_seved_r_portion, train_seved_r_portion, truck_seved_r_portion = get_mode_share(obj_record_best.index[0])
-    if not os.path.isfile(exps_record_path):
-        if CP == 1:
-            if heterogeneous_preferences == 1:
-                exps_record = pd.DataFrame(
-                        columns=['exp_number', 'parallel_number', 'obj_number', 'r', 'served_r', 'k', 'T', 'iterations',
-                                 'stop_iterations',
-                                 'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
-                                 'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
-                                 'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
-                                 'best_time',
-                                 'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
-                                 'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
-                                 'number_used_vehicles',
-                                 'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note', 'barge_served_requests', 'train_served_requests', 'truck_served_requests',
-                                 'satisfactory_value', 'fuzzy_satisfy_or_not', 'hard_satisfy_or_not',
-                                 'overall_number_transshipment', 'overall_average_time_ratio', 'cost_per_container_per_km', 'time_ratio', 'emissions_per_container_per_km', 'delay_time_ratio', 'transshipment_times', 'heterogeneous_preferences_no_constraints', 'heterogeneous_preferences', 'fuzzy_constraints', 'CP', 'overall_emission_transshipment'])
-            else:
-                exps_record = pd.DataFrame(
-                    columns=['exp_number', 'parallel_number', 'obj_number', 'r', 'k', 'T', 'iterations', 'stop_iterations',
-                             'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
-                             'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
-                             'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
-                             'best_time',
-                             'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
-                             'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
-                             'number_used_vehicles',
-                             'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note', 'barge_served_requests', 'train_served_requests', 'truck_served_requests'])
+    if CP == 1:
+        if heterogeneous_preferences == 1:
+            exps_columns = ['exp_number', 'parallel_number', 'obj_number', 'r', 'served_r', 'k', 'T', 'iterations',
+                            'stop_iterations',
+                            'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
+                            'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
+                            'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
+                            'best_time',
+                            'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
+                            'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
+                            'number_used_vehicles',
+                            'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note', 'barge_served_requests', 'train_served_requests', 'truck_served_requests',
+                            'satisfactory_value', 'fuzzy_satisfy_or_not', 'hard_satisfy_or_not',
+                            'overall_number_transshipment', 'overall_average_time_ratio', 'cost_per_container_per_km', 'time_ratio', 'emissions_per_container_per_km', 'delay_time_ratio', 'transshipment_times', 'heterogeneous_preferences_no_constraints', 'heterogeneous_preferences', 'fuzzy_constraints', 'CP', 'overall_emission_transshipment']
         else:
-            if heterogeneous_preferences == 1:
-                if use_speed == 1:
-                    exps_record = pd.DataFrame(
-                        columns=['exp_number', 'parallel_number', 'obj_number', 'r', 'k', 'T', 'iterations', 'stop_iterations',
-                                 'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
-                                 'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
-                                 'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty', 'best_time',
-                                 'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time', 'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing', 'number_used_vehicles',
-                                 'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note', 'satisfactory_value', 'fuzzy_satisfy_or_not', 'hard_satisfy_or_not', 'overall_number_transshipment','overall_average_speed'])
-                else:
-                    exps_record = pd.DataFrame(
-                        columns=['exp_number', 'parallel_number', 'obj_number', 'r', 'served_r', 'k', 'T', 'iterations',
-                                 'stop_iterations',
-                                 'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
-                                 'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
-                                 'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
-                                 'best_time',
-                                 'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
-                                 'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
-                                 'number_used_vehicles',
-                                 'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note',
-                                 'satisfactory_value', 'fuzzy_satisfy_or_not', 'hard_satisfy_or_not',
-                                 'overall_number_transshipment', 'overall_average_time_ratio', 'cost_per_container_per_km', 'time_ratio', 'emissions_per_container_per_km', 'delay_time_ratio', 'transshipment_times', 'heterogeneous_preferences_no_constraints', 'heterogeneous_preferences', 'fuzzy_constraints', 'CP', 'overall_emission_transshipment'])
-            else:
-                exps_record = pd.DataFrame(
-                    columns=['exp_number', 'parallel_number', 'obj_number', 'r', 'k', 'T', 'iterations', 'stop_iterations',
-                             'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
-                             'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
-                             'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
-                             'best_time',
-                             'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
-                             'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
-                             'number_used_vehicles',
-                             'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note'])
+            exps_columns = ['exp_number', 'parallel_number', 'obj_number', 'r', 'k', 'T', 'iterations', 'stop_iterations',
+                            'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
+                            'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
+                            'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
+                            'best_time',
+                            'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
+                            'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
+                            'number_used_vehicles',
+                            'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note', 'barge_served_requests', 'train_served_requests', 'truck_served_requests']
     else:
-        exps_record = pd.read_excel(exps_record_path, 'exps_record')
+        if heterogeneous_preferences == 1:
+            if use_speed == 1:
+                exps_columns = ['exp_number', 'parallel_number', 'obj_number', 'r', 'k', 'T', 'iterations', 'stop_iterations',
+                                'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
+                                'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
+                                'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty', 'best_time',
+                                'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time', 'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing', 'number_used_vehicles',
+                                'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note', 'satisfactory_value', 'fuzzy_satisfy_or_not', 'hard_satisfy_or_not', 'overall_number_transshipment', 'overall_average_speed']
+            else:
+                exps_columns = ['exp_number', 'parallel_number', 'obj_number', 'r', 'served_r', 'k', 'T', 'iterations',
+                                'stop_iterations',
+                                'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
+                                'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
+                                'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
+                                'best_time',
+                                'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
+                                'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
+                                'number_used_vehicles',
+                                'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note',
+                                'satisfactory_value', 'fuzzy_satisfy_or_not', 'hard_satisfy_or_not',
+                                'overall_number_transshipment', 'overall_average_time_ratio', 'cost_per_container_per_km', 'time_ratio', 'emissions_per_container_per_km', 'delay_time_ratio', 'transshipment_times', 'heterogeneous_preferences_no_constraints', 'heterogeneous_preferences', 'fuzzy_constraints', 'CP', 'overall_emission_transshipment']
+        else:
+            exps_columns = ['exp_number', 'parallel_number', 'obj_number', 'r', 'k', 'T', 'iterations', 'stop_iterations',
+                            'segement', 'c', 'percentage', 'bundle_or_not', 'best_iteration_number', 'best_cost',
+                            'best_request_cost', 'best_vehicle_cost', 'best_wait_cost', 'best_transshipment_cost',
+                            'best_unload_cost', 'best_emission_cost', 'best_storage_cost', 'best_delay_penalty',
+                            'best_time',
+                            'total_time', 'initial_time', 'initial_cost', 'add_initial_best_time',
+                            'add_initial_total_time', 'nodes', 'processors', 'get_initial_bymyself', 'by_wenjing',
+                            'number_used_vehicles',
+                            'barge_seved_r_portion', 'train_seved_r_portion', 'truck_seved_r_portion', 'note']
+
+    if not os.path.isfile(exps_record_path):
+        exps_record = pd.DataFrame(columns=exps_columns)
+    else:
+        exps_record = safe_read_excel(exps_record_path, 'exps_record')
+        if exps_record is None:
+            exps_record = pd.DataFrame(columns=exps_columns)
     # if obj_record_best.iloc[0][1] <= initial_cost + 0.1 and obj_record_best.iloc[0][1] >= initial_cost - 0.1:
     #     add_initial_best_time = Best_Running_Time
     # else:
@@ -12958,16 +13089,18 @@ def main(R_pool2, parallel_number2, SA2, combination2, only_T2, has_end_depot2, 
     new_exp = pd.Series(new_exp, index=exps_record.columns)
 
     exps_record = exps_record.append(new_exp, ignore_index=True)
-    with pd.ExcelWriter(exps_record_path) as writer:  # doctest: +SKIP
-        exps_record.to_excel(writer, sheet_name='exps_record', index=False)
+    atomic_write_excel(exps_record, exps_record_path, 'exps_record')
     # all_routes.to_excel("output.xlsx",sheet_name='Sheet_name_1')
-    with pd.ExcelWriter(path + current_save + '/obj_record' + current_save + str(
-            exp_number - 1) + '.xlsx') as writer:  # doctest: +SKIP
+    obj_record_path = path + current_save + '/obj_record' + current_save + str(
+        exp_number - 1) + '.xlsx'
+    def _write_obj_record(writer):
         obj_record_best.to_excel(writer, sheet_name='obj_record_best')
         obj_record.to_excel(writer, sheet_name='obj_record')
+    atomic_write_excel_writer(obj_record_path, _write_obj_record)
 
-    with pd.ExcelWriter(path + current_save + '/best_routes' + current_save + '_' + str(
-            exp_number - 1) + '.xlsx') as writer:  # doctest: +SKIP
+    best_routes_path = path + current_save + '/best_routes' + current_save + '_' + str(
+        exp_number - 1) + '.xlsx'
+    def _write_best_routes(writer):
         if CP == 1:
             global CP_best_routes
             CP_best_routes = {}
@@ -12976,8 +13109,9 @@ def main(R_pool2, parallel_number2, SA2, combination2, only_T2, has_end_depot2, 
                 CP_best_routes[key] = value
             route_df = pd.DataFrame(value[0:4, :], columns=value[4])
             # revert_K = read_R_K(request_number_in_R, what='revert_K')
-            k= list(revert_K.keys())[list(revert_K.values()).index(key)]
+            k = list(revert_K.keys())[list(revert_K.values()).index(key)]
             route_df.to_excel(writer, k)
+    atomic_write_excel_writer(best_routes_path, _write_best_routes)
     if dynamic == 0:
         with pd.ExcelWriter(path + current_save + '/functions_time' + current_save + str(
                 exp_number - 1) + '.xlsx') as writer:  # doctest: +SKIP
@@ -13610,10 +13744,11 @@ def save_results(round, routes_save, obj_record = -1):
         best_routes_path_round = path + current_save + '/best_routes' + current_save + '_' + str(
             exp_number - 1) + '.xlsx'
     # save routes, routes match, obj_record
-    with pd.ExcelWriter(best_routes_path_round) as writer:  # doctest: +SKIP
+    def _write_round_routes(writer):
         for key, value in routes_save.items():
             route_df = pd.DataFrame(value[0:4, :], columns=value[4])
             route_df.to_excel(writer, convert(key))
+    atomic_write_excel_writer(best_routes_path_round, _write_round_routes)
     if CP == 1:
         # save match
         path_round = path + current_save + 'round' + str(round) + '/routes_match' + current_save + str(
@@ -13630,12 +13765,14 @@ def save_results(round, routes_save, obj_record = -1):
     if not isinstance(obj_record, int):
         obj_record_path = path + current_save + '/obj_record' + current_save + '_' + str(
             exp_number - 1) + '.xlsx'
-        with pd.ExcelWriter(obj_record_path) as writer:  # doctest: +SKIP
+        def _write_obj_record_round(writer):
             obj_record.to_excel(writer, 'obj_record')
+        atomic_write_excel_writer(obj_record_path, _write_obj_record_round)
 
 # @profile()
 # @time_me()
 def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
+    refresh_figures_dir()
     global waiting_times, only_check_this_influenced_r_in_dynamic_uncertainty, used_interrupt, ALNS_implement_start_RL_can_move, interrupt_by_implement_is_one_and_assign_action_once_only, time_dependent_truck_travel_time, dynamic_t_begin, ALNS_greedy_under_unknown_duration_assume_duration, number_of_training, number_of_implementation, re_plan_when_event_finishes_information, ALNS_end_flag, RL_is_trained_or_evaluated_or_ALNS_is_evaluated, delayed_time_table_uncertainty_index, RL_insertion_segment, congestion_nodes_at_begining, RL_removal_implementation_store, RL_insertion_implementation_store, ALNS_removal_implementation_store, ALNS_insertion_implementation_store, vessel_train, combine_insertion_and_removal_operators, state_reward_pairs_insertion, after_action_review, get_reward_by_cost_gap, ALNS_guides_RL, state_reward_pairs, congestion_nodes, congestion_links, path, stochastic, add_RL, request_segment_in_dynamic, delayed_time_table, unexpected_events, VCP_coordination, different_companies, during_iteration, emission_preference_constraints_after_iteration, wtw_emissions, dynamic, dynamic_t, big_r, request_flow_t, percentage, not_initial_in_CP, R, R_pool, parallel_number, carriers_number, auction_round_number, CP_try_r_of_other_carriers, use_speed, get_satisfactory_value_one_by_one, fuzzy_probability, only_eco_label, only_eco_label_add_cost, heterogeneous_preferences_no_constraints, request_segment, data_path, CP, parallel_ALNS, allow_infeasibility, swap_or_not, fuzzy_constraints,real_multi_obj,weight_interval,w1,w2,w3,Demir_barge_free,truck_fleet, forbid_much_delay, two_T, heterogeneous_preferences, Demir,old_current_save,parallel, parallel_thread, max_processors, start_from_best_at_begin_of_segement, belta, truck_time_free, functions_time, Fixed_Data, by_wenjing, T_number, k_number, node_number, processors_number, note, obj_number, exp_number, regret_k, service_time, transshipment_time, c_storage, fuel_cost, has_end_depot2, check_obj, exps_record_path, forbid_T_trucks, get_initial_bymyself, request_number_in_R, multi_obj, c_storage, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, alpha, bundle_or_not, c, devide_value, stop_time, regret_k, regular, insert_multiple_r, bi_obj_cost_emission, bi_obj_cost_time, K
     waiting_times = {}
     only_check_this_influenced_r_in_dynamic_uncertainty = -1
@@ -14409,10 +14546,11 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
                 exp_number - 1) + '.xlsx'
             # write the current route to file
             routes_save = my_deepcopy(routes)
-            with pd.ExcelWriter(best_routes_path) as writer:  # doctest: +SKIP
+            def _write_cp_routes(writer):
                 for key, value in routes_save.items():
                     route_df = pd.DataFrame(value[0:4, :], columns=value[4])
                     route_df.to_excel(writer, convert(key))
+            atomic_write_excel_writer(best_routes_path, _write_cp_routes)
             Graph(routes_save, 0)
 
             save_results(round, routes_save)

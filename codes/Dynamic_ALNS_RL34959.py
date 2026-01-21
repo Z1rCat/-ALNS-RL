@@ -41,7 +41,7 @@ def Intermodal_ALNS_function(request_number_in_R):
             request_number_in_R = Intermodal_ALNS34959.request_number_in_R
             data_path = Intermodal_ALNS34959.data_path
             break
-        except:
+        except Exception:
             continue
     Data = pd.ExcelFile(data_path)
     R = pd.read_excel(Data, 'R_' + str(request_number_in_R))
@@ -113,12 +113,29 @@ def main(approach, request_number_in_R = 5):
             ALNS_reward_list_in_implementation, ALNS_removal_reward_list_in_implementation,  ALNS_removal_action_list_in_implementation, ALNS_insertion_reward_list_in_implementation, ALNS_insertion_action_list_in_implementation = [], [], [], [], []
             table_number = 0
             start_from_end_table = 0
+            implement_start_synced = 0
             while True:
+                # When switching to implementation/test, RL may briefly set a stop flag
+                # to break the training loop and reset internal shared state. During that
+                # window, ALNS returns early (no table processed). We must NOT advance
+                # table_number, otherwise the "test" phase will fast-forward to the
+                # boundary without actually running tables.
+                # dynamic_RL34959.implement may not be initialized until the RL thread starts.
+                if getattr(dynamic_RL34959, "implement", 0) == 1:
+                    if RL_can_start_implementation_phase_from_the_last_table == 0:
+                        RL_can_start_implementation_phase_from_the_last_table = 1
+                    if implement_start_synced == 0:
+                        # Ensure test phase starts from 499 once implement flips.
+                        if table_number < 499:
+                            table_number = 499
+                        implement_start_synced = 1
+                    if getattr(dynamic_RL34959, "stop_everything_in_learning_and_go_to_implementation_phase", 0) == 1:
+                        time.sleep(0.05)
+                        continue
+
                 Intermodal_ALNS_function(request_number_in_R)
                 try:
-                    if dynamic_RL34959.implement == 1:
-                        if RL_can_start_implementation_phase_from_the_last_table == 0:
-                            RL_can_start_implementation_phase_from_the_last_table = 1
+                    if getattr(dynamic_RL34959, "implement", 0) == 1:
                         table_number -= 1
                         if table_number < 350:
                             print(">>> TEST COMPLETE: Reached boundary (350). Saving data and exiting.")
@@ -126,7 +143,16 @@ def main(approach, request_number_in_R = 5):
                                 dynamic_RL34959.save_plot_reward_list()
                             except Exception:
                                 pass
-                            sys.exit(0)
+                            # Signal the RL thread to stop and return gracefully so the
+                            # ThreadPoolExecutor can join cleanly.
+                            try:
+                                stop_flag = dynamic_RL34959.get_stop_flag_path()
+                                os.makedirs(os.path.dirname(stop_flag), exist_ok=True)
+                                with open(stop_flag, "a", encoding="utf-8"):
+                                    pass
+                            except Exception:
+                                pass
+                            return
                     else:
                         scenario_name = getattr(dynamic_RL34959, "SCENARIO_NAME", "") or SCENARIO_NAME or os.environ.get("SCENARIO_NAME", "")
                         scenario_name = str(scenario_name).upper()
@@ -183,6 +209,9 @@ def main(approach, request_number_in_R = 5):
                             elif scenario_pattern == "adaptation" or scenario_name.startswith("S5"):
                                 phase_a_end = 100
                                 min_phase_b_train = 105
+                                if scenario_name.startswith("S0"):
+                                    # Debug scenario: allow immediate test after entering Phase B.
+                                    min_phase_b_train = phase_a_end
                                 if table_number < phase_a_end:
                                     print(">>> [S5] Mastery of Phase A. Jumping to Phase B (100)...")
                                     next_table_number = phase_a_end
@@ -212,7 +241,7 @@ def main(approach, request_number_in_R = 5):
                                     next_table_number = 499
                                     dynamic_RL34959.sucess_times = 0
                                     dynamic_RL34959.curriculum_converged = 0
-                        if dynamic_RL34959.implement == 0 and table_number >= 349:
+                        if getattr(dynamic_RL34959, "implement", 0) == 0 and table_number >= 349:
                             print(">>> FORCE SWITCH: Reached table_number 349. Jumping to Test (499)...")
                             dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
                             RL_can_start_implementation_phase_from_the_last_table = 1
@@ -221,9 +250,11 @@ def main(approach, request_number_in_R = 5):
                             dynamic_RL34959.sucess_times = 0
                             dynamic_RL34959.curriculum_converged = 0
                         table_number = next_table_number
-                        if dynamic_RL34959.implement == 0 and table_number > 349:
+                        if getattr(dynamic_RL34959, "implement", 0) == 0 and table_number > 349:
                             table_number = 349
-                except:
+                except SystemExit:
+                    raise
+                except Exception:
                     if Intermodal_ALNS34959.add_RL == 0:
                         if Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 0:
                             table_number -= 1

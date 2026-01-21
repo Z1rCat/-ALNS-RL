@@ -344,6 +344,8 @@ def run_policy(run_dir, table_sequence, request_number, policy_name, seed):
     initialize_baseline_state()
     Dynamic_master34959.add_RL = 1
     os.environ["DYNAMIC_DATA_ROOT"] = str(run_dir / "data")
+    os.environ["ALNS_OUTPUT_ROOT"] = str(run_dir)
+    Intermodal_ALNS34959.refresh_figures_dir()
     rl_logging.set_run_dir(str(run_dir))
 
     policy_fn = build_policy(policy_name, seed)
@@ -409,9 +411,11 @@ def main():
 
     request_number = load_request_number(run_dir)
 
-    if os.path.exists("34959.txt"):
+    os.environ["STOP_FLAG_FILE"] = str(run_dir / "34959.txt")
+    stop_flag = os.environ.get("STOP_FLAG_FILE", "34959.txt")
+    if os.path.exists(stop_flag):
         try:
-            os.remove("34959.txt")
+            os.remove(stop_flag)
         except Exception:
             pass
 
