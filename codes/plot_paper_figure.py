@@ -21,12 +21,14 @@ import seaborn as sns
 
 DEFAULT_DPI = 300
 DEFAULT_WINDOW = 30
+DEFAULT_RISK_QUANTILE = 0.99
 PHASE_ORDER = {"train": 0, "implement": 1, "eval": 2}
 PHASE_LABELS = {"train": "训练", "implement": "实施", "eval": "评估"}
 PHASE_LABEL_TITLES = {"phase": "阶段", "phase_label": "环境阶段"}
 METRIC_LABELS = {
     "gt_mean": "环境均值(gt_mean)",
     "gt_std": "环境标准差(gt_std)",
+    "p_disaster": "灾难概率(p_disaster)",
     "severity": "严重度",
 }
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -77,6 +79,13 @@ def _pick_env_metric(df: pd.DataFrame) -> str:
 
 
 def _metric_label(metric: str) -> str:
+    if metric.startswith("risk_q"):
+        pct = metric.replace("risk_q", "")
+        try:
+            pct_val = float(pct)
+            return f"风险分位数(q={pct_val:.0f}%)"
+        except Exception:
+            return "风险分位数"
     return METRIC_LABELS.get(metric, metric.replace("_", " ").title())
 
 
@@ -97,6 +106,133 @@ def _get_distribution_spec(dist_name: str) -> dict:
         if str(item.get("name")) == dist_name:
             return item
     return {"name": dist_name, "pattern": "ab", "means": {"A": 9, "B": 90}}
+
+
+def _extract_mean_value(value: object) -> Optional[float]:
+    if isinstance(value, dict):
+        for key in ("mean", "mu"):
+            if key in value:
+                try:
+                    return float(value[key])
+                except Exception:
+                    return None
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _is_mixture_distribution(spec: dict) -> bool:
+    dist_type = str(spec.get("dist_type", "") or "").strip().lower()
+    if dist_type == "mixture":
+        return True
+
+    means = spec.get("means")
+    if isinstance(means, dict):
+        keys = {str(k).lower() for k in means.keys()}
+        if {"normal", "disaster"}.issubset(keys):
+            return True
+
+    extra = spec.get("extra")
+    if isinstance(extra, dict) and "p_disaster" in extra:
+        return True
+
+    return False
+
+
+def _resolve_p_disaster(extra: object, phase_label: object) -> float:
+    if not isinstance(extra, dict):
+        return 0.0
+    spec = extra.get("p_disaster")
+    if isinstance(spec, dict):
+        key = str(phase_label) if phase_label is not None else ""
+        value = spec.get(key)
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+    try:
+        return float(spec)
+    except Exception:
+        return 0.0
+
+
+def _lognormal_cdf(x: float, mean_val: float, sigma: float = 0.5) -> float:
+    if x <= 0 or mean_val <= 0:
+        return 0.0
+    mu = math.log(max(mean_val, 1e-6)) - 0.5 * sigma * sigma
+    z = (math.log(x) - mu) / (sigma * math.sqrt(2.0))
+    return 0.5 * (1.0 + math.erf(z))
+
+
+def _mixture_risk_quantile(mean_normal: float, mean_disaster: float, p_disaster: float, q: float) -> float:
+    q = min(0.9999, max(0.5, float(q)))
+    p = min(1.0, max(0.0, float(p_disaster)))
+
+    def cdf(val: float) -> float:
+        return (1.0 - p) * _lognormal_cdf(val, mean_normal) + p * _lognormal_cdf(val, mean_disaster)
+
+    lo = 1e-6
+    hi = max(mean_normal, mean_disaster, 1.0) * 50.0
+    for _ in range(60):
+        if cdf(hi) >= q:
+            break
+        hi *= 2.0
+        if hi > 1e7:
+            break
+
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if cdf(mid) < q:
+            lo = mid
+        else:
+            hi = mid
+    return hi
+
+
+def _build_mixture_risk_series(aligned: pd.DataFrame, spec: dict, risk_q: float) -> Tuple[pd.Series, str]:
+    means = spec.get("means")
+    extra = spec.get("extra")
+    mean_normal = None
+    mean_disaster = None
+    if isinstance(means, dict):
+        mean_normal = _extract_mean_value(means.get("normal", means.get("A")))
+        mean_disaster = _extract_mean_value(means.get("disaster", means.get("B")))
+
+    if mean_normal is None or mean_disaster is None:
+        return pd.Series(dtype=float), ""
+
+    note_lines = [f"normal={mean_normal:g}, disaster={mean_disaster:g}, q={risk_q:.2f}"]
+    p_spec = extra.get("p_disaster") if isinstance(extra, dict) else None
+    if isinstance(p_spec, dict):
+        parts = []
+        for k, v in p_spec.items():
+            try:
+                parts.append(f"{k}={float(v):.3g}")
+            except Exception:
+                continue
+        if parts:
+            note_lines.append("p_disaster: " + ", ".join(parts))
+    else:
+        try:
+            p_val = float(p_spec) if p_spec is not None else 0.0
+            note_lines.append(f"p_disaster={p_val:.3g}")
+        except Exception:
+            pass
+
+    if "phase_label" in aligned.columns and aligned["phase_label"].notna().any():
+        labels = aligned["phase_label"].dropna().astype(str).unique().tolist()
+        risk_map: Dict[str, float] = {}
+        for lbl in labels:
+            p = _resolve_p_disaster(extra, lbl)
+            risk_map[lbl] = _mixture_risk_quantile(mean_normal, mean_disaster, p, risk_q)
+        series = aligned["phase_label"].map(lambda v: risk_map.get(str(v)) if pd.notna(v) else np.nan)
+        return pd.to_numeric(series, errors="coerce"), "\n".join(note_lines)
+
+    p = _resolve_p_disaster(extra, "A")
+    const = _mixture_risk_quantile(mean_normal, mean_disaster, p, risk_q)
+    return pd.Series([const] * len(aligned), dtype=float), "\n".join(note_lines)
 
 
 def _build_phase_sequence(pattern: str, n_points: int) -> Tuple[List[Tuple[str, int]], List[int]]:
@@ -491,6 +627,7 @@ def _plot_adaptation_curve(
     out_path: Path,
     window: int,
     dist_name: Optional[str] = None,
+    risk_q: float = DEFAULT_RISK_QUANTILE,
 ) -> None:
     if aligned.empty:
         raise ValueError("Unable to align rewards to decision trace.")
@@ -603,6 +740,26 @@ def _plot_adaptation_curve(
     env_series = gt_std if use_gt_std else gt_mean
     env_label = "gt_std" if use_gt_std else "gt_mean"
 
+    env_note = ""
+    if dist_name:
+        spec = _get_distribution_spec(dist_name)
+        if _is_mixture_distribution(spec):
+            env_series, env_note = _build_mixture_risk_series(aligned, spec, risk_q)
+            env_label = f"risk_q{int(round(risk_q * 100))}"
+            use_gt_std = False
+            if env_series.empty or not env_series.notna().any():
+                extra = spec.get("extra")
+                if "phase_label" in aligned.columns:
+                    series = aligned["phase_label"].map(
+                        lambda v: _resolve_p_disaster(extra, v) if pd.notna(v) else np.nan
+                    )
+                    env_series = pd.to_numeric(series, errors="coerce")
+                else:
+                    p_const = _resolve_p_disaster(extra, "A")
+                    env_series = pd.Series([p_const] * len(aligned), dtype=float)
+                env_label = "p_disaster"
+                env_note = ""
+
     if env_series.notna().any():
         if env_label == "gt_mean" and env_series.nunique(dropna=True) <= 1:
             print("Warning: gt_mean has no variance in this run.", file=sys.stderr)
@@ -618,6 +775,17 @@ def _plot_adaptation_curve(
             label=env_label,
         )
         ax_right.set_ylabel(_metric_label(env_label))
+        if env_note:
+            ax_right.text(
+                0.02,
+                0.95,
+                env_note,
+                transform=ax_right.transAxes,
+                ha="left",
+                va="top",
+                fontsize=10,
+                bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.85, "edgecolor": "#999999"},
+            )
         if use_gt_std and gt_mean.notna().any():
             const_mean = float(gt_mean.dropna().iloc[0])
             ax_right.text(
@@ -851,6 +1019,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate ALNS-RL paper figures.")
     parser.add_argument("--run-dir", required=True, help="Run directory containing logs.")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="Smoothing window size.")
+    parser.add_argument(
+        "--risk-q",
+        type=float,
+        default=DEFAULT_RISK_QUANTILE,
+        help="Risk quantile (0-1) used for mixture distributions on Fig2 right axis.",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -897,6 +1071,7 @@ def main() -> None:
         out_dir / "fig2_adaptation.pdf",
         args.window,
         dist_name,
+        risk_q=args.risk_q,
     )
     _plot_policy_heatmap(trace, aligned, out_dir / "fig3_policy_heatmap.pdf")
     _plot_cumulative_advantage(aligned, baseline_wait, baseline_reroute, out_dir / "fig4_cumulative_advantage.pdf")

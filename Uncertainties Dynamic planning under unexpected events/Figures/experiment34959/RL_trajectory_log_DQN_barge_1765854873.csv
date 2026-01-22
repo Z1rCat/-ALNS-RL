@@ -1,0 +1,1 @@
+timestamp,global_step,phase,request_id,vehicle_id,uncertainty_index,state_tolerance,state_severity,state_event_type,action,action_meaning,reward,duration_ms

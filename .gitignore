@@ -60,7 +60,6 @@ htmlcov/
 # ===========================
 codes/logs/
 analysis_results/
-Uncertainties Dynamic planning under unexpected events/
 
 # RL 汇总图/表（可由脚本重建）
 ALNS_Research_Documentation/figures/
@@ -90,6 +89,12 @@ action_reward_table*.xlsx
 
 # Excel 数据（默认不提交）
 *.xlsx
+
+!Barge_no_land.xlsx
+!D_EGS - 10r.xlsx
+!Fixed_right_real.xlsx
+!Intermodal_EGS_data_all_heterogeneous_6.xlsx
+!Intermodal_EGS_data_all.xlsx
 
 # ===========================
 # LaTeX build artifacts (keep .tex/.pdf, ignore aux/log/toc etc.)

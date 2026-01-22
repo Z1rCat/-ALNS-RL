@@ -7,11 +7,25 @@ from run_experiments_common import ExperimentConfig, run_experiments
 def build_config() -> ExperimentConfig:
     return ExperimentConfig(
         name="server",
-        distributions=["S1_1", "S5_1", "S2_1", "S3_1", "S6_1", "V1_3"],
-        request_numbers=[5, 30],
+        distributions=[
+            "S1_1", "S1_2", "S1_3",
+            "S2_1", "S2_3", "S2_5",
+            "S3_1", "S3_2", "S3_3", "S3_4", "S3_5", "S3_6",
+            "S5_1", "S5_2", "S5_3", "S5_4", "S5_5", "S5_6",
+            "S6_1", "S6_2", "S6_3",
+            "V1_1", "V1_2", "V1_3",
+            "M1_2", "M1_3",
+            "T1_3",
+            "C1_1",
+            "W1_1",
+            "G1_1", "G1_2",
+        ],
+        request_numbers=[5, 20, 30],
         algorithms=["DQN", "PPO", "A2C"],
         seeds=[42, 123, 2024],
         generator_workers=1,
+        run_metrics=True,
+        cleanup_after_run=True,
     )
 
 

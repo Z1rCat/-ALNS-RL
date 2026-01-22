@@ -395,6 +395,9 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=No
     os.environ["DYNAMIC_DATA_ROOT"] = str(run_data_dir)
     os.environ["ALNS_OUTPUT_ROOT"] = str(rl_logging.get_run_dir())
     Intermodal_ALNS34959.refresh_figures_dir()
+    curriculum_threshold = dynamic_RL34959.CURRICULUM_REWARD_THRESHOLD
+    if dist_name == "S0_Debug":
+        curriculum_threshold = 0.3
     rl_logging.write_meta({
         "distribution": dist_name,
         "request_number": request_number,
@@ -402,6 +405,8 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=No
         "algorithm": algorithm,
         "seed": seed,
         "run_name": run_id,
+        "curriculum_reward_threshold": curriculum_threshold,
+        "curriculum_success_required": getattr(dynamic_RL34959, "CURRICULUM_SUCCESS_REQUIRED", None),
         "stop_flag_file": stop_flag_path,
         "data_root": str(run_data_dir),
         "alns_output_root": str(rl_logging.get_run_dir()),

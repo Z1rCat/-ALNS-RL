@@ -120,7 +120,7 @@ MAX_STEPS = 20000
 SLIDING_WINDOW = 30
 TARGET_REWARD = 0.5
 recent_rewards = deque(maxlen=SLIDING_WINDOW)
-CURRICULUM_REWARD_THRESHOLD = 0.7
+CURRICULUM_REWARD_THRESHOLD = 0.9
 CURRICULUM_SUCCESS_REQUIRED = 3
 curriculum_converged = 0
 curriculum_last_avg_reward = ""
