@@ -232,6 +232,7 @@ class ExperimentConfig:
     generator_workers: int = 1
     max_workers: Optional[int] = None
     run_baseline: bool = True
+    baseline_include_random: bool = False
     run_plots: bool = True
     run_metrics: bool = True
     cleanup_after_run: bool = False
@@ -302,6 +303,8 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
         "--policy",
         "all",
     ]
+    if config.baseline_include_random:
+        baseline_cmd.append("--include-random")
 
     plot_cmd = [
         sys.executable,

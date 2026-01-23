@@ -16,21 +16,137 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import seaborn as sns
 
 
 DEFAULT_DPI = 300
 DEFAULT_WINDOW = 30
 DEFAULT_RISK_QUANTILE = 0.99
-PHASE_ORDER = {"train": 0, "implement": 1, "eval": 2}
-PHASE_LABELS = {"train": "训练", "implement": "实施", "eval": "评估"}
-PHASE_LABEL_TITLES = {"phase": "阶段", "phase_label": "环境阶段"}
-METRIC_LABELS = {
-    "gt_mean": "环境均值(gt_mean)",
-    "gt_std": "环境标准差(gt_std)",
-    "p_disaster": "灾难概率(p_disaster)",
-    "severity": "严重度",
+CHINESE_FONT_CANDIDATES = [
+    "Microsoft YaHei",
+    "SimHei",
+    "Noto Sans CJK SC",
+    "WenQuanYi Micro Hei",
+    "Arial Unicode MS",
+]
+
+
+def _has_chinese_font() -> bool:
+    try:
+        available = {font.name for font in font_manager.fontManager.ttflist}
+    except Exception:
+        return False
+    return any(name in available for name in CHINESE_FONT_CANDIDATES)
+
+
+USE_CHINESE = _has_chinese_font()
+
+TEXT_CN = {
+    "phase_train": "??",
+    "phase_implement": "??",
+    "phase_eval": "??",
+    "phase_title": "??",
+    "phase_label_title": "????",
+    "env_title": "?????????",
+    "env_dist_title": "??????",
+    "env_x": "????",
+    "env_y": "??????",
+    "env_x_dist": "????",
+    "env_y_dist": "????",
+    "legend_phase": "??",
+    "phase_a": "??A",
+    "phase_b": "??B",
+    "phase_c": "??C",
+    "mean_label": "??",
+    "adapt_title": "???S??",
+    "decision_step": "???",
+    "smoothed_reward": "????",
+    "always_wait": "????",
+    "always_reroute": "?????",
+    "random_policy": "????",
+    "mean_fixed": "????",
+    "heatmap_freq_title": "????",
+    "heatmap_reward_title": "????",
+    "heatmap_y": "??",
+    "heatmap_x": "????",
+    "removal_wait": "??-??",
+    "removal_reroute": "??-???",
+    "insert_accept": "??-??",
+    "insert_reject": "??-??",
+    "cum_adv_title": "????",
+    "cum_adv_x": "???",
+    "cum_adv_y": "??(Reward_RL - Reward_Baseline)",
+    "missing_baseline": "???????????????????",
+    "missing_baseline_short": "????????????????",
+    "risk_quantile": "?????",
 }
+
+TEXT_EN = {
+    "phase_train": "Train",
+    "phase_implement": "Implement",
+    "phase_eval": "Eval",
+    "phase_title": "Phase",
+    "phase_label_title": "Environment Phase",
+    "env_title": "Theoretical Environment Schematic",
+    "env_dist_title": "Distribution Density",
+    "env_x": "Instance Sequence",
+    "env_y": "Uncertainty Intensity",
+    "env_x_dist": "Value",
+    "env_y_dist": "Density",
+    "legend_phase": "Phase",
+    "phase_a": "Phase A",
+    "phase_b": "Phase B",
+    "phase_c": "Phase C",
+    "mean_label": "mean",
+    "adapt_title": "Adaptation S-Curve",
+    "decision_step": "Decision Step",
+    "smoothed_reward": "Smoothed Reward",
+    "always_wait": "Always Wait",
+    "always_reroute": "Always Reroute",
+    "random_policy": "Random",
+    "mean_fixed": "Mean fixed",
+    "heatmap_freq_title": "Action Frequency",
+    "heatmap_reward_title": "Average Reward",
+    "heatmap_y": "Phase",
+    "heatmap_x": "Action Type",
+    "removal_wait": "Removal-Wait",
+    "removal_reroute": "Removal-Reroute",
+    "insert_accept": "Insertion-Accept",
+    "insert_reject": "Insertion-Reject",
+    "cum_adv_title": "Cumulative Advantage",
+    "cum_adv_x": "Decision Step",
+    "cum_adv_y": "Cumulative (Reward_RL - Reward_Baseline)",
+    "missing_baseline": "Missing baseline or aligned data; cannot compute cumulative advantage.",
+    "missing_baseline_short": "No baseline data; cannot compute cumulative advantage.",
+    "risk_quantile": "Risk Quantile",
+}
+
+TEXT = TEXT_CN if USE_CHINESE else TEXT_EN
+
+METRIC_LABELS_CN = {
+    "gt_mean": "????(gt_mean)",
+    "gt_std": "?????(gt_std)",
+    "p_disaster": "????(p_disaster)",
+    "severity": "???",
+}
+
+METRIC_LABELS_EN = {
+    "gt_mean": "Environment Mean (gt_mean)",
+    "gt_std": "Environment Std (gt_std)",
+    "p_disaster": "Disaster Probability (p_disaster)",
+    "severity": "Severity",
+}
+
+METRIC_LABELS = METRIC_LABELS_CN if USE_CHINESE else METRIC_LABELS_EN
+FONT_SANS = CHINESE_FONT_CANDIDATES + ["DejaVu Sans"] if USE_CHINESE else ["DejaVu Sans", "Arial", "Liberation Sans"]
+PHASE_ORDER = {"train": 0, "implement": 1, "eval": 2}
+PHASE_LABELS = {
+    "train": TEXT["phase_train"],
+    "implement": TEXT["phase_implement"],
+    "eval": TEXT["phase_eval"],
+}
+PHASE_LABEL_TITLES = {"phase": TEXT["phase_title"], "phase_label": TEXT["phase_label_title"]}
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DIST_CONFIG_PATH = ROOT_DIR / "distribution_config.json"
 
@@ -83,9 +199,9 @@ def _metric_label(metric: str) -> str:
         pct = metric.replace("risk_q", "")
         try:
             pct_val = float(pct)
-            return f"风险分位数(q={pct_val:.0f}%)"
+            return f"{TEXT['risk_quantile']} (q={pct_val:.0f}%)"
         except Exception:
-            return "风险分位数"
+            return TEXT["risk_quantile"]
     return METRIC_LABELS.get(metric, metric.replace("_", " ").title())
 
 
@@ -378,7 +494,7 @@ def _generate_mock_data(
 
 
 def _format_phase_label(value: object) -> str:
-    mapping = {"A": "阶段A", "B": "阶段B"}
+    mapping = {"A": TEXT["phase_a"], "B": TEXT["phase_b"], "C": TEXT["phase_c"]}
     return mapping.get(str(value), str(value))
 
 
@@ -516,11 +632,11 @@ def _plot_environment_shift(run_dir: Path, out_path: Path) -> None:
     env, phase_means, boundaries = _generate_mock_data(dist_name, n_points=600)
     if env.empty:
         raise ValueError("Mock data generation failed.")
-    metric_label = "不确定性强度"
+    metric_label = TEXT["env_y"]
 
     group_key = "phase_label"
     group_values = sorted(env["phase_label"].dropna().unique())
-    legend_title = "阶段"
+    legend_title = TEXT["legend_phase"]
     hue_col = "phase_label"
     if len(group_values) == 2:
         palette = ["#1F4E79", "#C94F4F"]
@@ -532,7 +648,7 @@ def _plot_environment_shift(run_dir: Path, out_path: Path) -> None:
     def _mean_label(name: object, mean_val: float) -> str:
         if pd.isna(mean_val):
             return str(name)
-        return f"阶段{name} (均值={mean_val:.1f})"
+        return f"{TEXT['phase_title']} {name} ({TEXT['mean_label']}={mean_val:.1f})"
 
     segment_means = {}
     segment_means.update({k: phase_means.get(k, np.nan) for k in group_values})
@@ -573,9 +689,8 @@ def _plot_environment_shift(run_dir: Path, out_path: Path) -> None:
             alpha=0.8,
             color=palette[0],
         )
-
-    ax_left.set_title("理论环境生成机制图")
-    ax_left.set_xlabel("实例序列")
+    ax_left.set_title(TEXT["env_title"])
+    ax_left.set_xlabel(TEXT["env_x"])
     ax_left.set_ylabel(metric_label)
     ax_left.grid(True, linestyle="--", alpha=0.4)
 
@@ -602,10 +717,9 @@ def _plot_environment_shift(run_dir: Path, out_path: Path) -> None:
         display_label = _mean_label(label, mean_val)
         color = color_map.get(display_label, "#1F4E79")
         ax_right.axvline(mean_val, color=color, linestyle="--", linewidth=1.2, alpha=0.9)
-
-    ax_right.set_title("统计分布特征")
-    ax_right.set_xlabel("数值分布" if metric_label else "数值分布")
-    ax_right.set_ylabel("概率密度")
+    ax_right.set_title(TEXT["env_dist_title"])
+    ax_right.set_xlabel(TEXT["env_x_dist"])
+    ax_right.set_ylabel(TEXT["env_y_dist"])
     ax_right.grid(True, linestyle="--", alpha=0.4)
 
     if values.shape[0]:
@@ -624,6 +738,7 @@ def _plot_adaptation_curve(
     aligned: pd.DataFrame,
     baseline_wait: pd.DataFrame,
     baseline_reroute: pd.DataFrame,
+    baseline_random: pd.DataFrame,
     out_path: Path,
     window: int,
     dist_name: Optional[str] = None,
@@ -677,7 +792,7 @@ def _plot_adaptation_curve(
             color="gray",
             linestyle="--",
             linewidth=1.8,
-            label="始终等待",
+            label=TEXT["always_wait"],
         )
     if not baseline_reroute.empty:
         baseline_reroute = _sort_by_phase_table(baseline_reroute)
@@ -688,12 +803,24 @@ def _plot_adaptation_curve(
             color=palette[2],
             linestyle="--",
             linewidth=1.8,
-            label="始终重规划",
+            label=TEXT["always_reroute"],
+        )
+    if not baseline_random.empty:
+        baseline_random = _sort_by_phase_table(baseline_random)
+        x_random = np.linspace(0, len(aligned) - 1, len(baseline_random))
+        ax_left.plot(
+            x_random,
+            _smooth_series(baseline_random["reward"], max(3, window // 2)),
+            color=palette[3],
+            linestyle="--",
+            linewidth=1.8,
+            label=TEXT["random_policy"],
         )
 
-    ax_left.set_xlabel("决策步")
-    ax_left.set_ylabel("平滑奖励")
-    ax_left.set_title("适应性S曲线", pad=28)
+
+    ax_left.set_xlabel(TEXT["decision_step"])
+    ax_left.set_ylabel(TEXT["smoothed_reward"])
+    ax_left.set_title(TEXT["adapt_title"], pad=28)
     ax_left.set_ylim(-0.05, 1.05)
 
     ax_right = ax_left.twinx()
@@ -838,7 +965,12 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
     phases = [p for p in ["train", "implement", "eval"] if p in data["phase"].dropna().unique()]
     if not phases:
         phases = sorted(data["phase"].dropna().unique())
-    columns = ["移除-等待", "移除-重规划", "插入-接受", "插入-拒绝"]
+    columns = [
+        TEXT["removal_wait"],
+        TEXT["removal_reroute"],
+        TEXT["insert_accept"],
+        TEXT["insert_reject"],
+    ]
     counts = pd.DataFrame(0, index=phases, columns=columns, dtype=float)
 
     for phase in phases:
@@ -846,10 +978,10 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
         ins_phase = insertion_finish[insertion_finish["phase"] == phase]
         if ins_phase.empty:
             ins_phase = insertion_begin[insertion_begin["phase"] == phase]
-        counts.loc[phase, "移除-等待"] = (rem_phase["action"] == 0).sum()
-        counts.loc[phase, "移除-重规划"] = (rem_phase["action"] == 1).sum()
-        counts.loc[phase, "插入-接受"] = (ins_phase["action"] == 0).sum()
-        counts.loc[phase, "插入-拒绝"] = (ins_phase["action"] == 1).sum()
+        counts.loc[phase, TEXT["removal_wait"]] = (rem_phase["action"] == 0).sum()
+        counts.loc[phase, TEXT["removal_reroute"]] = (rem_phase["action"] == 1).sum()
+        counts.loc[phase, TEXT["insert_accept"]] = (ins_phase["action"] == 0).sum()
+        counts.loc[phase, TEXT["insert_reject"]] = (ins_phase["action"] == 1).sum()
 
     totals = counts.sum(axis=1).replace(0, np.nan)
     freq = counts.div(totals, axis=0) * 100
@@ -863,8 +995,8 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
             sub = removal_rewards[removal_rewards["phase"] == phase]
             if sub.empty:
                 continue
-            reward_means.loc[phase, "移除-等待"] = sub.loc[sub["action"] == 0, "reward"].mean()
-            reward_means.loc[phase, "移除-重规划"] = sub.loc[sub["action"] == 1, "reward"].mean()
+            reward_means.loc[phase, TEXT["removal_wait"]] = sub.loc[sub["action"] == 0, "reward"].mean()
+            reward_means.loc[phase, TEXT["removal_reroute"]] = sub.loc[sub["action"] == 1, "reward"].mean()
 
     insertion_reward = data[data["stage"].isin(["finish_insertion", "begin_insertion"])]
     insertion_reward = insertion_reward[insertion_reward["action"].isin([0, 1])]
@@ -875,8 +1007,8 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
             sub = insertion_reward[insertion_reward["phase"] == phase]
             if sub.empty:
                 continue
-            reward_means.loc[phase, "插入-接受"] = sub.loc[sub["action"] == 0, "reward"].mean()
-            reward_means.loc[phase, "插入-拒绝"] = sub.loc[sub["action"] == 1, "reward"].mean()
+            reward_means.loc[phase, TEXT["insert_accept"]] = sub.loc[sub["action"] == 0, "reward"].mean()
+            reward_means.loc[phase, TEXT["insert_reject"]] = sub.loc[sub["action"] == 1, "reward"].mean()
 
     reward_means.index = [PHASE_LABELS.get(p, p.title()) for p in reward_means.index]
 
@@ -893,11 +1025,11 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
         fmt=".1f",
         linewidths=0.5,
         linecolor="white",
-        cbar_kws={"label": "动作频率(%)"},
+        cbar_kws={"label": f"{TEXT['heatmap_freq_title']}(%)"},
     )
-    ax_left.set_title("动作频率")
-    ax_left.set_xlabel("动作类型")
-    ax_left.set_ylabel("阶段")
+    ax_left.set_title(TEXT["heatmap_freq_title"])
+    ax_left.set_xlabel(TEXT["heatmap_x"])
+    ax_left.set_ylabel(TEXT["heatmap_y"])
 
     mask = reward_means.isna()
     cmap = sns.color_palette("RdBu_r", as_cmap=True).copy()
@@ -913,10 +1045,10 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
         linewidths=0.5,
         linecolor="white",
         mask=mask,
-        cbar_kws={"label": "平均奖励"},
+        cbar_kws={"label": TEXT["heatmap_reward_title"]},
     )
-    ax_right.set_title("平均奖励")
-    ax_right.set_xlabel("动作类型")
+    ax_right.set_title(TEXT["heatmap_reward_title"])
+    ax_right.set_xlabel(TEXT["heatmap_x"])
     ax_right.set_ylabel("")
 
     fig.tight_layout()
@@ -935,7 +1067,7 @@ def _plot_cumulative_advantage(
         ax.text(
             0.5,
             0.5,
-            "缺少基准或对齐数据，无法计算累积优势",
+            TEXT["missing_baseline"],
             ha="center",
             va="center",
             fontsize=14,
@@ -969,7 +1101,7 @@ def _plot_cumulative_advantage(
             _cum_adv(rl_rewards, wait_rewards),
             color="#1F4E79",
             linewidth=2.2,
-            label="vs. Always Wait",
+            label=TEXT["always_wait"],
         )
         any_line = True
 
@@ -986,7 +1118,7 @@ def _plot_cumulative_advantage(
             _cum_adv(rl_rewards, reroute_rewards),
             color="#55A868",
             linewidth=2.2,
-            label="vs. Always Reroute",
+            label=TEXT["always_reroute"],
         )
         any_line = True
 
@@ -994,7 +1126,7 @@ def _plot_cumulative_advantage(
         ax.text(
             0.5,
             0.5,
-            "基准数据为空，无法计算累积优势",
+            TEXT["missing_baseline_short"],
             ha="center",
             va="center",
             fontsize=14,
@@ -1006,9 +1138,9 @@ def _plot_cumulative_advantage(
         return
 
     ax.axhline(0, color="#999999", linewidth=1, linestyle="--")
-    ax.set_title("累积优势")
-    ax.set_xlabel("决策步")
-    ax.set_ylabel("累计(Reward_RL - Reward_Baseline)")
+    ax.set_title(TEXT["cum_adv_title"])
+    ax.set_xlabel(TEXT["cum_adv_x"])
+    ax.set_ylabel(TEXT["cum_adv_y"])
     ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(out_path, dpi=DEFAULT_DPI)
@@ -1052,12 +1184,14 @@ def main() -> None:
     training = _load_rl_training(run_dir)
     baseline_wait = _load_baseline_events(run_dir / "baseline_wait.csv", "wait")
     baseline_reroute = _load_baseline_events(run_dir / "baseline_reroute.csv", "reroute")
+    baseline_random = _load_baseline_events(run_dir / "baseline_random.csv", "random")
     aligned = _prepare_aligned_decisions(trace, training)
 
     sns.set_theme(style="whitegrid", context="paper", font_scale=1.5)
     plt.rcParams["figure.dpi"] = DEFAULT_DPI
     plt.rcParams["savefig.dpi"] = DEFAULT_DPI
-    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = FONT_SANS
     plt.rcParams["axes.unicode_minus"] = False
 
     out_dir = run_dir / "paper_figures"
@@ -1068,6 +1202,7 @@ def main() -> None:
         aligned,
         baseline_wait,
         baseline_reroute,
+        baseline_random,
         out_dir / "fig2_adaptation.pdf",
         args.window,
         dist_name,
