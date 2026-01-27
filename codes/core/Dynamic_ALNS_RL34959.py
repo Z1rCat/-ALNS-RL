@@ -1,8 +1,8 @@
 #!/usr/bin/env Python
 # coding=utf-8
 # import concurrent.futures
-import Intermodal_ALNS34959
-import dynamic_RL34959
+from core import Intermodal_ALNS34959
+from core import dynamic_RL34959
 #import dynamic_RL_online_insertion
 import pandas as pd
 import os
@@ -12,7 +12,7 @@ import json
 # haven't done: set the initial solution as original route, and detect which request is changed, and check which part can't be removed
 SCENARIO_NAME = os.environ.get("SCENARIO_NAME", "")
 RL_ALGORITHM = os.environ.get("RL_ALGORITHM", "DQN")
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIG_PATH = os.path.join(ROOT_DIR, "distribution_config.json")
 
 def load_distribution_patterns():

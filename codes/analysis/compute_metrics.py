@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ import pandas as pd
 
 INVALID_REWARD = -10000000
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parents[2]
 CODES_DIR = ROOT_DIR / "codes"
 LOG_ROOT = CODES_DIR / "logs"
 SUMMARY_DIR = LOG_ROOT / "summary"
@@ -246,30 +247,44 @@ def compute_metrics(run_dir: Path, *, summary_csv: Path = SUMMARY_CSV) -> Dict[s
         rl_reward_source = "rl_training.csv (phase=implement, reward)"
         rewards_rl = _extract_rewards_from_training(_read_csv(training_path), name="RL_training")
 
+    strict = os.environ.get("METRICS_STRICT", "0").strip() == "1"
     n_test = int(rewards_rl.shape[0])
-    r_rl = float(rewards_rl.sum())
 
-    def maybe_load(name: str, path: Path) -> Tuple[Optional[float], Optional[int], Optional[str]]:
+    def maybe_load(name: str, path: Path) -> Tuple[Optional[pd.Series], Optional[str]]:
         if not path.exists():
-            return None, None, f"missing {name}: {path.name}"
+            return None, f"missing {name}: {path.name}"
         rewards = _extract_rewards_from_baseline(_read_csv(path), name=name)
-        if int(rewards.shape[0]) != n_test:
+        if strict and int(rewards.shape[0]) != n_test:
             raise ValueError(f"{name}: n_test mismatch (RL={n_test}, {name}={int(rewards.shape[0])})")
-        return float(rewards.sum()), int(rewards.shape[0]), None
+        if int(rewards.shape[0]) != n_test:
+            warnings.append(f"{name}: n_test mismatch (RL={n_test}, {name}={int(rewards.shape[0])}) -> trim to min")
+        return rewards, None
 
-    r_wait, _, warn = maybe_load("Always_Wait", run_dir / "baseline_wait.csv")
+    r_wait_series, warn = maybe_load("Always_Wait", run_dir / "baseline_wait.csv")
     if warn:
         warnings.append(warn)
-    r_reroute, _, warn = maybe_load("Always_Reroute", run_dir / "baseline_reroute.csv")
+    r_reroute_series, warn = maybe_load("Always_Reroute", run_dir / "baseline_reroute.csv")
     if warn:
         warnings.append(warn)
-    r_random, _, warn = maybe_load("Random", run_dir / "baseline_random.csv")
+    r_random_series, warn = maybe_load("Random", run_dir / "baseline_random.csv")
     if warn:
         warnings.append(warn)
 
-    adv0 = (r_rl - r_wait) / n_test if r_wait is not None else None
-    adv1 = (r_rl - r_reroute) / n_test if r_reroute is not None else None
-    adv_rand = (r_random / n_test) if r_random is not None else None
+    lengths = [int(rewards_rl.shape[0])]
+    for series in (r_wait_series, r_reroute_series, r_random_series):
+        if series is not None:
+            lengths.append(int(series.shape[0]))
+    n_test = int(min(lengths)) if lengths else 0
+    rewards_rl = rewards_rl.iloc[:n_test]
+
+    r_rl = float(rewards_rl.sum())
+    r_wait = float(r_wait_series.iloc[:n_test].sum()) if r_wait_series is not None else None
+    r_reroute = float(r_reroute_series.iloc[:n_test].sum()) if r_reroute_series is not None else None
+    r_random = float(r_random_series.iloc[:n_test].sum()) if r_random_series is not None else None
+
+    adv0 = (r_rl - r_wait) / n_test if r_wait is not None and n_test > 0 else None
+    adv1 = (r_rl - r_reroute) / n_test if r_reroute is not None and n_test > 0 else None
+    adv_rand = (r_random / n_test) if r_random is not None and n_test > 0 else None
 
     g_prime = (adv0 + adv1) if (adv0 is not None and adv1 is not None) else None
     g = (g_prime - adv_rand) if (g_prime is not None and adv_rand is not None) else None

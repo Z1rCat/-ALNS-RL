@@ -32,7 +32,7 @@ except Exception:
 
 # ================= CONFIGURATION =================
 # 自动获取项目根目录 (假设脚本在 codes/ 下)
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_FILE = os.path.join(ROOT_DIR, "Intermodal_EGS_data_all.xlsx")
 OUTPUT_ROOT = os.path.join(ROOT_DIR, "Uncertainties Dynamic planning under unexpected events")
 FIGURES_DIR = os.path.join(ROOT_DIR, "Figures")

@@ -13,14 +13,15 @@ import time
 from pathlib import Path
 
 THIS_DIR = Path(__file__).resolve().parent
-if str(THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(THIS_DIR))
+CODES_DIR = THIS_DIR.parent
+if str(CODES_DIR) not in sys.path:
+    sys.path.insert(0, str(CODES_DIR))
 
-import Dynamic_ALNS_RL34959
+from core import Dynamic_ALNS_RL34959
 import Dynamic_master34959
-import Intermodal_ALNS34959
-import dynamic_RL34959
-import rl_logging
+from core import Intermodal_ALNS34959
+from core import dynamic_RL34959
+from core import rl_logging
 
 
 TRACE_FIELDS = list(dynamic_RL34959.TRACE_FIELDS)

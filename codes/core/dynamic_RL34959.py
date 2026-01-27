@@ -7,7 +7,37 @@ import copy
 import random
 import os
 import matplotlib.pyplot as plt
-from stable_baselines3 import DQN, PPO, A2C, DDPG, HER, SAC, TD3
+try:
+    from stable_baselines3 import DQN, PPO, A2C, DDPG, HER, SAC, TD3
+    from stable_baselines3.common.evaluation import evaluate_policy as sb3_evaluate_policy
+    from stable_baselines3.common.vec_env import VecFrameStack
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.utils import explained_variance
+    _SB3_AVAILABLE = True
+except Exception:
+    DQN = PPO = A2C = DDPG = HER = SAC = TD3 = None
+    VecFrameStack = None
+    sb3_evaluate_policy = None
+    BaseCallback = None
+    explained_variance = None
+    _SB3_AVAILABLE = False
+try:
+    from sb3_contrib import RecurrentPPO
+    _SB3_CONTRIB_AVAILABLE = True
+except Exception:
+    RecurrentPPO = None
+    _SB3_CONTRIB_AVAILABLE = False
+try:
+    from robust_rl.lbklac import LBKLACAgent, LBKLACConfig
+    _LBKLAC_AVAILABLE = True
+except Exception:
+    LBKLACAgent = None
+    LBKLACConfig = None
+    _LBKLAC_AVAILABLE = False
+try:
+    from core import config as rl_config
+except Exception:
+    rl_config = None
 try:
     from line_profiler import LineProfiler
 except ImportError:
@@ -18,18 +48,16 @@ except ImportError:
             return wrapper
         def print_stats(self):
             pass
-from stable_baselines3.common.vec_env import VecFrameStack
-from stable_baselines3.common.evaluation import evaluate_policy
 import timeit
 import time
-import Intermodal_ALNS34959
+from core import Intermodal_ALNS34959
 import sys
-import Dynamic_ALNS_RL34959
+from core import Dynamic_ALNS_RL34959
 import cProfile
 import pstats
 import io
 from pathlib import Path
-import rl_logging
+from core import rl_logging
 from collections import deque
 # from Intermodal_ALNS34959 import parallel_read_excel, parallel_save_excel
 # from torch.utils.tensorboard import SummaryWriter
@@ -82,6 +110,188 @@ def get_stop_flag_path():
     return os.environ.get("STOP_FLAG_FILE", "34959.txt")
 
 
+HAT_REWARD_EMA = 0.0
+HAT_DRIFT_EMA = 0.0
+HAT_ACTION_EMA = 0.0
+HAT_STEP = 0
+HAT_GATE_STATE = 0
+HAT_BASE_CLIP = None
+HAT_BASE_ENT = None
+HAT_BASE_KL = None
+_IMPL_REMOVAL_IDX = 0
+_IMPL_INSERTION_IDX = 0
+LSTM_CHAIN_LEN = 1
+LSTM_CHAIN_STEP = 0
+USE_LSTM = False
+STAGE_IN_OBS = False
+
+
+def _ema_update(prev, value, alpha):
+    if prev is None:
+        return float(value)
+    return (1.0 - alpha) * float(prev) + alpha * float(value)
+
+
+def _hat_is_active():
+    try:
+        return os.environ.get("RL_HAT", "0").strip() == "1" and algorithm in ("PPO", "A2C")
+    except Exception:
+        return False
+
+
+def _hat_gate():
+    drift_hi = float(os.environ.get("HAT_GATE_DRIFT_HI", "0.2"))
+    reward_low = float(os.environ.get("HAT_GATE_REWARD_LOW", "0.6"))
+    return 1 if (HAT_DRIFT_EMA > drift_hi or HAT_REWARD_EMA < reward_low) else 0
+
+
+def _hat_update_train_params():
+    global HAT_BASE_CLIP, HAT_BASE_ENT, HAT_BASE_KL
+    if not _hat_is_active() or implement == 1:
+        return
+    if model is None:
+        return
+    scale = float(os.environ.get("HAT_DRIFT_SCALE", "1.5"))
+    max_scale = float(os.environ.get("HAT_DRIFT_MAX_SCALE", "3.0"))
+    adj = min(max_scale, 1.0 + scale * HAT_DRIFT_EMA)
+    if algorithm == "PPO":
+        if HAT_BASE_CLIP is None:
+            HAT_BASE_CLIP = getattr(model, "clip_range", 0.2)
+        base_clip = HAT_BASE_CLIP if isinstance(HAT_BASE_CLIP, float) else 0.2
+        model.clip_range = lambda _: base_clip * adj
+        if HAT_BASE_KL is None:
+            HAT_BASE_KL = getattr(model, "target_kl", None)
+        if HAT_BASE_KL is not None:
+            model.target_kl = HAT_BASE_KL * adj
+    elif algorithm == "A2C":
+        if HAT_BASE_ENT is None:
+            HAT_BASE_ENT = getattr(model, "ent_coef", 0.0)
+        model.ent_coef = float(HAT_BASE_ENT) * adj
+
+
+def _hat_update_stats(reward, action):
+    global HAT_REWARD_EMA, HAT_DRIFT_EMA, HAT_ACTION_EMA, HAT_STEP, HAT_GATE_STATE
+    alpha = float(os.environ.get("HAT_EMA_ALPHA", "0.05"))
+    HAT_STEP += 1
+    HAT_REWARD_EMA = _ema_update(HAT_REWARD_EMA, reward, alpha)
+    drift = abs(float(reward) - HAT_REWARD_EMA)
+    HAT_DRIFT_EMA = _ema_update(HAT_DRIFT_EMA, drift, alpha)
+    HAT_ACTION_EMA = _ema_update(HAT_ACTION_EMA, action, alpha)
+    HAT_GATE_STATE = _hat_gate()
+
+
+def _hat_predict_probs(model, obs):
+    try:
+        obs_tensor = model.policy.obs_to_tensor(obs)[0]
+        dist = model.policy.get_distribution(obs_tensor)
+        probs = dist.distribution.probs.detach().cpu().numpy().squeeze()
+        return probs
+    except Exception:
+        return None
+
+
+def _hat_select_action(model, obs):
+    probs = _hat_predict_probs(model, obs)
+    if probs is None or len(probs) < 2:
+        action, _ = model.predict(obs, deterministic=True)
+        try:
+            return int(np.array(action).squeeze()), {"gate": 0, "p1": None, "tau": None}
+        except Exception:
+            return int(action), {"gate": 0, "p1": None, "tau": None}
+    p1 = float(probs[1])
+    tau_high = float(os.environ.get("HAT_TAU_HIGH", "0.55"))
+    tau_low = float(os.environ.get("HAT_TAU_LOW", "0.35"))
+    gate = _hat_gate()
+    tau = tau_low if gate == 1 else tau_high
+    action = 1 if p1 >= tau else 0
+    return int(action), {"gate": gate, "p1": p1, "tau": tau}
+
+
+def _hat_update_history_wrapper(env, action, reward):
+    if not _hat_is_active():
+        return False
+    target = env
+    seen = set()
+    while target is not None and id(target) not in seen:
+        seen.add(id(target))
+        if hasattr(target, "_last_action") and hasattr(target, "_last_reward") and hasattr(target, "_onehot"):
+            try:
+                target._last_action = target._onehot(int(action))
+                target._last_reward = float(reward)
+                return True
+            except Exception:
+                return False
+        target = getattr(target, "env", None)
+    return False
+
+
+def _flush_impl_reward_lists(env):
+    global _IMPL_REMOVAL_IDX, _IMPL_INSERTION_IDX
+    try:
+        removal_rewards = getattr(Dynamic_ALNS_RL34959, "removal_reward_list_in_implementation", [])
+        removal_states = getattr(Dynamic_ALNS_RL34959, "removal_state_list_in_implementation", [])
+        removal_actions = getattr(Dynamic_ALNS_RL34959, "removal_action_list_in_implementation", [])
+    except Exception:
+        removal_rewards, removal_states, removal_actions = [], [], []
+
+    while _IMPL_REMOVAL_IDX < len(removal_rewards):
+        reward = removal_rewards[_IMPL_REMOVAL_IDX]
+        state_row = removal_states[_IMPL_REMOVAL_IDX] if _IMPL_REMOVAL_IDX < len(removal_states) else {}
+        if hasattr(state_row, "to_dict"):
+            state_row = state_row.to_dict()
+        if not isinstance(state_row, dict):
+            state_row = {}
+        action_val = removal_actions[_IMPL_REMOVAL_IDX] if _IMPL_REMOVAL_IDX < len(removal_actions) else state_row.get("action", "")
+        state_row["action"] = action_val
+        try:
+            log_trace_from_row(state_row, "receive_reward", action=action_val, reward=reward, source="RL")
+        except Exception:
+            pass
+        if _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
+            try:
+                _hat_update_stats(float(reward), float(action_val))
+                _hat_update_history_wrapper(env, action_val, reward)
+            except Exception:
+                pass
+        try:
+            Intermodal_ALNS34959.log_impl_reward(reward)
+        except Exception:
+            pass
+        _IMPL_REMOVAL_IDX += 1
+
+    try:
+        insertion_rewards = getattr(Dynamic_ALNS_RL34959, "insertion_reward_list_in_implementation", [])
+        insertion_states = getattr(Dynamic_ALNS_RL34959, "insertion_state_list_in_implementation", [])
+        insertion_actions = getattr(Dynamic_ALNS_RL34959, "insertion_action_list_in_implementation", [])
+    except Exception:
+        insertion_rewards, insertion_states, insertion_actions = [], [], []
+
+    while _IMPL_INSERTION_IDX < len(insertion_rewards):
+        reward = insertion_rewards[_IMPL_INSERTION_IDX]
+        state_row = insertion_states[_IMPL_INSERTION_IDX] if _IMPL_INSERTION_IDX < len(insertion_states) else {}
+        if hasattr(state_row, "to_dict"):
+            state_row = state_row.to_dict()
+        if not isinstance(state_row, dict):
+            state_row = {}
+        action_val = insertion_actions[_IMPL_INSERTION_IDX] if _IMPL_INSERTION_IDX < len(insertion_actions) else state_row.get("action", "")
+        state_row["action"] = action_val
+        try:
+            log_trace_from_row(state_row, "receive_reward", action=action_val, reward=reward, source="RL")
+        except Exception:
+            pass
+        if _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
+            try:
+                _hat_update_stats(float(reward), float(action_val))
+                _hat_update_history_wrapper(env, action_val, reward)
+            except Exception:
+                pass
+        try:
+            Intermodal_ALNS34959.log_impl_reward(reward)
+        except Exception:
+            pass
+        _IMPL_INSERTION_IDX += 1
+
+
 def profile():
 
     lp = LineProfiler()
@@ -98,7 +308,28 @@ def profile():
     return wrapper
 
 # ===== 路径配置 =====
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+WAIT_TIMEOUT_S = float(os.environ.get("RL_WAIT_TIMEOUT_S", "0") or 0)
+WAIT_LOG_INTERVAL_S = float(os.environ.get("RL_WAIT_LOG_INTERVAL_S", "5") or 5)
+WAIT_SLEEP_S = float(os.environ.get("RL_WAIT_SLEEP_S", "0.01") or 0.01)
+LBKLAC_CUSTOM_LOGGING = False
+
+
+def _wait_watchdog(stage, start_ts, last_log_ts, row_dict=None):
+    now = time.time()
+    if WAIT_LOG_INTERVAL_S > 0 and now - last_log_ts >= WAIT_LOG_INTERVAL_S:
+        print(f"[RL] wait {stage} {now - start_ts:.1f}s")
+        last_log_ts = now
+    if WAIT_TIMEOUT_S > 0 and now - start_ts >= WAIT_TIMEOUT_S:
+        try:
+            log_trace_from_row(row_dict or {}, f"timeout_{stage}", source="RL")
+        except Exception:
+            pass
+        if os.environ.get("RL_WAIT_ABORT", "0") == "1":
+            return True, last_log_ts, now
+        start_ts = now
+    return False, last_log_ts, start_ts
 
 def resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types):
     dynamic_root = os.environ.get("DYNAMIC_DATA_ROOT", "").strip()
@@ -130,19 +361,73 @@ TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
     "table_number", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "action_meaning", "feasible", "source"
+    "action", "reward", "action_meaning", "feasible", "source",
+    # Drift/robustness interpretability fields (optional; safe to leave empty)
+    "algo", "regime_id", "context_id", "drift_score",
+    # LB-KLAC diagnostics
+    "belief_smooth_penalty", "value_residual", "delta_t", "policy_kl", "action_prob", "entropy",
+    "bootstrap", "trust_region_scaled", "trust_region_scale",
+    # MoE (HAT+MoE) diagnostics (rolling means; safe to leave empty)
+    "gate_prob_0_mean", "gate_prob_1_mean", "gate_entropy_mean",
+    "expert0_action1_prob_mean", "expert1_action1_prob_mean",
+    "expert_selected_ratio",
+    "moe_div_mean",
 ]
 
 current_gt_mean = ""
 current_phase_label = ""
+current_stage_label = ""
+_last_phase_label_for_drift = None
 
 TRAIN_FIELDS = [
     "ts", "phase", "step_idx", "reward", "avg_reward", "std_reward",
     "rolling_avg", "recent_count",
-    "training_time", "implementation_time"
+    "training_time", "implementation_time",
+    # Optional training diagnostics for drift-robust algorithms
+    "algo", "regime_id", "context_id", "drift_score",
+    # Optional LB-KLAC diagnostics
+    "loss_pi", "loss_v", "loss_kl", "loss_entropy",
+    "policy_kl", "delta_t", "belief_smooth_penalty", "value_residual",
+    "bootstrap", "trust_region_scaled", "trust_region_scale",
+    # LSTM / PPO diagnostics
+    "value_pred_mean", "value_pred_std",
+    "advantage_mean", "advantage_std",
+    "explained_variance", "policy_entropy", "lstm_hidden_norm",
 ]
 
-def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source="RL"):
+def _drift_snapshot():
+    """
+    Best-effort drift/context snapshot, designed to be safe across:
+    - SB3 algorithms (no changes required)
+    - Baseline replay (fields will exist but may be empty)
+    - New robust algorithms (can populate regime/context more richly)
+    """
+    global _last_phase_label_for_drift
+    phase_label = current_phase_label
+    drift = 0.0
+    try:
+        if _last_phase_label_for_drift is not None and str(phase_label) != str(_last_phase_label_for_drift):
+            drift = 1.0
+    except Exception:
+        drift = 0.0
+    _last_phase_label_for_drift = phase_label
+    algo_name = globals().get("algorithm", "")
+    regime_id = phase_label
+    context_id = phase_label
+    try:
+        gt = float(current_gt_mean) if current_gt_mean != "" else None
+        if gt is not None and phase_label not in (None, ""):
+            context_id = f"{phase_label}|gt_mean={gt:g}"
+    except Exception:
+        pass
+    return {
+        "algo": algo_name,
+        "regime_id": regime_id,
+        "context_id": context_id,
+        "drift_score": drift,
+    }
+
+def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source="RL", extra=None):
     try:
         action_val = action if action is not None else row.get("action", "")
         action_meaning = ""
@@ -177,14 +462,23 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
             "reward": reward if reward is not None else row.get("reward", ""),
             "action_meaning": action_meaning,
             "feasible": feasible,
-            "source": source
+            "source": source,
         }
+        payload.update(_drift_snapshot())
+        # Best-effort MoE stats from policy (no impact on non-MoE runs).
+        try:
+            if model is not None and hasattr(model, "policy") and hasattr(model.policy, "get_moe_log"):
+                payload.update(model.policy.get_moe_log())
+        except Exception:
+            pass
+        if extra:
+            payload.update(extra)
         rl_logging.append_row("rl_trace.csv", TRACE_FIELDS, payload)
     except Exception as e:
         print("log_trace_from_row error", e)
 
 def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_reward=None,
-                     rolling_avg=None, recent_count=None, training_time=None, implementation_time=None):
+                     rolling_avg=None, recent_count=None, training_time=None, implementation_time=None, extra=None):
     try:
         payload = {
             "ts": rl_logging.now_ts(),
@@ -198,9 +492,108 @@ def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_rewar
             "training_time": training_time if training_time is not None else "",
             "implementation_time": implementation_time if implementation_time is not None else "",
         }
+        payload.update(_drift_snapshot())
+        if extra:
+            payload.update(extra)
         rl_logging.append_row("rl_training.csv", TRAIN_FIELDS, payload)
     except Exception as e:
         print("log_training_row error", e)
+
+
+class LstmStatsCallback(BaseCallback):
+    """
+    Collect batch-level stats from RecurrentPPO rollout buffer and log to rl_training.csv.
+    """
+
+    def __init__(self):
+        if BaseCallback is None:
+            raise ImportError("stable_baselines3 is required for LstmStatsCallback.")
+        super().__init__()
+
+    def _on_rollout_end(self) -> None:
+        try:
+            rb = getattr(self.model, "rollout_buffer", None)
+            if rb is None:
+                return
+            values = getattr(rb, "values", None)
+            advantages = getattr(rb, "advantages", None)
+            returns = getattr(rb, "returns", None)
+            if values is None or advantages is None:
+                return
+            v = np.array(values).astype(float).reshape(-1)
+            adv = np.array(advantages).astype(float).reshape(-1)
+            v_mean = float(np.mean(v)) if v.size else 0.0
+            v_std = float(np.std(v)) if v.size else 0.0
+            a_mean = float(np.mean(adv)) if adv.size else 0.0
+            a_std = float(np.std(adv)) if adv.size else 0.0
+
+            exp_var = ""
+            try:
+                if explained_variance is not None and returns is not None:
+                    exp_var = float(explained_variance(np.array(returns).reshape(-1), v))
+            except Exception:
+                exp_var = ""
+
+            policy_entropy = ""
+            try:
+                # SB3 logs negative entropy as entropy_loss; convert back if available.
+                ent_loss = self.model.logger.name_to_value.get("train/entropy_loss", None)
+                if ent_loss is not None:
+                    policy_entropy = float(-ent_loss)
+            except Exception:
+                policy_entropy = ""
+
+            lstm_hidden_norm = ""
+            try:
+                lstm_states = getattr(rb, "lstm_states", None)
+                if lstm_states is not None:
+                    # lstm_states: (hidden, cell)
+                    h = lstm_states[0]
+                    lstm_hidden_norm = float(np.linalg.norm(np.array(h)))
+            except Exception:
+                lstm_hidden_norm = ""
+
+            extra = {
+                "value_pred_mean": v_mean,
+                "value_pred_std": v_std,
+                "advantage_mean": a_mean,
+                "advantage_std": a_std,
+                "explained_variance": exp_var,
+                "policy_entropy": policy_entropy,
+                "lstm_hidden_norm": lstm_hidden_norm,
+            }
+            log_training_row("train", step_idx=next_step(), extra=extra)
+        except Exception:
+            return
+
+
+def evaluate_recurrent_policy(model, env, n_eval_episodes=1):
+    """
+    Minimal eval loop for RecurrentPPO that maintains LSTM state.
+    """
+    rewards = []
+    for _ in range(int(n_eval_episodes)):
+        obs = env.reset()
+        done = False
+        ep_reward = 0.0
+        lstm_state = None
+        episode_start = True
+        while True:
+            action, lstm_state = model.predict(
+                obs,
+                state=lstm_state,
+                episode_start=np.array([episode_start], dtype=bool),
+                deterministic=True,
+            )
+            obs, reward, done, _ = env.step(action)
+            ep_reward += float(reward)
+            episode_start = bool(done)
+            if done:
+                break
+        rewards.append(ep_reward)
+    avg = float(np.mean(rewards)) if rewards else 0.0
+    std = float(np.std(rewards)) if rewards else 0.0
+    return avg, std
 
 def next_step():
     global global_step
@@ -256,6 +649,8 @@ def send_action(action):
         return
     # get the index first
     break_flag = 0
+    wait_start = time.time()
+    last_log = wait_start
     while True:
         if stop_everything_in_learning_and_go_to_implementation_phase == 1:
             return
@@ -263,6 +658,13 @@ def send_action(action):
             break
         else:
             print('len(Intermodal_ALNS34959.state_reward_pairs) == 0 in send_action function')
+            timed_out, last_log, wait_start = _wait_watchdog("send_action_wait_pairs", wait_start, last_log)
+            if timed_out:
+                return
+            if WAIT_SLEEP_S > 0:
+                time.sleep(WAIT_SLEEP_S)
+    wait_start = time.time()
+    last_log = wait_start
     while True:
         # print('send action 1')
         # if only_stop_once_by_implementation == 0:
@@ -317,6 +719,11 @@ def send_action(action):
                     print("Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] != -10000000")
                     Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
             break
+        timed_out, last_log, wait_start = _wait_watchdog("send_action_wait_slot", wait_start, last_log)
+        if timed_out:
+            return
+        if WAIT_SLEEP_S > 0:
+            time.sleep(WAIT_SLEEP_S)
 #@profile()
 def get_state(chosen_pair, table_number=-1, request_number_in_R=-1, duration_type='x', dynamic_t_begin=-1):
     global severity_level
@@ -433,6 +840,15 @@ def get_state(chosen_pair, table_number=-1, request_number_in_R=-1, duration_typ
         state_list = [state_list[0], severity_level, event_type]
     else:
         state_list = [state_list[0], severity_level]
+    if STAGE_IN_OBS:
+        label = str(current_stage_label or "").lower()
+        if "insert" in label:
+            stage_vec = [0.0, 1.0]
+        elif "remove" in label:
+            stage_vec = [1.0, 0.0]
+        else:
+            stage_vec = [0.0, 0.0]
+        state_list = list(state_list) + stage_vec
     state = np.array(state_list, dtype=float)
     return state
 
@@ -447,9 +863,15 @@ class coordinationEnv(Env):
         # Cost array
         # self.observation_space = Box(low=np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), high=np.array([24, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 24, 14]))
         if add_event_types == 1:
-            self.observation_space = Box(low=np.array([0, 0, 0]), high=np.array([200, 6, 6]))
+            base_low = [0, 0, 0]
+            base_high = [200, 6, 6]
         else:
-            self.observation_space = Box(low=np.array([0, 0]),high=np.array([200, 6]))
+            base_low = [0, 0]
+            base_high = [200, 6]
+        if STAGE_IN_OBS:
+            base_low = base_low + [0, 0]
+            base_high = base_high + [1, 1]
+        self.observation_space = Box(low=np.array(base_low), high=np.array(base_high))
         # self.state = [random.choice(range(0,24)), random.choice(range(0,11))]
         # Set coordination length
         self.horizon_length = 0
@@ -457,7 +879,7 @@ class coordinationEnv(Env):
 
     #@profile()
     def step(self, action):
-        global state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, iteration_times, RL_drop_finish, episode_length, next_state_reward_time_step, next_state_penalty_time_step, time_s, all_average_reward, all_deviation, timestamps
+        global state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, iteration_times, RL_drop_finish, episode_length, next_state_reward_time_step, next_state_penalty_time_step, time_s, all_average_reward, all_deviation, timestamps, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP, USE_LSTM
         # 将动作转为标量
         try:
             if isinstance(action, np.ndarray):
@@ -466,6 +888,7 @@ class coordinationEnv(Env):
                 action = int(action)
         except Exception:
             pass
+        info = {}
 
         # truck picks up containers at A, then go to B to transfer to barge, plan transshipment time is 30
         # between A and B, 300 km, truck speed 75 km/h, so 4 hour go to terminal B, truck on route 5/h
@@ -503,6 +926,9 @@ class coordinationEnv(Env):
                 if not state_keys or not state_action_reward_collect_for_evaluate:
                     reward = 0
                     all_rewards_list.append(reward)
+                    if _hat_is_active():
+                        _hat_update_stats(reward, action)
+                        _hat_update_train_params()
                     return self.state, reward, True, {}
                 state_key = random.choice(state_keys)
                 action_map = state_action_reward_collect_for_evaluate.get(state_key, {})
@@ -513,12 +939,17 @@ class coordinationEnv(Env):
                 else:
                     reward = 0
                 all_rewards_list.append(reward)
+                if _hat_is_active():
+                    _hat_update_stats(reward, action)
+                    _hat_update_train_params()
             else:
                 if stop_everything_in_learning_and_go_to_implementation_phase == 1:
                     return self.state, 0, True, {}
                 send_action(action)
 
                 #get the reward from ALNS
+                wait_start = time.time()
+                last_log = wait_start
                 while True:
                     # print('step 1')
                     stop_wait()
@@ -544,15 +975,24 @@ class coordinationEnv(Env):
                                 reward = reward[0,0]
                             all_rewards_list.append(reward)
                             recent_rewards.append(reward)
+                            if _hat_is_active():
+                                _hat_update_stats(reward, action)
+                                _hat_update_train_params()
                             step_id = next_step()
-                            log_training_row("implement" if implement == 1 else "train", step_idx=step_id, reward=reward)
                             try:
                                 row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
                             except:
                                 row_dict = {}
-                            log_trace_from_row(row_dict, "receive_reward", action=row_dict.get('action', ''), reward=reward, source="RL")
-                            # parallel_save_excel(path + 'state_reward_pairs.xlsx', state_reward_pairs, 'state_reward_pairs')
                             uncertainty_type = Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index]
+                            info = {
+                                "row_dict": row_dict,
+                                "uncertainty_type": uncertainty_type,
+                                "pair_index": pair_index,
+                            }
+                            if not LBKLAC_CUSTOM_LOGGING:
+                                log_training_row("implement" if implement == 1 else "train", step_idx=step_id, reward=reward)
+                                log_trace_from_row(row_dict, "receive_reward", action=row_dict.get('action', ''), reward=reward, source="RL")
+                            # parallel_save_excel(path + 'state_reward_pairs.xlsx', state_reward_pairs, 'state_reward_pairs')
                             #drop the finish
                             # Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.drop(
                             #     labels=pair_index,
@@ -604,6 +1044,11 @@ class coordinationEnv(Env):
 
 
                         break
+                    timed_out, last_log, wait_start = _wait_watchdog("step_wait_reward", wait_start, last_log)
+                    if timed_out:
+                        return self.state, 0, True, info
+                    if WAIT_SLEEP_S > 0:
+                        time.sleep(WAIT_SLEEP_S)
         else:
             for terminal in range(10):
                 if time_dependent == 0:
@@ -622,7 +1067,12 @@ class coordinationEnv(Env):
             #     model.save('congestion_terminal_mean_list' + '_20220220congestion_stochastic100000')
                 # load
                 # model = PPO.load("PPO2021113a0coordination")
-                average_reward, deviation = evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
+                if USE_LSTM:
+                    average_reward, deviation = evaluate_recurrent_policy(model, env, n_eval_episodes=iteration_numbers_unit)
+                else:
+                    if sb3_evaluate_policy is None:
+                        raise ImportError("stable_baselines3 is required for evaluate_policy in non-ALNS mode.")
+                    average_reward, deviation = sb3_evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
                 all_average_reward.append(average_reward)
                 all_deviation.append(average_reward)
                 time_s = time_s_save
@@ -714,6 +1164,16 @@ class coordinationEnv(Env):
         self.horizon_length += 1
         # print(self.horizon_length)
             # Check if coordination is done
+        if add_ALNS == 1 and USE_LSTM and int(LSTM_CHAIN_LEN) > 1:
+            LSTM_CHAIN_STEP += 1
+            done = LSTM_CHAIN_STEP >= int(LSTM_CHAIN_LEN)
+            if done:
+                LSTM_CHAIN_STEP = 0
+            try:
+                self.state = self.reset()
+            except SystemExit:
+                raise
+            return self.state, reward, done, info
         if self.horizon_length == episode_length:
             done = True
         else:
@@ -721,8 +1181,9 @@ class coordinationEnv(Env):
 
         # Apply temperature noise
         # self.state += random.randint(-1,1)
-        # Set placeholder for info
-        info = {}
+        # Set placeholder for info (if not already populated)
+        if not info:
+            info = {}
         print(time_s)
         # Return step information
         print(self.state, 'action', action,  reward)
@@ -760,6 +1221,8 @@ class coordinationEnv(Env):
                 #read which terminals a vehicle passes
                 break_flag = 0
                 #check_RL_ALNS_iteraction_bug()
+                wait_start = time.time()
+                last_log = wait_start
                 while True:
                     #check_RL_ALNS_iteraction_bug()
                     # if implement == 1 and ALNS_got_action_in_implementation == 0:
@@ -797,6 +1260,12 @@ class coordinationEnv(Env):
 
                     if break_flag == 1:
                         break
+                    timed_out, last_log, wait_start = _wait_watchdog("reset_wait_state", wait_start, last_log)
+                    if timed_out:
+                        self.state = np.zeros(self.observation_space.shape, dtype=float)
+                        return self.state
+                    if WAIT_SLEEP_S > 0:
+                        time.sleep(WAIT_SLEEP_S)
         # Reset coordination time
         self.horizon_length = 0
         # self.dis = 0
@@ -835,10 +1304,11 @@ def append_new_line(file_name, text_to_append):
         file_object.write(text_to_append)
 
 def main(algorithm2, mode2):
-    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward
+    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward, LBKLAC_CUSTOM_LOGGING, USE_LSTM, STAGE_IN_OBS, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP
     add_event_types =0 
     stop_everything_in_learning_and_go_to_implementation_phase = 0
     clear_pairs_done = 0
+    LBKLAC_CUSTOM_LOGGING = False
     # only_stop_once_by_implementation = 0
     evaluate = 0
     implement = 0
@@ -854,9 +1324,24 @@ def main(algorithm2, mode2):
     iteration_times = 0
     #actual
     algorithm, mode = algorithm2, mode2
+    USE_LSTM = algorithm in ("PPO_LSTM", "REC_PPO", "RECURRENTPPO", "PPO_HAT_LSTM")
+    if USE_LSTM:
+        STAGE_IN_OBS = os.environ.get("RL_STAGE_IN_OBS", "1").strip() == "1"
+        try:
+            LSTM_CHAIN_LEN = int(os.environ.get("LSTM_CHAIN_LEN", "10"))
+        except Exception:
+            LSTM_CHAIN_LEN = 10
+        LSTM_CHAIN_LEN = max(1, int(LSTM_CHAIN_LEN))
+        LSTM_CHAIN_STEP = 0
+    else:
+        STAGE_IN_OBS = os.environ.get("RL_STAGE_IN_OBS", "0").strip() == "1"
+        LSTM_CHAIN_LEN = 1
+        LSTM_CHAIN_STEP = 0
     seed_val = resolve_seed()
     set_global_seed(seed_val)
     episode_length = 1
+    if USE_LSTM and int(LSTM_CHAIN_LEN) > 1:
+        episode_length = int(LSTM_CHAIN_LEN)
     next_state_reward_time_step = -1
     next_state_penalty_time_step = -1
     wait_training_finish_last_iteration = 0
@@ -902,11 +1387,115 @@ def main(algorithm2, mode2):
             #     for congestion_3_mean in range(10):
 
         env=coordinationEnv()
+        hat_policy_kwargs = None
+        use_hat = os.environ.get("RL_HAT", "0").strip() == "1"
+        if use_hat and algorithm in ("PPO", "A2C"):
+            try:
+                from robust_rl.sb3_attention import HistoryAttentionWrapper, AttentionExtractor, HATConfig
+                hat_cfg = HATConfig(
+                    history_len=int(os.environ.get("HAT_HISTORY_LEN", "20")),
+                    embed_dim=int(os.environ.get("HAT_EMBED_DIM", "64")),
+                    num_heads=int(os.environ.get("HAT_HEADS", "2")),
+                    num_layers=int(os.environ.get("HAT_LAYERS", "2")),
+                    dropout=float(os.environ.get("HAT_DROPOUT", "0.1")),
+                    feature_dim=int(os.environ.get("HAT_FEATURE_DIM", "64")),
+                )
+                keep_history = os.environ.get("HAT_KEEP_HISTORY", "1").strip() == "1"
+                def _hat_stage_onehot():
+                    label = str(current_stage_label or "").lower()
+                    if "insert" in label:
+                        return [0.0, 1.0]
+                    if "remove" in label:
+                        return [1.0, 0.0]
+                    return [0.0, 0.0]
+
+                env = HistoryAttentionWrapper(
+                    env,
+                    history_len=hat_cfg.history_len,
+                    keep_history=keep_history,
+                    stage_dim=2,
+                    stage_getter=_hat_stage_onehot,
+                )
+                hat_policy_kwargs = {
+                    "features_extractor_class": AttentionExtractor,
+                    "features_extractor_kwargs": {"config": hat_cfg},
+                }
+                print("HAT enabled: history_len", hat_cfg.history_len)
+            except Exception as exc:
+                print("HAT enable failed, fallback to MlpPolicy:", exc)
+                hat_policy_kwargs = None
         if seed_val is not None:
             try:
                 env.seed(seed_val)
             except Exception:
                 pass
+
+        def _lbklac_on_step(payload):
+            try:
+                info = payload.get("info", {}) if isinstance(payload, dict) else {}
+            except Exception:
+                info = {}
+            row_dict = {}
+            try:
+                row_dict = info.get("row_dict", {}) if isinstance(info, dict) else {}
+                if hasattr(row_dict, "to_dict"):
+                    row_dict = row_dict.to_dict()
+            except Exception:
+                row_dict = {}
+            reward_val = payload.get("reward") if isinstance(payload, dict) else None
+            action_val = payload.get("action") if isinstance(payload, dict) else None
+            extra = {}
+            for key in [
+                "belief_smooth_penalty",
+                "value_residual",
+                "delta_t",
+                "policy_kl",
+                "action_prob",
+                "entropy",
+                "loss_pi",
+                "loss_v",
+                "loss_kl",
+                "loss_entropy",
+                "bootstrap",
+                "trust_region_scaled",
+                "trust_region_scale",
+            ]:
+                if isinstance(payload, dict) and key in payload:
+                    extra[key] = payload.get(key)
+            if "policy_kl" not in extra:
+                extra["policy_kl"] = 0.0
+            if "bootstrap" not in extra:
+                extra["bootstrap"] = 0
+            if "trust_region_scaled" not in extra:
+                extra["trust_region_scaled"] = 0
+            if "trust_region_scale" not in extra:
+                extra["trust_region_scale"] = 1.0
+            step_id = next_step()
+            log_training_row(
+                "implement" if implement == 1 else "train",
+                step_idx=step_id,
+                reward=reward_val,
+                extra=extra,
+            )
+            log_trace_from_row(
+                row_dict,
+                "receive_reward",
+                action=action_val if action_val is not None else row_dict.get("action", ""),
+                reward=reward_val,
+                source="RL",
+                extra=extra,
+            )
+
+        def _lbklac_eval(agent, env_obj, n_eval_episodes):
+            rewards = []
+            for _ in range(max(1, n_eval_episodes)):
+                obs_eval = env_obj.reset()
+                action_eval, _ = agent.predict(obs_eval, deterministic=True)
+                _, reward_eval, _, _ = env_obj.step(action_eval)
+                rewards.append(reward_eval)
+            if not rewards:
+                return -1000, -1000
+            return float(np.mean(rewards)), float(np.std(rewards))
 
         # env.observation_space.sample()
         # env.reset()
@@ -932,17 +1521,168 @@ def main(algorithm2, mode2):
         #default n_steps = 2048
         #while True:
          #   try:
-        if algorithm == 'DQN':
+        if algorithm == 'LBKLAC':
+            if not _LBKLAC_AVAILABLE or LBKLACAgent is None or LBKLACConfig is None:
+                raise ImportError("LBKLAC requires torch and robust_rl.lbklac to be available.")
+            lbklac_kwargs = rl_config.get_lbklac_config() if rl_config else {}
+            lbklac_cfg = LBKLACConfig(**lbklac_kwargs)
+            model = LBKLACAgent(
+                env,
+                lbklac_cfg,
+                seed=seed_val,
+            )
+            LBKLAC_CUSTOM_LOGGING = True
+        elif algorithm == 'DRCB':
+            from robust_rl.drcb import DriftRobustContextualBandit
+            model = DriftRobustContextualBandit(
+                env,
+                seed=seed_val,
+                decay=0.995,
+                ridge=1.0,
+                ucb_alpha=0.2,
+                context_getter=lambda: {
+                    "gt_mean": current_gt_mean,
+                    "phase_label": current_phase_label,
+                    "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+                },
+            )
+        elif algorithm == 'DQN':
+            if not _SB3_AVAILABLE or DQN is None:
+                raise ImportError("stable_baselines3 is required for DQN. Please install stable-baselines3 + torch.")
             model = DQN('MlpPolicy', env, verbose=1, learning_starts=10, device='cpu', seed=seed_val)
+        elif algorithm in ('PPO_LSTM', 'REC_PPO', 'RECURRENTPPO', 'PPO_HAT_LSTM'):
+            if not _SB3_CONTRIB_AVAILABLE or RecurrentPPO is None:
+                raise ImportError("sb3-contrib is required for RecurrentPPO. Please install sb3-contrib==2.3.0.")
+            lstm_hidden_size = int(os.environ.get("LSTM_HIDDEN_SIZE", "64"))
+            n_lstm_layers = int(os.environ.get("LSTM_LAYERS", "1"))
+            shared_lstm = os.environ.get("LSTM_SHARED", "1").strip() == "1"
+            enable_critic_lstm = os.environ.get("LSTM_CRITIC", "1").strip() == "1"
+            # sb3-contrib constraint: choose exactly one of (shared_lstm) or (separate critic LSTM) or (no critic LSTM).
+            # If shared_lstm is True, enable_critic_lstm must be False.
+            if shared_lstm and enable_critic_lstm:
+                enable_critic_lstm = False
+            policy_kwargs = {
+                "lstm_hidden_size": lstm_hidden_size,
+                "n_lstm_layers": n_lstm_layers,
+                "shared_lstm": shared_lstm,
+                "enable_critic_lstm": enable_critic_lstm,
+            }
+            # Optional: LSTM after existing encoder (e.g., HAT features_extractor).
+            if use_hat and os.environ.get("LSTM_AFTER_ENCODER", "0").strip() == "1":
+                policy_kwargs.update(hat_policy_kwargs or {})
+            n_steps = int(os.environ.get("LSTM_N_STEPS", "10"))
+            batch_size = int(os.environ.get("LSTM_BATCH_SIZE", str(n_steps)))
+            n_epochs = int(os.environ.get("LSTM_N_EPOCHS", "5"))
+            learning_rate = float(os.environ.get("LSTM_LR", "0.0003"))
+            gamma = float(os.environ.get("LSTM_GAMMA", "0.99"))
+            gae_lambda = float(os.environ.get("LSTM_GAE_LAMBDA", "0.95"))
+            clip_range = float(os.environ.get("LSTM_CLIP_RANGE", "0.2"))
+            ent_coef = float(os.environ.get("LSTM_ENT_COEF", "0.0"))
+            vf_coef = float(os.environ.get("LSTM_VF_COEF", "0.5"))
+            model = RecurrentPPO(
+                "MlpLstmPolicy",
+                env,
+                n_steps=n_steps,
+                batch_size=batch_size,
+                n_epochs=n_epochs,
+                learning_rate=learning_rate,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                clip_range=clip_range,
+                ent_coef=ent_coef,
+                vf_coef=vf_coef,
+                verbose=1,
+                device='cpu',
+                seed=seed_val,
+                policy_kwargs=policy_kwargs,
+            )
         elif algorithm == 'PPO':
-            model = PPO('MlpPolicy', env, n_steps=10, verbose=1, device='cpu', seed=seed_val)
+            if not _SB3_AVAILABLE or PPO is None:
+                raise ImportError("stable_baselines3 is required for PPO. Please install stable-baselines3 + torch.")
+            use_moe = os.environ.get("RL_MOE", "0").strip() == "1"
+            if use_hat and use_moe:
+                # HAT+MoE: keep SB3 training loop; swap only policy head.
+                from robust_rl.sb3_attention import HATMoEActorCriticPolicy, MoEConfig, MoEPPO
+
+                moe_cfg = MoEConfig(
+                    num_experts=int(os.environ.get("MOE_K", "2")),
+                    expert_hidden_dim=int(os.environ.get("MOE_HIDDEN", "64")),
+                    expert_layers=int(os.environ.get("MOE_LAYERS", "1")),
+                    gate_hidden_dim=int(os.environ.get("MOE_GATE_HIDDEN", "32")),
+                    stage_dim=int(os.environ.get("MOE_STAGE_DIM", "2")),
+                    gate_entropy_coef=float(os.environ.get("MOE_GATE_ENT_COEF", "0.01")),
+                    load_balance_coef=float(os.environ.get("MOE_LB_COEF", "0.01")),
+                    # NOTE: div coef lives on the algorithm wrapper (loss term); policy logs it via out["div"].
+                    log_window=int(os.environ.get("MOE_LOG_WINDOW", "50")),
+                    hard_inference=os.environ.get("MOE_HARD_INFER", "0").strip() == "1",
+                )
+                policy_kwargs = dict(hat_policy_kwargs or {})
+                policy_kwargs["moe_config"] = moe_cfg
+                PPOCls = MoEPPO.wrap(PPO)
+                model = PPOCls(
+                    HATMoEActorCriticPolicy,
+                    env,
+                    n_steps=10,
+                    verbose=1,
+                    device="cpu",
+                    seed=seed_val,
+                    policy_kwargs=policy_kwargs,
+                    moe_gate_entropy_coef=float(moe_cfg.gate_entropy_coef),
+                    moe_load_balance_coef=float(moe_cfg.load_balance_coef),
+                    moe_div_coef=float(os.environ.get("MOE_DIV_COEF", "0.005")),
+                )
+                print("MoE enabled: K", moe_cfg.num_experts, "hard_infer", int(moe_cfg.hard_inference))
+            else:
+                model = PPO('MlpPolicy', env, n_steps=10, verbose=1, device='cpu', seed=seed_val, policy_kwargs=hat_policy_kwargs)
         elif algorithm == 'A2C':
-            model = A2C('MlpPolicy', env, n_steps=10, verbose=1, device='cpu', seed=seed_val)
+            if not _SB3_AVAILABLE or A2C is None:
+                raise ImportError("stable_baselines3 is required for A2C. Please install stable-baselines3 + torch.")
+            use_moe = os.environ.get("RL_MOE", "0").strip() == "1"
+            if use_hat and use_moe:
+                from robust_rl.sb3_attention import HATMoEActorCriticPolicy, MoEConfig, MoEA2C
+
+                moe_cfg = MoEConfig(
+                    num_experts=int(os.environ.get("MOE_K", "2")),
+                    expert_hidden_dim=int(os.environ.get("MOE_HIDDEN", "64")),
+                    expert_layers=int(os.environ.get("MOE_LAYERS", "1")),
+                    gate_hidden_dim=int(os.environ.get("MOE_GATE_HIDDEN", "32")),
+                    stage_dim=int(os.environ.get("MOE_STAGE_DIM", "2")),
+                    gate_entropy_coef=float(os.environ.get("MOE_GATE_ENT_COEF", "0.01")),
+                    load_balance_coef=float(os.environ.get("MOE_LB_COEF", "0.01")),
+                    log_window=int(os.environ.get("MOE_LOG_WINDOW", "50")),
+                    hard_inference=os.environ.get("MOE_HARD_INFER", "0").strip() == "1",
+                )
+                policy_kwargs = dict(hat_policy_kwargs or {})
+                policy_kwargs["moe_config"] = moe_cfg
+                A2CCls = MoEA2C.wrap(A2C)
+                model = A2CCls(
+                    HATMoEActorCriticPolicy,
+                    env,
+                    n_steps=10,
+                    verbose=1,
+                    device="cpu",
+                    seed=seed_val,
+                    policy_kwargs=policy_kwargs,
+                    moe_gate_entropy_coef=float(moe_cfg.gate_entropy_coef),
+                    moe_load_balance_coef=float(moe_cfg.load_balance_coef),
+                    moe_div_coef=float(os.environ.get("MOE_DIV_COEF", "0.005")),
+                )
+                print("MoE enabled: K", moe_cfg.num_experts, "hard_infer", int(moe_cfg.hard_inference))
+            else:
+                model = A2C('MlpPolicy', env, n_steps=10, verbose=1, device='cpu', seed=seed_val, policy_kwargs=hat_policy_kwargs)
         else:
+            if not _SB3_AVAILABLE:
+                raise ImportError("stable_baselines3 is required for this algorithm. Please install stable-baselines3 + torch.")
             model = eval(algorithm + "('MlpPolicy', env, n_steps=10, verbose=1, device='cpu')")
             #break
            # except:
             #    continue
+        lstm_callback = None
+        if USE_LSTM and BaseCallback is not None:
+            try:
+                lstm_callback = LstmStatsCallback()
+            except Exception:
+                lstm_callback = None
         # #########imitation learning both baseline and baseline3 have bugs and can't be solved.
         # # baseline: ValueError: Cannot feed value of shape (1, 1, 11) for Tensor 'deepq/input/Ob:0', which has shape '(?, 11)'
         # #           and have error even when run official example
@@ -974,7 +1714,13 @@ def main(algorithm2, mode2):
         for number_of_learn_evaluate_loops in range(1000000000):
             if implement == 1:
                 break
-            model.learn(total_timesteps=total_timesteps2)
+            if algorithm == 'LBKLAC':
+                model.learn(total_timesteps=total_timesteps2, on_step=_lbklac_on_step)
+            else:
+                if lstm_callback is not None and USE_LSTM:
+                    model.learn(total_timesteps=total_timesteps2, callback=lstm_callback)
+                else:
+                    model.learn(total_timesteps=total_timesteps2)
             training_time = timeit.default_timer() - start_time
             log_training_row("train", step_idx=global_step, training_time=training_time)
             try:
@@ -1014,7 +1760,14 @@ def main(algorithm2, mode2):
                 state_keys = list(state_action_reward_collect_for_evaluate.keys())
                 number_of_state_key = 0
                 for _ in range(1):
-                    average_reward, deviation = evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
+                    if algorithm == 'LBKLAC':
+                        average_reward, deviation = _lbklac_eval(model, env, iteration_numbers_unit)
+                    elif USE_LSTM:
+                        average_reward, deviation = evaluate_recurrent_policy(model, env, n_eval_episodes=iteration_numbers_unit)
+                    elif sb3_evaluate_policy is not None:
+                        average_reward, deviation = sb3_evaluate_policy(model, env, n_eval_episodes=iteration_numbers_unit, render=False)
+                    else:
+                        average_reward, deviation = -1000, -1000
                     print('congestion_terminal_mean_list', congestion_terminal_mean_list, average_reward, deviation)
             rolling_avg = sum(recent_rewards) / len(recent_rewards) if recent_rewards else -1000
             log_training_row(
@@ -1061,6 +1814,11 @@ def main(algorithm2, mode2):
             # Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.iloc[0:0]
             # clear_pairs_done = 1
 
+            if USE_LSTM:
+                lstm_state = None
+                lstm_episode_start = True
+                lstm_impl_step = 0
+
             while True:
                 while True:
                     if os.path.exists(get_stop_flag_path()):
@@ -1089,11 +1847,35 @@ def main(algorithm2, mode2):
                 print('obs', obs)
                 # while True:
                 implementation_start_time = timeit.default_timer()
-                action, _states = model.predict(obs)
-                try:
-                    action_scalar = int(np.array(action).squeeze())
-                except Exception:
-                    action_scalar = action
+                if algorithm == 'LBKLAC':
+                    act_info = model.act(obs, deterministic=True)
+                    action_scalar = int(act_info.get("action", 0))
+                else:
+                    if USE_LSTM:
+                        action, lstm_state = model.predict(
+                            obs,
+                            state=lstm_state,
+                            episode_start=np.array([lstm_episode_start], dtype=bool),
+                            deterministic=True,
+                        )
+                        try:
+                            action_scalar = int(np.array(action).squeeze())
+                        except Exception:
+                            action_scalar = int(action)
+                        lstm_impl_step += 1
+                        if int(LSTM_CHAIN_LEN) > 1 and lstm_impl_step % int(LSTM_CHAIN_LEN) == 0:
+                            lstm_episode_start = True
+                            lstm_state = None
+                        else:
+                            lstm_episode_start = False
+                    elif _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
+                        action_scalar, _hat_info = _hat_select_action(model, obs)
+                    else:
+                        action, _states = model.predict(obs)
+                        try:
+                            action_scalar = int(np.array(action).squeeze())
+                        except Exception:
+                            action_scalar = action
                 # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
                 #     print('wrong...')
                 # #check_RL_ALNS_iteraction_bug()
@@ -1117,6 +1899,38 @@ def main(algorithm2, mode2):
                 # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                 #     print('gesa')
                 #check_RL_ALNS_iteraction_bug()
+                if algorithm == 'LBKLAC':
+                    try:
+                        n_state, reward, done, info = env.step(action_scalar)
+                        _ = n_state, done
+                        step_metrics = model.observe(
+                            obs,
+                            action_scalar,
+                            reward,
+                            n_state,
+                            tokens=act_info.get("tokens"),
+                            old_logp=float(act_info.get("logp", 0.0)),
+                            record=False,
+                            update=False,
+                        )
+                        payload = {
+                            "action": action_scalar,
+                            "reward": float(reward),
+                            "action_prob": float(act_info.get("action_prob", 0.0)),
+                            "entropy": float(act_info.get("entropy", 0.0)),
+                            "info": info if isinstance(info, dict) else {},
+                        }
+                        payload.update(step_metrics)
+                        _lbklac_on_step(payload)
+                    except Exception as e:
+                        print("LBKLAC implement step error", e)
+                    try:
+                        Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.iloc[0:0]
+                    except Exception:
+                        pass
+                    Intermodal_ALNS34959.ALNS_implement_start_RL_can_move = 0
+                    clear_pairs_done = 1
+                    continue
                 send_action(action_scalar)
                 #check_RL_ALNS_iteraction_bug()
                 # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
@@ -1135,6 +1949,16 @@ def main(algorithm2, mode2):
                         # clear all data in pairs
                         if os.path.exists(get_stop_flag_path()):
                             sys.exit(78)
+                        _flush_impl_reward_lists(env)
+                        if _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
+                            try:
+                                if len(Intermodal_ALNS34959.state_reward_pairs) > 0:
+                                    reward_hat = float(Intermodal_ALNS34959.state_reward_pairs.iloc[0]["reward"])
+                                    if reward_hat != -10000000:
+                                        _hat_update_stats(reward_hat, action_scalar)
+                                        _hat_update_history_wrapper(env, action_scalar, reward_hat)
+                            except Exception:
+                                pass
                         #check_RL_ALNS_iteraction_bug()
                         ALNS_got_action_in_implementation = 0
                         Intermodal_ALNS34959.state_reward_pairs = Intermodal_ALNS34959.state_reward_pairs.iloc[0:0]

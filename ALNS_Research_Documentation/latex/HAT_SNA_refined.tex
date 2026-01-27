@@ -1,0 +1,330 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{ctex}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\setlength{\parskip}{0.6em}
+\setlength{\parindent}{0pt}
+
+\title{基于历史注意力的非平稳单步决策改进：PPO/A2C 的 HAT--SNA 方法与工程实现}
+\author{项目：ALNS+RL 双线程系统（34959）}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{汇报目的与结论}
+本文件用于向老师汇报：我们在现有 ALNS+RL 双线程系统中，\textbf{在不改动 SB3(PPO/A2C) 核心优化器的前提下}，通过\textbf{历史包装器(History) + 注意力特征提取(Attention)}增强策略对非平稳分布突变的适应性，并给出实现逻辑、公式与复现实验信息。
+
+\textbf{命名：}HAT = History-Attention Transform；SNA = Simple Nonstationarity Adaptation（漂移感知调度 + 推理期门控；红阶段严格无梯度更新）。
+
+\textbf{最关键改动点：}将原始低维观测 $o_t$ 扩展为长度为 $H$ 的历史序列 $X_t$，并用轻量 Transformer 编码为上下文特征 $f_t$，再交给 SB3 的 actor/critic 网络；同时在\textbf{单步 episode} 场景下通过 \textbf{keep\_history} 机制让历史跨 reset 保留，使模型在 episode\_length=1 时仍能形成有效的 $h_t$。
+
+\subsection{读者快速指南：把 HAT 当作一个“戴帽子算子”}
+为了便于直观理解，可以把 HAT 看作一个将“原始观测”映射为“增强观测”的算子：
+\begin{align}
+\hat o_t \;:=\; \mathcal{H}_\psi(X_t),\qquad 
+\pi_\theta(a_t\mid o_t)\ \Rightarrow\ \pi_\theta(a_t\mid \hat o_t).
+\end{align}
+其中 $X_t\in\mathbb{R}^{H\times(d+5)}$ 是由最近 $H$ 步的（观测、动作、回报）拼接得到的历史序列；$\mathcal{H}_\psi$ 由轻量 Transformer 实现，输出 $\hat o_t\in\mathbb{R}^F$（实现中 $F=64$），再交给 SB3 原生的 actor/critic。
+
+\textbf{类比（理解层面，不是严格等同）：}在回归/实变函数语境里，“戴帽子”常表示\emph{投影/平滑/条件化}后的量：例如最小二乘的拟合值 $\hat y=\mathbf{H}_{\mathrm{LS}}y$（$\mathbf{H}_{\mathrm{LS}}$ 常被称为 hat matrix），以及概率论（勒贝格积分）中条件期望 $\mathbb{E}[Y\mid\mathcal{F}]$ 在 $L^2$ 意义下可视为对由 $\mathcal{F}$ 生成闭子空间的正交投影。我们的 HAT 也可理解为：\emph{在仅能使用历史信息 $\sigma(X_t)$ 的条件下，学习一个“足够好用”的压缩表示 $\hat o_t$，使策略能据此区分隐藏模式变化带来的决策差异。}
+\textbf{注意：}这里的 $\mathbf{H}_{\mathrm{LS}}$ 与历史长度 $H$ 只是符号巧合，含义无关。
+
+\textbf{一句人话：}HAT 不改 PPO/A2C 的“发动机”，而是在发动机前面加一个“记忆+摘要器”，把最近发生的事先总结成特征向量再做决策。
+
+
+\textbf{直观证据：}以同一场景（R30, S5, seed=42）为例，A2C 基线在测试阶段 200 次决策的平均回报约为 0.505，而 A2C\_HAT\_SNA 达到约 0.805（详见 \S\ref{sec:results}）。
+
+\section{问题设置：单步决策 + 隐含非平稳模式}
+\subsection{系统交互（ALNS+RL 双线程）}
+系统由 ALNS 线程生成决策点状态并阻塞式等待 RL 决策；RL 线程输出动作后由 ALNS 计算并回填奖励。每个决策为单步 episode：
+\begin{itemize}
+  \item 动作空间：$a_t \in \{0,1\}$（例如 \texttt{wait/keep} vs \texttt{reroute}）。
+  \item 奖励：$r_t \in \{0,1\}$（二值成功/失败反馈）。
+  \item 观测：$o_t \in \mathbb{R}^d$（低维，包含如 \texttt{delay\_tolerance}、\texttt{severity} 等；严禁使用显式 regime 标签作为输入）。
+\end{itemize}
+
+\subsection{非平稳性：隐藏模式分段稳定并突变}
+环境存在隐藏模式 $z_t$（分段稳定、突变），RL 只能通过历史 $h_t$ 推断：
+\begin{align}
+z_t &\sim \text{piecewise-constant process}, \\
+o_t &\sim p(o \mid z_t), \qquad r_t \sim p(r \mid o_t, a_t, z_t).
+\end{align}
+由于 episode\_length=1，若每次 reset 都清空历史，则策略退化为纯 contextual bandit：$\pi(a\mid o_t)$ 无法利用跨时信息识别 $z_t$，从而对突变适应极慢。
+
+\subsection{符号与维度速查（阅读公式时用）}
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+符号 & 含义 \\
+\midrule
+$o_t\in\mathbb{R}^d$ & 第 $t$ 次决策时的观测（obs），$d$ 为原始观测维度 \\
+$a_t\in\{0,1\}$ & 第 $t$ 次动作（0/1 二元决策） \\
+$r_t\in\{0,1\}$ & 第 $t$ 次动作对应的奖励（成功/失败） \\
+$e(a)\in\{0,1\}^2$ & 动作的 one-hot 编码 \\
+$s_t\in\{0,1\}^2$ & stage one-hot: removal=[1,0], insertion=[0,1], unknown=[0,0] \\
+$x_t\in\mathbb{R}^{d+5}$ & token: $[o_t;\ e(a_{t-1});\ r_{t-1};\ s_t]$ (no future leakage) \\
+$X_t\in\mathbb{R}^{H\times(d+5)}$ & 最近 $H$ 个 token 堆叠形成的历史序列输入 \\
+$\mathcal{H}_\psi$ & HAT 的历史注意力编码器（Transformer） \\
+$f_t=\hat o_t\in\mathbb{R}^F$ & 编码后的特征向量（SB3 policy 的实际输入） \\
+$\bar r_t,\bar d_t$ & SNA 的运行态统计：奖励均值与漂移强度（EMA） \\
+\bottomrule
+\end{tabular}
+\caption{本文常用符号速查。}
+\end{table}
+
+
+\section{基线：SB3 的 PPO / A2C（保持不改）}
+\subsection{Actor--Critic 基本形式}
+我们复用 stable-baselines3 的 PPO/A2C 实现。对任意时刻 $t$，策略与价值函数为：
+\begin{align}
+\pi_\theta(a_t \mid s_t) \quad\text{与}\quad V_\phi(s_t),
+\end{align}
+其中 $s_t$ 为输入特征（基线为 $s_t=o_t$，本文改进为 $s_t=f_t$）。
+
+\subsection{单步 episode 下的优势}
+在单步 episode（done 每步为真）条件下，回报目标自然为：
+\begin{align}
+G_t = r_t, \qquad A_t \approx r_t - V_\phi(s_t).
+\end{align}
+SB3 内部仍使用通用的 GAE/TD 形式，但由于 done 信号每步截断，实际训练信号接近上述单步优势。
+
+\subsection{A2C 的损失（SB3 原生，本文不修改）}
+以单步优势为例，A2C 的典型目标可写为最小化：
+\begin{align}
+\mathcal{L}_{\text{A2C}}(\theta,\phi)
+&=
+\underbrace{-\mathbb{E}_t\bigl[\log \pi_\theta(a_t \mid s_t)\,A_t\bigr]}_{\text{policy loss}}
++ c_V \underbrace{\mathbb{E}_t\bigl[(V_\phi(s_t)-G_t)^2\bigr]}_{\text{value loss}}
+- c_H \underbrace{\mathbb{E}_t\bigl[\mathcal{H}(\pi_\theta(\cdot\mid s_t))\bigr]}_{\text{entropy bonus}}.
+\end{align}
+其中 $\mathcal{H}(\cdot)$ 为熵，$c_V,c_H$ 为系数。本文的 HAT 只改变 $s_t$ 的构造方式（从 $o_t$ 变为 $f_t$），不改 A2C 的优化目标与更新流程。
+
+\subsection{PPO 的 clipped 目标（SB3 原生，本文不修改）}
+PPO 的核心为 clipped surrogate objective。令重要性比率
+\begin{align}
+\rho_t(\theta)=\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)},
+\end{align}
+则其策略目标可写为：
+\begin{align}
+\mathcal{L}^{\text{clip}}_{\text{PPO}}(\theta)
+=
+\mathbb{E}_t\left[
+\min\left(
+\rho_t(\theta)A_t,\;
+\text{clip}(\rho_t(\theta),1-\epsilon,1+\epsilon)A_t
+\right)
+\right],
+\end{align}
+并配合 value loss 与 entropy bonus 组成总目标。本文的 HAT 同样只改变 $s_t$（输入特征），不改 PPO 的核心裁剪机制。
+
+\section{HAT：History + Attention 的模型层改进}
+\label{sec:hat}
+\subsection{动机：让策略看到 $h_t$ 而非只看 $o_t$}
+我们将任务视为 POMDP：\textbf{单步 episode 只是“每次只做一次动作”的执行方式}，并不意味着信息也只有一步。非平稳的线索往往体现在“最近连续成功/失败、动作是否失效”等跨步模式中，因此我们显式构造固定窗口历史：
+\begin{align}
+h_t = \bigl(o_{t-H+1}, a_{t-H}, r_{t-H}, \ldots, o_t \bigr),
+\end{align}
+并学习一个上下文编码器 $f_t = g_\psi(h_t)$，让 actor/critic 都在 $f_t$ 上工作。
+
+\subsection{HistoryAttentionWrapper：历史序列化（无未来泄漏）}
+我们定义动作 one-hot 编码：
+\begin{align}
+e(a) \in \{0,1\}^2,\quad e(a)[a]=1.
+\end{align}
+构造 token（只使用\textbf{过去}的动作与回报，不使用未来信息）：
+\begin{align}
+x_t = \bigl[\,o_t;\; e(a_{t-1});\; r_{t-1};\; s_t \,\bigr] \in \mathbb{R}^{d+2+1+2}.
+\end{align}
+将最近 $H$ 个 token 堆叠得到输入序列（不足 $H$ 时零填充）：
+\begin{align}
+X_t = [x_{t-H+1}, \ldots, x_t] \in \mathbb{R}^{H\times (d+5)}.
+\textbf{Stage one-hot:} $s_t$ is provided by ALNS (removal/insertion) to disambiguate action semantics; no regime labels are used.
+\end{align}
+\textbf{数据泄漏约束：}任何显式的分布真值标签（例如 phase\_label/regime\_id 等）\textbf{仅用于日志与评估}，不进入 $o_t$/$x_t$/$X_t$。
+\textbf{关键工程点：}由于 episode\_length=1，环境会频繁调用 reset。为避免历史被清空，我们引入 \texttt{keep\_history} 开关：当其为真时，reset 不清空历史队列，从而跨 episode 维护 $X_t$。
+
+\textbf{为什么这一步是“生死线”：}如果每次 reset 都清空历史，那么对策略而言输入永远只包含“当前这一步”，注意力模块看不到跨步模式，HAT 会退化为对单步 obs 的一次普通非线性变换。打开 \texttt{keep\_history} 后，尽管环境从接口上仍是单步 episode，策略却拥有连续的“经验片段”，从而真正具备识别突变的能力。
+
+
+\begin{algorithm}[H]
+\caption{HistoryAttentionWrapper（核心逻辑）}
+\begin{algorithmic}[1]
+\State 初始化：队列 $\mathcal{D}\leftarrow [\;]$（最大长度 $H$），$\texttt{last\_a}\leftarrow \mathbf{0}$，$\texttt{last\_r}\leftarrow 0$
+\Function{Reset}{}
+\State $o \leftarrow \texttt{env.reset()}$
+\If{\texttt{keep\_history} 为假 或 $\mathcal{D}$ 为空}
+\State 清空 $\mathcal{D}$，重置 $\texttt{last\_a},\texttt{last\_r}$
+\EndIf
+\State append $x=[o;\texttt{last\_a};\texttt{last\_r};s]$ to $\mathcal{D}$
+\State \Return $\texttt{stack\_and\_pad}(\mathcal{D}) \in \mathbb{R}^{H\times(d+5)}$
+\EndFunction
+\Function{Step}{$a$}
+\State $(o', r, done, info) \leftarrow \texttt{env.step}(a)$
+\State $\texttt{last\_a}\leftarrow e(a)$，$\texttt{last\_r}\leftarrow r$
+\State append $x'=[o';\texttt{last\_a};\texttt{last\_r};s']$ to $\mathcal{D}$
+\State \Return $(\texttt{stack\_and\_pad}(\mathcal{D}), r, done, info)$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{AttentionExtractor：轻量 Transformer 编码历史}
+给定 $X_t \in \mathbb{R}^{H\times D}$（$D=d+5$），先线性嵌入并加位置编码：
+\begin{align}
+u_i &= W_e x_i + b_e,\quad p_i \in \mathbb{R}^{m}, \\
+v_i &= u_i + p_i,\qquad i=1,\ldots,H.
+\end{align}
+对每一层 Transformer self-attention（以单头为例）：
+\begin{align}
+Q &= V W_Q,\quad K = V W_K,\quad V' = V W_V,\\
+\mathrm{Attn}(Q,K,V') &= \mathrm{softmax}\left(\frac{QK^\top}{\sqrt{m}}\right)V'.
+\end{align}
+多头注意力与前馈网络堆叠 $L$ 层后，取最后一个 token 的表示作为 pooled 上下文：
+\begin{align}
+c_t &= \mathrm{TransformerEncoder}(X_t)_{H},\\
+f_t &= W_p c_t + b_p \in \mathbb{R}^{F}.
+\end{align}
+其中 $F$ 为输出特征维度（我们实现中默认 $F=64$），作为 SB3 policy 的特征输入。
+
+\textbf{要点：}attention 的作用不是追求“复杂”，而是提供一种\textbf{可学习的历史聚合}：模型可以在非平稳突变后，依靠历史 token 的统计变化来重构隐模式 $z_t$ 的“证据”，从而改变策略输出。
+
+\section{SNA：非平稳增强（训练期调参 + 推理期门控）}
+
+\textbf{直观类比：}如果把 PPO/A2C 看作一辆“稳稳开”的车，那么它的稳定性来源于保守更新（例如 PPO 的 clip、A2C 的较弱探索）。在环境突变时，保守反而会导致“反应迟钝”。SNA 的目标不是另造一辆车，而是在不破坏发动机的前提下加两个小装置：训练期临时松一点“安全带”（更快改策略），推理期临时改变“判定阈值”（同一个概率输出，用更激进/更保守的规则翻译成动作）。
+
+\label{sec:sna}
+\subsection{漂移统计（EMA）}
+
+漂移统计只依赖最近的奖励序列，不参与反向传播，也不会改变网络参数。其作用类似“体温计”：当模型的近期表现下降或波动增大时，给后续的调度与门控提供触发信号。
+
+为了在不改变主优化器的情况下增强非平稳适应，我们引入运行态统计量（不是网络参数）：
+\begin{align}
+\bar r_t &= (1-\alpha)\bar r_{t-1} + \alpha r_t,\\
+d_t &= |r_t - \bar r_t|,\\
+\bar d_t &= (1-\alpha)\bar d_{t-1} + \alpha d_t,
+\end{align}
+其中 $\alpha\in(0,1)$ 为 EMA 系数。
+
+\subsection{训练阶段：漂移感知的超参缩放（不改梯度公式）}
+当检测到更大的 $\bar d_t$ 时，我们对 SB3 算法的部分超参做温和放缩（\textbf{仅训练阶段}生效）：
+\begin{itemize}
+  \item PPO：增大 $\texttt{clip\_range}$ 与 $\texttt{target\_kl}$（更允许策略变化，缩短适应延迟）；
+  \item A2C：增大 $\texttt{ent\_coef}$（增加探索，避免在旧分布下过早“锁死”动作偏好）。
+\end{itemize}
+放缩形式可以写为：
+\begin{align}
+\eta_t = \min(\eta_{\max}, 1 + s \cdot \bar d_t), \qquad \text{hyperparam}_t = \text{hyperparam}_0 \cdot \eta_t,
+\end{align}
+其中 $s$ 为尺度系数，$\eta_{\max}$ 限制最大放大倍率。
+
+\subsection{实施阶段（红阶段）：严格冻结，只有推理期自适应}
+系统硬约束要求红阶段\textbf{禁止任何梯度/优化器更新}。因此我们仅允许\textbf{纯前向}机制改变最终动作。
+我们使用一个简单的门控阈值规则（不改变网络参数）：
+\begin{align}
+g_t &= \mathbb{I}\!\left[\bar d_t > d_{\text{hi}} \;\;\text{or}\;\; \bar r_t < r_{\text{low}}\right],\\
+\tau_t &= \begin{cases}
+\tau_{\text{low}}, & g_t=1 \\
+\tau_{\text{high}}, & g_t=0
+\end{cases},\\
+a_t &= \mathbb{I}\!\left[p_\theta(a=1\mid X_t) \ge \tau_t\right].
+\end{align}
+其中 $p_\theta(a=1\mid X_t)$ 来自冻结策略网络的输出概率。该机制属于 inference-time adaptation：\textbf{不更新参数，但允许基于历史统计改变动作判别阈值}。
+
+\textbf{重要澄清：}门控不会改变策略网络输出的概率 $p_\theta(\cdot)$（网络参数冻结，输出分布不变），改变的只是“如何把概率翻译成动作”的规则：同一个 $p_\theta(a=1\mid X_t)$，在漂移时用更低的阈值使动作 1 更容易触发；在稳定时用更高阈值维持保守性。
+
+
+
+
+\begin{algorithm}[H]\small
+\caption{SNA 推理期门控（红阶段，无梯度）}
+\begin{algorithmic}[1]
+\State 输入：冻结策略输出概率 $p_t = p_\theta(a=1\mid X_t)$，最新奖励 $r_t$（若可得），统计量 $(\bar r_{t-1},\bar d_{t-1})$
+\State 更新统计：$\bar r_t \leftarrow (1-\alpha)\bar r_{t-1}+\alpha r_t$；$\bar d_t \leftarrow (1-\alpha)\bar d_{t-1}+\alpha|r_t-\bar r_t|$
+\State 触发判定：$g_t \leftarrow \mathbb{I}[\bar d_t>d_{\text{hi}}\ \textbf{or}\ \bar r_t<r_{\text{low}}]$
+\State 阈值选择：$\tau_t \leftarrow \tau_{\text{low}}$ if $g_t=1$ else $\tau_{\text{high}}$
+\State 输出动作：$a_t \leftarrow \mathbb{I}[p_t \ge \tau_t]$
+\end{algorithmic}
+\end{algorithm}
+\textbf{说明：}如果实施阶段系统侧不提供逐步 reward 回传到 RL 线程，则 $\bar r_t,\bar d_t$ 只能在训练/评估阶段更新（门控在红阶段退化为“使用最后一次统计”）。这属于系统接口层面限制，与 HAT 的模型能力无冲突。
+
+\section{工程实现：文件、开关与复现实验}
+\subsection{关键代码组件（对应本仓库）}
+\begin{itemize}
+  \item \textbf{历史 + 注意力模块：}\texttt{codes/robust\_rl/sb3\_attention.py}
+    \begin{itemize}
+      \item \texttt{HistoryAttentionWrapper}: $H\times(d+5)$ tokens with \texttt{keep\_history} and stage one-hot.
+      \item \texttt{AttentionExtractor}: TransformerEncoder + last-token pooling，输出 $F$ 维特征给 SB3。
+    \end{itemize}
+  \item \textbf{训练/实施主逻辑与集成：}\texttt{codes/dynamic\_RL34959.py}
+    \begin{itemize}
+      \item 当环境变量 \texttt{RL\_HAT=1} 且算法为 PPO/A2C 时，自动包裹 env 并注入 \texttt{policy\_kwargs}。
+      \item 训练阶段调用 \texttt{model.learn(...)}（SB3 原生），只改变输入特征与少量超参调度（SNA）。
+      \item 实施阶段保持 \textbf{no online learning}；动作选择可使用阈值门控版本（SNA 的 inference 部分）。
+    \end{itemize}
+  \item \textbf{运行入口与算法名映射：}\texttt{codes/Dynamic\_master34959.py}
+    \begin{itemize}
+      \item 支持 \texttt{--algorithm PPO\_HAT} / \texttt{A2C\_HAT}（以及对应 run 命名），内部设置 \texttt{RL\_HAT=1} 并选择 SB3 基算法。
+    \end{itemize}
+\end{itemize}
+
+\subsection{关键超参（默认值）}
+HAT（模型层）：
+\begin{itemize}
+  \item 历史长度：$H=20$（\texttt{HATConfig.history\_len}）
+  \item Transformer：层数 $L=2$，heads=2，embed\_dim=64，dropout=0.1
+  \item 输出特征维：$F=64$（\texttt{HATConfig.feature\_dim}）
+  \item keep\_history：默认开启（适配 episode\_length=1）
+\end{itemize}
+SNA（运行态统计/调度）：
+\begin{itemize}
+  \item EMA 系数：$\alpha=0.05$（\texttt{HAT\_EMA\_ALPHA}）
+  \item 门控阈值：$d_{\text{hi}}=0.2$，$r_{\text{low}}=0.6$（\texttt{HAT\_GATE\_DRIFT\_HI}, \texttt{HAT\_GATE\_REWARD\_LOW}）
+  \item 推理期阈值：$\tau_{\text{high}}=0.55$，$\tau_{\text{low}}=0.35$（\texttt{HAT\_TAU\_HIGH}, \texttt{HAT\_TAU\_LOW}）
+  \item 调度倍率：$s=1.5$，$\eta_{\max}=3.0$（\texttt{HAT\_DRIFT\_SCALE}, \texttt{HAT\_DRIFT\_MAX\_SCALE}）
+\end{itemize}
+
+\subsection{复现实验命令（示例）}
+\begin{verbatim}
+python codes/Dynamic_master34959.py \
+  --dist_name S5_1 --request_number 30 \
+  --algorithm A2C_HAT --seed 42 --workers 1
+
+python codes/Dynamic_master34959.py \
+  --dist_name S5_1 --request_number 30 \
+  --algorithm A2C --seed 42 --workers 1
+\end{verbatim}
+每次运行会生成独立 run 目录：\texttt{codes/logs/run\_*/}，包含 \texttt{rl\_trace.csv}、\texttt{rl\_training.csv}、\texttt{rl\_summary.csv} 等。
+
+\section{结果示例（A2C vs A2C\_HAT\_SNA）}
+\label{sec:results}
+我们以两次 run 的 \texttt{rl\_summary.csv} 为例（测试阶段 200 次决策统计）：
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+方法 & 平均回报 & 标准差 & 决策数 \\
+\midrule
+A2C（baseline, S5, R30, seed42） & 0.505 & 0.500 & 200 \\
+A2C\_HAT\_SNA（S5, R30, seed42） & 0.805 & 0.396 & 200 \\
+\bottomrule
+\end{tabular}
+\caption{测试阶段平均回报对比（来自对应 run 的 \texttt{rl\_summary.csv}）。}
+\end{table}
+
+\textbf{解读：}在该场景中，HAT 通过历史序列与注意力聚合形成上下文特征，使策略能依据近期观测/行动/回报模式做更一致的选择，从而显著提高测试阶段平均回报。
+
+\section{边界与已知限制（如需老师进一步指导的点）}
+\begin{itemize}
+  \item 若红阶段不提供逐步 reward 回传，任何基于 reward 的门控/漂移检测都无法在线更新，只能依赖观测统计或训练期学习出的内部表征。
+  \item 当前 HAT 使用固定窗口 $H$ 与 last-token pooling；后续可以探索更强的池化（attention pooling）或多专家头（MoE）以进一步缩短突变后的翻转延迟（仍保持红阶段无梯度更新）。
+\end{itemize}
+
+\end{document}
