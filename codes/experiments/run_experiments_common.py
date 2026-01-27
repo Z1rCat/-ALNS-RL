@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parents[2]
 CODES_DIR = ROOT_DIR / "codes"
 LOG_ROOT = CODES_DIR / "logs"
 
@@ -232,6 +232,7 @@ class ExperimentConfig:
     generator_workers: int = 1
     max_workers: Optional[int] = None
     run_baseline: bool = True
+    baseline_include_random: bool = False
     run_plots: bool = True
     run_metrics: bool = True
     cleanup_after_run: bool = False
@@ -271,6 +272,134 @@ def run_command(cmd: List[str], cwd: Optional[Path] = None) -> int:
     return proc.returncode
 
 
+def _write_run_status(run_dir: Path, payload: Dict[str, Any]) -> None:
+    try:
+        payload = dict(payload)
+        payload.setdefault("ts", time.time())
+        (run_dir / "run_status.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _append_watchdog_event(run_dir: Path, payload: Dict[str, Any]) -> None:
+    try:
+        payload = dict(payload)
+        payload.setdefault("ts", time.time())
+        with (run_dir / "watchdog_events.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _write_failed_marker(run_dir: Path, stage: str, code: Optional[int] = None) -> None:
+    try:
+        payload: Dict[str, Any] = {"stage": stage, "status": "failed"}
+        if code is not None:
+            payload["exit_code"] = int(code)
+        payload["ts"] = time.time()
+        (run_dir / "FAILED.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _rotate_baseline_files(run_dir: Path, attempt: int) -> None:
+    for path in run_dir.glob("baseline_*.csv"):
+        suffix = f".attempt{attempt}"
+        try:
+            path.rename(path.with_name(path.name + suffix))
+        except Exception:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+
+def _resolve_baseline_watch_files(run_dir: Path) -> List[Path]:
+    return [
+        run_dir / "baseline_wait.csv",
+        run_dir / "baseline_reroute.csv",
+        run_dir / "baseline_random.csv",
+    ]
+
+
+def _cleanup_baseline_attempts(run_dir: Path) -> None:
+    for path in run_dir.glob("baseline_*.csv.attempt*"):
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def _run_with_watchdog(
+    cmd: List[str],
+    cwd: Optional[Path],
+    *,
+    run_dir: Path,
+    stage: str,
+    watch_files: List[Path],
+    stall_s: float,
+    startup_s: float,
+    min_bytes: int,
+    poll_s: float = 5.0,
+) -> int:
+    proc = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None)
+    _write_run_status(run_dir, {"stage": stage, "status": "running", "pid": proc.pid})
+    _append_watchdog_event(run_dir, {"stage": stage, "event": "start", "pid": proc.pid})
+
+    last_sizes: Dict[Path, int] = {p: -1 for p in watch_files}
+    last_growth_ts = time.monotonic()
+    start_ts = last_growth_ts
+
+    while True:
+        code = proc.poll()
+        if code is not None:
+            _write_run_status(run_dir, {"stage": stage, "status": "finished", "exit_code": code})
+            _append_watchdog_event(run_dir, {"stage": stage, "event": "exit", "code": code})
+            return int(code)
+
+        now = time.monotonic()
+        max_size = 0
+        for path in watch_files:
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                size = 0
+            max_size = max(max_size, size)
+            prev = last_sizes.get(path, -1)
+            if size > prev:
+                last_sizes[path] = size
+                last_growth_ts = now
+
+        if now - start_ts >= startup_s and now - last_growth_ts >= stall_s and max_size <= min_bytes:
+            _append_watchdog_event(
+                run_dir,
+                {
+                    "stage": stage,
+                    "event": "stall_timeout",
+                    "stall_s": stall_s,
+                    "startup_s": startup_s,
+                    "min_bytes": min_bytes,
+                    "max_size": max_size,
+                },
+            )
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            _write_run_status(run_dir, {"stage": stage, "status": "killed", "reason": "stall_timeout"})
+            return 124
+
+        time.sleep(poll_s)
+
+
 def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run: bool) -> Tuple[str, str]:
     dist_name, request_number, algorithm, seed = task
     run_name = build_run_name(dist_name, request_number, algorithm, seed)
@@ -296,30 +425,32 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
 
     baseline_cmd = [
         sys.executable,
-        str(CODES_DIR / "run_benchmark_replay.py"),
+        str(CODES_DIR / "experiments" / "run_benchmark_replay.py"),
         "--run-dir",
         str(run_dir),
         "--policy",
         "all",
     ]
+    if config.baseline_include_random:
+        baseline_cmd.append("--include-random")
 
     plot_cmd = [
         sys.executable,
-        str(CODES_DIR / "plot_paper_figure.py"),
+        str(CODES_DIR / "plotting" / "plot_paper_figure.py"),
         "--run-dir",
         str(run_dir),
     ]
 
     metrics_cmd = [
         sys.executable,
-        str(CODES_DIR / "compute_metrics.py"),
+        str(CODES_DIR / "analysis" / "compute_metrics.py"),
         "--run-dir",
         str(run_dir),
     ]
 
     cleanup_cmd = [
         sys.executable,
-        str(CODES_DIR / "cleanup_run.py"),
+        str(CODES_DIR / "tools" / "cleanup_run.py"),
         "--run-dir",
         str(run_dir),
     ]
@@ -343,20 +474,91 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
     started_at = time.monotonic()
     status = "ok"
 
+    baseline_stall_s = float(os.environ.get("BASELINE_STALL_S", "600") or 600)
+    baseline_startup_s = float(os.environ.get("BASELINE_STARTUP_S", "300") or 300)
+    baseline_min_bytes = int(os.environ.get("BASELINE_MIN_BYTES", "4096") or 4096)
+    baseline_retries = int(os.environ.get("BASELINE_RETRIES", "3") or 3)
+    baseline_poll_s = float(os.environ.get("BASELINE_POLL_S", "5") or 5)
+
     try:
         t0 = time.monotonic()
+        _write_run_status(run_dir, {"stage": "master", "status": "running"})
         code = run_command(master_cmd, cwd=ROOT_DIR)
         stage_times["master_sec"] = time.monotonic() - t0
         if code != 0:
             status = "failed_master"
+            _write_failed_marker(run_dir, "master", code)
             return run_name, status
 
         if config.run_baseline:
-            t0 = time.monotonic()
-            code = run_command(baseline_cmd, cwd=ROOT_DIR)
-            stage_times["baseline_sec"] = time.monotonic() - t0
+            attempt = 0
+            code = 1
+            watch_files = _resolve_baseline_watch_files(run_dir)
+            while attempt <= baseline_retries:
+                attempt += 1
+                if attempt > 1:
+                    _rotate_baseline_files(run_dir, attempt)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "baseline",
+                        "event": "attempt_start",
+                        "attempt": attempt,
+                        "max_attempts": baseline_retries + 1,
+                    },
+                )
+                t0 = time.monotonic()
+                code = _run_with_watchdog(
+                    baseline_cmd,
+                    ROOT_DIR,
+                    run_dir=run_dir,
+                    stage="baseline",
+                    watch_files=watch_files,
+                    stall_s=baseline_stall_s,
+                    startup_s=baseline_startup_s,
+                    min_bytes=baseline_min_bytes,
+                    poll_s=baseline_poll_s,
+                )
+                stage_times[f"baseline_sec_attempt_{attempt}"] = time.monotonic() - t0
+                if code == 0:
+                    break
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "baseline",
+                        "event": "attempt_failed",
+                        "attempt": attempt,
+                        "exit_code": code,
+                    },
+                )
             if code != 0:
                 status = "failed_baseline"
+                _write_failed_marker(run_dir, "baseline", code)
+                (run_dir / "FAILED.json").write_text(
+                    json.dumps(
+                        {
+                            "stage": "baseline",
+                            "status": status,
+                            "attempts": attempt,
+                            "max_attempts": baseline_retries + 1,
+                            "exit_code": code,
+                            "reason": "stall_timeout" if code == 124 else "nonzero_exit",
+                            "ts": time.time(),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                return run_name, status
+
+        if config.run_metrics:
+            t0 = time.monotonic()
+            code = run_command(metrics_cmd, cwd=ROOT_DIR)
+            stage_times["metrics_sec"] = time.monotonic() - t0
+            if code != 0:
+                status = "failed_metrics"
+                _write_failed_marker(run_dir, "metrics", code)
                 return run_name, status
 
         if config.run_plots:
@@ -365,6 +567,7 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
             stage_times["plot_sec"] = time.monotonic() - t0
             if code != 0:
                 status = "failed_plot"
+                _write_failed_marker(run_dir, "plot", code)
                 return run_name, status
 
         monitor.stop()
@@ -382,24 +585,27 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
             parts.append(f"master={stage_times['master_sec']:.1f}s")
         print(f"[{config.name}] {run_name} resource: " + " | ".join(parts))
 
-        if config.run_metrics:
-            t0 = time.monotonic()
-            code = run_command(metrics_cmd, cwd=ROOT_DIR)
-            stage_times["metrics_sec"] = time.monotonic() - t0
-            if code != 0:
-                status = "failed_metrics"
-                return run_name, status
-
         if config.cleanup_after_run:
             t0 = time.monotonic()
             code = run_command(cleanup_cmd, cwd=ROOT_DIR)
             stage_times["cleanup_sec"] = time.monotonic() - t0
             if code != 0:
                 status = "failed_cleanup"
+                _write_failed_marker(run_dir, "cleanup", code)
                 return run_name, status
 
         return run_name, status
     finally:
+        try:
+            _cleanup_baseline_attempts(run_dir)
+        except Exception:
+            pass
+        try:
+            failed_marker = run_dir / "FAILED.json"
+            if status == "ok" and failed_marker.exists():
+                failed_marker.unlink()
+        except Exception:
+            pass
         monitor.stop()
 
 

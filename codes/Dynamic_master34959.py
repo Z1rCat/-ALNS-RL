@@ -8,10 +8,10 @@ import sys
 import argparse
 import json
 import subprocess
-import Dynamic_ALNS_RL34959
-import Intermodal_ALNS34959
-import dynamic_RL34959
-import rl_logging
+from core import Dynamic_ALNS_RL34959
+from core import Intermodal_ALNS34959
+from core import dynamic_RL34959
+from core import rl_logging
 import datetime
 import traceback
 
@@ -267,14 +267,39 @@ def select_algorithm():
     print("  [1] DQN")
     print("  [2] PPO")
     print("  [3] A2C")
+    print("  [4] DRCB (Drift-Robust Contextual Bandit)")
+    print("  [5] LBKLAC (Latent Belief KL-Regularized Actor-Critic)")
+    print("  [6] PPO_HAT (HAT: History-Attention Transform)")
+    print("  [7] A2C_HAT (HAT: History-Attention Transform)")
+    print("  [8] PPO_LSTM (RecurrentPPO + LSTM)")
+    print("  [9] PPO_HAT_LSTM (HAT + RecurrentPPO + LSTM)")
+    print("  [10] PPO_HAT_MOE (HAT + MoE(K=2) + PPO)")
+    print("  [11] A2C_HAT_MOE (HAT + MoE(K=2) + A2C)")
     print("=" * 50)
-    mapping = {"1": "DQN", "2": "PPO", "3": "A2C"}
+    mapping = {
+        "1": "DQN",
+        "2": "PPO",
+        "3": "A2C",
+        "4": "DRCB",
+        "5": "LBKLAC",
+        "6": "PPO_HAT",
+        "7": "A2C_HAT",
+        "8": "PPO_LSTM",
+        "9": "PPO_HAT_LSTM",
+        "10": "PPO_HAT_MOE",
+        "11": "A2C_HAT_MOE",
+    }
     while True:
         choice = input("请选择算法 (默认 1=DQN): ").strip()
         if choice == "":
             return "DQN"
-        if choice.upper() in mapping.values():
-            return choice.upper()
+        choice_upper = choice.upper()
+        if choice_upper == "HAT":
+            return "PPO_HAT"
+        if choice_upper in {"PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM"}:
+            return choice_upper
+        if choice_upper in mapping.values():
+            return choice_upper
         if choice in mapping:
             return mapping[choice]
         print("输入无效，请重新输入。")
@@ -289,6 +314,24 @@ def resolve_worker_count(args):
     if getattr(args, "single_core", False):
         return 1
     return None
+
+
+def resolve_algorithm(algorithm):
+    algo_label = (algorithm or "DQN").upper()
+    if algo_label == "HAT":
+        algo_label = "PPO_HAT"
+    hat_enabled = algo_label in {"PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_HAT_LSTM"}
+    if algo_label in {"PPO_HAT", "PPO_HAT_MOE"}:
+        base_algo = "PPO"
+    elif algo_label == "PPO_LSTM":
+        base_algo = "PPO_LSTM"
+    elif algo_label == "PPO_HAT_LSTM":
+        base_algo = "PPO_LSTM"
+    elif algo_label in {"A2C_HAT", "A2C_HAT_MOE"}:
+        base_algo = "A2C"
+    else:
+        base_algo = algo_label
+    return base_algo, hat_enabled, algo_label
 
 
 def collect_batch_plan(run_count, algorithm):
@@ -315,7 +358,7 @@ def run_generator(dist_name, request_number, workers=None, target_folder=None, s
         target_folder = LEGACY_FOLDER_NAME
     print(f"    目标文件夹: {target_folder}")
 
-    generator_script = os.path.join(os.path.dirname(__file__), "generate_mixed_parallel.py")
+    generator_script = os.path.join(os.path.dirname(__file__), "generation", "generate_mixed_parallel.py")
     if not os.path.exists(generator_script):
         print(f"错误：找不到生成器脚本 {generator_script}")
         sys.exit(1)
@@ -373,21 +416,28 @@ def run_simulation(request_number):
 
 
 def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=None, run_name=None):
+    base_algo, hat_enabled, algo_label = resolve_algorithm(algorithm)
     os.environ["SCENARIO_NAME"] = dist_name
-    os.environ["RL_ALGORITHM"] = algorithm
+    os.environ["RL_ALGORITHM"] = base_algo
+    os.environ["RL_HAT"] = "1" if hat_enabled else "0"
+    os.environ["RL_MOE"] = "1" if algo_label in {"PPO_HAT_MOE", "A2C_HAT_MOE"} else "0"
+    if algo_label in {"PPO_LSTM", "PPO_HAT_LSTM"}:
+        os.environ["RL_STAGE_IN_OBS"] = os.environ.get("RL_STAGE_IN_OBS", "1")
+    else:
+        os.environ["RL_STAGE_IN_OBS"] = os.environ.get("RL_STAGE_IN_OBS", "0")
     if seed is None:
         os.environ.pop("RL_SEED", None)
     else:
         os.environ["RL_SEED"] = str(seed)
     Dynamic_ALNS_RL34959.SCENARIO_NAME = dist_name
-    Dynamic_ALNS_RL34959.RL_ALGORITHM = algorithm
+    Dynamic_ALNS_RL34959.RL_ALGORITHM = base_algo
     dynamic_RL34959.SCENARIO_NAME = dist_name
     if run_name:
         run_id = run_name
     else:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         seed_tag = f"S{seed}" if seed is not None else "SNA"
-        run_id = f"run_{timestamp}_R{request_number}_{dist_name}_{algorithm}_{seed_tag}"
+        run_id = f"run_{timestamp}_R{request_number}_{dist_name}_{algo_label}_{seed_tag}"
     rl_logging.set_run_dir(run_id)
     stop_flag_path = str(rl_logging.get_run_dir() / "34959.txt")
     os.environ["STOP_FLAG_FILE"] = stop_flag_path
@@ -402,7 +452,9 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=No
         "distribution": dist_name,
         "request_number": request_number,
         "generator_workers": workers if workers is not None else "auto",
-        "algorithm": algorithm,
+        "algorithm": algo_label,
+        "hat_enabled": int(hat_enabled),
+        "hat_base": base_algo if hat_enabled else "",
         "seed": seed,
         "run_name": run_id,
         "curriculum_reward_threshold": curriculum_threshold,
@@ -450,9 +502,10 @@ def parse_args():
     parser.add_argument("--dist_name", type=str)
     parser.add_argument("--request_number", type=int)
     parser.add_argument("--run_count", type=int)
-    parser.add_argument("--algorithm", type=str, help="DQN/PPO/A2C")
+    parser.add_argument("--algorithm", type=str, help="DQN/PPO/A2C/PPO_HAT/A2C_HAT/PPO_LSTM/PPO_HAT_LSTM/HAT")
     parser.add_argument("--workers", type=int, help="generator workers (1=single core)")
     parser.add_argument("--single_core", action="store_true", help="force generator single core")
+    parser.add_argument("--parallel-runs", type=int, help="parallel run count when run_count > 1")
     parser.add_argument("--seed", type=int, help="random seed")
     parser.add_argument("--run-name", type=str, help="override run folder name")
     return parser.parse_args()
@@ -464,7 +517,10 @@ def main():
     algorithm = args.algorithm.upper() if args.algorithm else None
     seed = args.seed
     run_name = args.run_name
-    if algorithm is not None and algorithm not in {"DQN", "PPO", "A2C"}:
+    parallel_runs = int(args.parallel_runs) if args.parallel_runs else 1
+    if parallel_runs < 1:
+        parallel_runs = 1
+    if algorithm is not None and algorithm not in {"DQN", "PPO", "A2C", "DRCB", "LBKLAC", "PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "HAT"}:
         print(f"未知算法 {algorithm}，回退为 DQN")
         algorithm = "DQN"
 
@@ -475,9 +531,27 @@ def main():
         if run_count <= 1:
             run_single(args.dist_name, args.request_number, workers, algorithm, seed, run_name)
         else:
-            for idx in range(run_count):
-                child_run_name = f"{run_name}_{idx + 1}" if run_name else None
-                run_single_in_subprocess(args.dist_name, args.request_number, workers, algorithm, seed, child_run_name)
+            max_workers = min(run_count, parallel_runs)
+            if max_workers <= 1:
+                for idx in range(run_count):
+                    child_run_name = f"{run_name}_{idx + 1}" if run_name else None
+                    run_single_in_subprocess(args.dist_name, args.request_number, workers, algorithm, seed, child_run_name)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for idx in range(run_count):
+                        child_run_name = f"{run_name}_{idx + 1}" if run_name else None
+                        futures.append(executor.submit(
+                            run_single_in_subprocess,
+                            args.dist_name,
+                            args.request_number,
+                            workers,
+                            algorithm,
+                            seed,
+                            child_run_name,
+                        ))
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
         return
 
     if workers is None:
@@ -494,15 +568,33 @@ def main():
         return
 
     plan = collect_batch_plan(run_count, algorithm)
-    for idx, (dist_name, request_number, algorithm) in enumerate(plan, start=1):
-        dist_label = get_distribution_display_map().get(dist_name, dist_name)
-        print("")
-        print("=" * 50)
-        print(f">>> [批量计划] 正在运行第 {idx}/{run_count} 轮: 分布模式[{dist_label}] | R={request_number}")
-        print("=" * 50)
-        run_single_in_subprocess(dist_name, request_number, workers, algorithm, seed)
-
-
-
+    max_workers = min(run_count, parallel_runs)
+    if max_workers <= 1:
+        for idx, (dist_name, request_number, algorithm) in enumerate(plan, start=1):
+            dist_label = get_distribution_display_map().get(dist_name, dist_name)
+            print("")
+            print("=" * 50)
+            print(f">>> [batch] running {idx}/{run_count} dist[{dist_label}] | R={request_number}")
+            print("=" * 50)
+            run_single_in_subprocess(dist_name, request_number, workers, algorithm, seed)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for idx, (dist_name, request_number, algorithm) in enumerate(plan, start=1):
+                dist_label = get_distribution_display_map().get(dist_name, dist_name)
+                print("")
+                print("=" * 50)
+                print(f">>> [batch] scheduling {idx}/{run_count} dist[{dist_label}] | R={request_number}")
+                print("=" * 50)
+                futures.append(executor.submit(
+                    run_single_in_subprocess,
+                    dist_name,
+                    request_number,
+                    workers,
+                    algorithm,
+                    seed,
+                ))
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
 if __name__ == '__main__':
     main()

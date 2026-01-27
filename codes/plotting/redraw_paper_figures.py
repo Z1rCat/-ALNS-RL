@@ -19,18 +19,13 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUN_ROOT = REPO_ROOT / "codes" / "logs"
-DEFAULT_PLOT_SCRIPT = REPO_ROOT / "codes" / "plot_paper_figure.py"
+DEFAULT_PLOT_SCRIPT = REPO_ROOT / "codes" / "plotting" / "plot_paper_figure.py"
 
 DEFAULT_RUNS = [
-    "run_20260119_115025_846233_R30_S5_1_A2C_S42",
-    "run_20260119_233229_651769_R30_S5_1_A2C_S42",
-    "run_20260120_113326_895986_R30_S3_1_DQN_S42",
-    "run_20260120_113326_895986_R30_S5_1_DQN_S42",
-    "run_20260120_113326_897492_R30_S3_1_A2C_S42",
-    "run_20260120_123246_371223_R30_V1_3_DQN_S42",
-    "run_20260120_175128_674609_R30_V1_3_A2C_S42",
+
+"A:/MYpython/34959_RL/codes/logs/run_20260125_152317_780783_R30_S5_1_A2C_HAT_SNA"
 ]
 
 
@@ -129,4 +124,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

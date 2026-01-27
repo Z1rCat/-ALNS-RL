@@ -7,7 +7,7 @@ import json
 import threading
 from pathlib import Path
 
-LOG_ROOT = Path(__file__).resolve().parent / "logs"
+LOG_ROOT = Path(__file__).resolve().parent.parent / "logs"
 RUN_DIR = LOG_ROOT
 _LOCK = threading.Lock()
 

@@ -15,8 +15,18 @@ from pathlib import Path
 from time import process_time
 import networkx as nx
 import shutil
-from sympy.solvers import solve
-from sympy import Symbol, exp
+try:
+    from sympy.solvers import solve  # type: ignore
+    from sympy import Symbol, exp  # type: ignore
+except Exception:
+    solve = None
+    import math
+
+    def Symbol(name):  # type: ignore
+        return name
+
+    def exp(value):  # type: ignore
+        return math.exp(value)
 import sys
 from collections import defaultdict
 import zipfile
@@ -42,7 +52,7 @@ except ImportError:
             return func
         return wrapper
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def resolve_figures_dir():
     output_root = os.environ.get("ALNS_OUTPUT_ROOT", "").strip()
@@ -230,14 +240,19 @@ except ImportError:
                 return None
             return _noop
     ctrl = _DummyCtrl()
-import rl_logging
+from core import rl_logging
 
 # 日志字段定义（与 RL 侧保持一致）
 TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
     "table_number", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "action_meaning", "feasible", "source"
+    "action", "reward", "action_meaning", "feasible", "source",
+    # Drift/robustness interpretability fields (optional; safe to leave empty)
+    "algo", "regime_id", "context_id", "drift_score",
+    # LB-KLAC diagnostics
+    "belief_smooth_penalty", "value_residual", "delta_t", "policy_kl", "action_prob", "entropy",
+    "bootstrap", "trust_region_scaled", "trust_region_scale",
 ]
 
 def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source="ALNS"):
@@ -275,8 +290,14 @@ def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source=
             "reward": reward if reward is not None else row_dict.get("reward", ""),
             "action_meaning": action_meaning,
             "feasible": feasible,
-            "source": source
+            "source": source,
         }
+        # Keep drift fields consistent with RL side when available.
+        try:
+            if hasattr(dynamic_RL34959, "_drift_snapshot"):
+                payload.update(dynamic_RL34959._drift_snapshot())
+        except Exception:
+            pass
         rl_logging.append_row("rl_trace.csv", TRACE_FIELDS, payload)
     except Exception as e:
         print("log_rl_event error", e)
@@ -300,15 +321,15 @@ def log_impl_reward(reward):
         print("log_impl_reward error", e)
 #may cause bug list:
 #1. request_flow_t is not updated when finding best solution by hash table
-import fuzzy_HP
+from core import fuzzy_HP
 import psutil
 import openpyxl
 from shutil import copyfile
 from openpyxl import load_workbook
-from emission_models import Trip
+from core.emission_models import Trip
 import warnings
-import dynamic_RL34959
-import Dynamic_ALNS_RL34959
+from core import dynamic_RL34959
+from core import Dynamic_ALNS_RL34959
 # warnings.filterwarnings("error") #need to un-comment this if want to capture warning
 def print_k_that_serve_routes():
     for k in routes.keys():
@@ -9525,15 +9546,32 @@ def store_all(copy_state=0,new_row=0, action = -1,routes_copy=-1):
     else:
         return [my_deepcopy(routes), copy.copy(new_row), action]
 def get_vehicle_stop_time(R_change_dynamic_travel_time, index, route, col_congestion, duration):
+    # Guard against short/degenerate routes to avoid index errors in parallel runs.
+    # Fallback: use the last available row (or duration) when rows < 4.
+    try:
+        rows = int(route.shape[0])
+    except Exception:
+        try:
+            rows = len(route)
+        except Exception:
+            rows = 0
+    if rows < 2:
+        if not hasattr(get_vehicle_stop_time, "_warned_short_route"):
+            print("[warn] short route in get_vehicle_stop_time; fallback to duration")
+            get_vehicle_stop_time._warned_short_route = True
+        return duration[0] if len(duration) > 0 else 0
+    row1 = min(1, rows - 1)
+    row2 = min(2, rows - 1)
+    row3 = min(3, rows - 1)
     if R_change_dynamic_travel_time['location_type'][index] == 'link':
-        vehicle_stop_time = route[3][col_congestion]
+        vehicle_stop_time = route[row3][col_congestion]
     else:
-        if route[1][col_congestion] >= duration[0]:
-            vehicle_stop_time = route[1][col_congestion]
-        elif route[2][col_congestion] >= duration[0]:
+        if route[row1][col_congestion] >= duration[0]:
+            vehicle_stop_time = route[row1][col_congestion]
+        elif route[row2][col_congestion] >= duration[0]:
             vehicle_stop_time = duration[0]
         else:
-            vehicle_stop_time = route[3][col_congestion]#when service already starts, the event cannot influence it
+            vehicle_stop_time = route[row3][col_congestion]#when service already starts, the event cannot influence it
     return vehicle_stop_time
 
 def take_action_to_remove(k, R_change_dynamic_travel_time, index, col_congestion, influenced_r, congestion_link, congestion_node, vehicle_stop_time, pickup_terminal_for_replan_when_event_finish = -1, pickup_time_for_replan_when_event_finish = -1):
@@ -9986,6 +10024,10 @@ def prepare_for_dynamic():
                                             if influenced_passed_terminals[1] != -1:
                                                 print('more than one terminal is congested')
                                             new_row = pd.Series(data={'uncertainty_index': uncertainty_index, 'uncertainty_type': 'begin', 'request': influenced_r, 'vehicle': k, 'delay_tolerance': delay_tolerance, 'passed_terminals': influenced_passed_terminals, 'current_time': duration[0], 'action': -10000000, 'reward': -10000000})
+                                            try:
+                                                dynamic_RL34959.current_stage_label = "removal"
+                                            except Exception:
+                                                pass
                                             try:
                                                 log_rl_event(new_row.to_dict(), "begin_removal", action=-10000000, source="ALNS")
                                             except Exception as e:
@@ -10749,6 +10791,10 @@ def check_uncertainty_in_insertion_by_RL(implement_or_not, congestion_nodes_in_t
     new_row['action'] = -10000000
     new_row['reward'] = -10000000
     new_row['vehicle'] = vehicle
+    try:
+        dynamic_RL34959.current_stage_label = "insertion"
+    except Exception:
+        pass
     # dynamic_routes_store_insertion[(uncertainty_index, influenced_r)] = store_all(1, new_row)
     # here need to check whether this k is suitable under the uncertainty
     # so here consider the state of insertion operator
