@@ -1,26 +1,145 @@
+import base64
 import concurrent.futures
 import datetime
 import json
 import os
 import shutil
+import smtplib
+import socket
 import subprocess
 import sys
 import threading
 import time
+import traceback
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
+from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 CODES_DIR = ROOT_DIR / "codes"
 LOG_ROOT = CODES_DIR / "logs"
+MASTER_OUTPUT_FILES = ("rl_trace.csv", "rl_training.csv", "rl_summary.csv", "console_output.txt")
+BASELINE_OUTPUT_FILES = ("baseline_wait.csv", "baseline_reroute.csv", "baseline_random.csv")
+DONE_MARKER_FILE = "DONE.json"
+LOCK_FILE = "run.lock"
+HEARTBEAT_FILE = "heartbeat.json"
 
 
 def _mean(values: List[float]) -> Optional[float]:
     if not values:
         return None
     return float(sum(values) / len(values))
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if raw == "":
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if raw == "":
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if raw == "":
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _file_has_content(path: Path, min_bytes: int = 1) -> bool:
+    try:
+        return path.exists() and path.is_file() and path.stat().st_size >= int(min_bytes)
+    except Exception:
+        return False
+
+
+def _dir_has_content(path: Path) -> bool:
+    try:
+        return path.exists() and path.is_dir() and any(path.iterdir())
+    except Exception:
+        return False
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def _safe_rmtree(path: Path) -> None:
+    try:
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path)
+    except Exception:
+        pass
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return float(path.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _done_marker_path(run_dir: Path) -> Path:
+    return run_dir / DONE_MARKER_FILE
+
+
+def _write_done_marker(run_dir: Path, payload: Optional[Dict[str, Any]] = None) -> None:
+    data = dict(payload or {})
+    data.setdefault("status", "done")
+    data.setdefault("ts", time.time())
+    try:
+        _atomic_write_json(_done_marker_path(run_dir), data)
+    except Exception:
+        pass
+
+
+def _clear_done_marker(run_dir: Path) -> None:
+    _safe_unlink(_done_marker_path(run_dir))
+
+
+def _load_json_file(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _format_task_key(task: Tuple[str, int, str, int]) -> str:
+    dist_name, request_number, algorithm, seed = task
+    return f"{dist_name}|R{request_number}|{algorithm}|S{seed}"
 
 
 class ResourceMonitor:
@@ -239,6 +358,324 @@ class ExperimentConfig:
     # Explicitly exclude specific (dist, request_number, algorithm, seed) tasks.
     # Useful for resuming partial runs without rerunning completed combinations.
     exclude_tasks: Optional[List[Tuple[str, int, str, int]]] = None
+    # Robustness controls.
+    resume_existing: bool = True
+    skip_completed: bool = True
+    notify_on_failure: bool = True
+    notify_on_success: bool = False
+
+
+@dataclass
+class TaskPlan:
+    dist_name: str
+    request_number: int
+    algorithm: str
+    seed: int
+    run_name: str
+    run_dir: Path
+    mode: str  # "new" | "resume"
+    source_run: Optional[str] = None
+
+
+class RunLease:
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+        self.lock_path = run_dir / LOCK_FILE
+        self.heartbeat_path = run_dir / HEARTBEAT_FILE
+        self.hostname = socket.gethostname()
+        self.pid = os.getpid()
+        self.token = (
+            f"{self.hostname}:{self.pid}:"
+            f"{threading.get_ident()}:{int(time.time() * 1000)}"
+        )
+        self.lease_s = max(30.0, _env_float("RUN_LOCK_LEASE_S", 900.0))
+        self.heartbeat_s = max(3.0, _env_float("RUN_HEARTBEAT_S", 15.0))
+        self.acquire_timeout_s = max(0.0, _env_float("RUN_LOCK_ACQUIRE_TIMEOUT_S", 120.0))
+        self.steal_on_stale = _env_bool("RUN_LOCK_STEAL_STALE", True)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.acquired = False
+
+    def acquire(self) -> bool:
+        deadline = time.monotonic() + self.acquire_timeout_s
+        while True:
+            if self._try_create_lock():
+                self.acquired = True
+                self._write_heartbeat("running")
+                self._thread = threading.Thread(target=self._heartbeat_loop, name="run-lease-heartbeat", daemon=True)
+                self._thread.start()
+                return True
+
+            data = _load_json_file(self.lock_path) or {}
+            if self.steal_on_stale and self._is_stale(data):
+                self._break_stale_lock(data)
+                continue
+
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(5.0, self.heartbeat_s))
+
+    def release(self, final_status: str) -> None:
+        if not self.acquired:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(3.0, self.heartbeat_s * 2.0))
+        self._refresh_lock(final_status)
+        self._write_heartbeat(final_status)
+        self._delete_lock_if_owned()
+        self.acquired = False
+
+    def _try_create_lock(self) -> bool:
+        payload = {
+            "status": "running",
+            "token": self.token,
+            "hostname": self.hostname,
+            "pid": self.pid,
+            "acquired_ts": time.time(),
+            "last_heartbeat_ts": time.time(),
+            "lease_s": self.lease_s,
+        }
+        try:
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            fd = os.open(str(self.lock_path), flags)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            return True
+        except FileExistsError:
+            return False
+        except Exception:
+            return False
+
+    def _is_stale(self, data: Dict[str, Any]) -> bool:
+        now = time.time()
+        last_ts = data.get("last_heartbeat_ts", data.get("acquired_ts", 0))
+        try:
+            last_ts_f = float(last_ts)
+        except Exception:
+            return True
+        return (now - last_ts_f) > self.lease_s
+
+    def _break_stale_lock(self, data: Dict[str, Any]) -> None:
+        suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        stale_path = self.run_dir / f"{LOCK_FILE}.stale.{suffix}"
+        try:
+            self.lock_path.replace(stale_path)
+        except Exception:
+            _safe_unlink(self.lock_path)
+        _append_watchdog_event(
+            self.run_dir,
+            {
+                "stage": "lock",
+                "event": "stale_lock_takeover",
+                "previous": data,
+                "new_owner": {"hostname": self.hostname, "pid": self.pid, "token": self.token},
+            },
+        )
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.is_set():
+            self._refresh_lock("running")
+            self._write_heartbeat("running")
+            self._stop.wait(self.heartbeat_s)
+
+    def _refresh_lock(self, status: str) -> None:
+        payload = {
+            "status": status,
+            "token": self.token,
+            "hostname": self.hostname,
+            "pid": self.pid,
+            "lease_s": self.lease_s,
+            "last_heartbeat_ts": time.time(),
+        }
+        try:
+            _atomic_write_json(self.lock_path, payload)
+        except Exception:
+            pass
+
+    def _write_heartbeat(self, status: str) -> None:
+        payload = {
+            "status": status,
+            "token": self.token,
+            "hostname": self.hostname,
+            "pid": self.pid,
+            "ts": time.time(),
+        }
+        try:
+            _atomic_write_json(self.heartbeat_path, payload)
+        except Exception:
+            pass
+
+    def _delete_lock_if_owned(self) -> None:
+        data = _load_json_file(self.lock_path) or {}
+        if data.get("token") != self.token:
+            return
+        _safe_unlink(self.lock_path)
+
+
+class NotificationManager:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.hostname = socket.gethostname()
+        self.webhook_url = os.environ.get("EXP_NOTIFY_WEBHOOK_URL", "").strip()
+        self.cooldown_s = max(0, _env_int("EXP_NOTIFY_COOLDOWN_S", 900))
+        self.cooldown_file = LOG_ROOT / "notify_cooldown.json"
+        self.cooldown_on_send_fail = _env_bool("EXP_NOTIFY_COOLDOWN_ON_SEND_FAIL", True)
+
+        self.smtp_host = os.environ.get("EXP_NOTIFY_SMTP_HOST", "").strip()
+        self.smtp_port = _env_int("EXP_NOTIFY_SMTP_PORT", 587)
+        self.smtp_user = os.environ.get("EXP_NOTIFY_SMTP_USER", "").strip()
+        self.smtp_password = os.environ.get("EXP_NOTIFY_SMTP_PASSWORD", "").strip()
+        self.smtp_from = os.environ.get("EXP_NOTIFY_SMTP_FROM", self.smtp_user or "").strip()
+        self.smtp_to = os.environ.get("EXP_NOTIFY_SMTP_TO", "").strip()
+        self.smtp_use_ssl = _env_bool("EXP_NOTIFY_SMTP_SSL", False)
+        self.smtp_use_tls = _env_bool("EXP_NOTIFY_SMTP_TLS", not self.smtp_use_ssl)
+
+        self.twilio_sid = os.environ.get("EXP_NOTIFY_TWILIO_ACCOUNT_SID", "").strip()
+        self.twilio_token = os.environ.get("EXP_NOTIFY_TWILIO_AUTH_TOKEN", "").strip()
+        self.twilio_from = os.environ.get("EXP_NOTIFY_TWILIO_FROM", "").strip()
+        self.twilio_to = os.environ.get("EXP_NOTIFY_TWILIO_TO", "").strip()
+
+    @property
+    def channels(self) -> List[str]:
+        result: List[str] = []
+        if self.webhook_url:
+            result.append("webhook")
+        if self.smtp_host and self.smtp_to and self.smtp_from:
+            result.append("email")
+        if self.twilio_sid and self.twilio_token and self.twilio_from and self.twilio_to:
+            result.append("twilio_sms")
+        return result
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.channels)
+
+    def send(self, event: str, title: str, message: str, payload: Optional[Dict[str, Any]] = None) -> bool:
+        if not self.enabled:
+            return False
+        payload_dict = dict(payload or {})
+        key = self._make_cooldown_key(event, title, payload_dict)
+
+        body_lines = [
+            f"event={event}",
+            f"host={self.hostname}",
+            f"time={datetime.datetime.now().isoformat(timespec='seconds')}",
+            "",
+            message,
+        ]
+        body = "\n".join(body_lines).strip()
+        ok = False
+        with self._lock:
+            if self._in_cooldown(key):
+                print(f"[notify] cooldown skip: {key}")
+                return False
+            if self.webhook_url:
+                ok = self._send_webhook(event, title, body, payload_dict) or ok
+            if self.smtp_host and self.smtp_to and self.smtp_from:
+                ok = self._send_email(title, body) or ok
+            if self.twilio_sid and self.twilio_token and self.twilio_from and self.twilio_to:
+                sms_body = f"{title}\n{message}"
+                if len(sms_body) > 1400:
+                    sms_body = sms_body[:1397] + "..."
+                ok = self._send_twilio_sms(sms_body) or ok
+            if ok or self.cooldown_on_send_fail:
+                self._mark_cooldown(key)
+        return ok
+
+    def _make_cooldown_key(self, event: str, title: str, payload: Dict[str, Any]) -> str:
+        run_name = str(payload.get("run_name", "")).strip()
+        stage = str(payload.get("stage", "")).strip()
+        status = str(payload.get("status", "")).strip()
+        if run_name:
+            return f"{event}:{run_name}:{stage}:{status}"
+        return f"{event}:{title}"
+
+    def _in_cooldown(self, key: str) -> bool:
+        if self.cooldown_s <= 0:
+            return False
+        data = _load_json_file(self.cooldown_file) or {}
+        last_ts = data.get(key)
+        if last_ts is None:
+            return False
+        try:
+            last_val = float(last_ts)
+        except Exception:
+            return False
+        return (time.time() - last_val) < float(self.cooldown_s)
+
+    def _mark_cooldown(self, key: str) -> None:
+        if self.cooldown_s <= 0:
+            return
+        data = _load_json_file(self.cooldown_file) or {}
+        data[key] = time.time()
+        if len(data) > 2000:
+            # Keep cooldown map bounded.
+            keep = sorted(data.items(), key=lambda item: float(item[1]), reverse=True)[:1000]
+            data = {k: v for k, v in keep}
+        try:
+            _atomic_write_json(self.cooldown_file, data)
+        except Exception:
+            pass
+
+    def _send_webhook(self, event: str, title: str, body: str, payload: Optional[Dict[str, Any]]) -> bool:
+        try:
+            data = {
+                "event": event,
+                "title": title,
+                "message": body,
+                "hostname": self.hostname,
+                "payload": payload or {},
+            }
+            raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(self.webhook_url, data=raw, method="POST")
+            req.add_header("Content-Type", "application/json; charset=utf-8")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                status = getattr(resp, "status", 200)
+            return int(status) < 400
+        except Exception as exc:
+            print(f"[notify] webhook failed: {exc}")
+            return False
+
+    def _send_email(self, subject: str, body: str) -> bool:
+        try:
+            msg = EmailMessage()
+            msg["Subject"] = subject
+            msg["From"] = self.smtp_from
+            msg["To"] = self.smtp_to
+            msg.set_content(body)
+
+            if self.smtp_use_ssl:
+                server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=20)
+            else:
+                server = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=20)
+            with server:
+                if not self.smtp_use_ssl and self.smtp_use_tls:
+                    server.starttls()
+                if self.smtp_user:
+                    server.login(self.smtp_user, self.smtp_password)
+                server.send_message(msg)
+            return True
+        except Exception as exc:
+            print(f"[notify] email failed: {exc}")
+            return False
+
+    def _send_twilio_sms(self, body: str) -> bool:
+        try:
+            endpoint = f"https://api.twilio.com/2010-04-01/Accounts/{self.twilio_sid}/Messages.json"
+            data = urllib.parse.urlencode(
+                {"From": self.twilio_from, "To": self.twilio_to, "Body": body}
+            ).encode("utf-8")
+            req = urllib.request.Request(endpoint, data=data, method="POST")
+            token = base64.b64encode(f"{self.twilio_sid}:{self.twilio_token}".encode("utf-8")).decode("ascii")
+            req.add_header("Authorization", f"Basic {token}")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                status = getattr(resp, "status", 200)
+            return int(status) < 400
+        except Exception as exc:
+            print(f"[notify] twilio failed: {exc}")
+            return False
 
 
 def detect_physical_cores() -> int:
@@ -258,7 +695,8 @@ def resolve_max_workers(config: ExperimentConfig, override: Optional[int]) -> in
         return override
     if config.max_workers is not None and config.max_workers > 0:
         return config.max_workers
-    return max(1, detect_physical_cores() - 2)
+    reserved = max(1, _env_int("EXP_RESERVED_CORES", 2))
+    return max(1, detect_physical_cores() - reserved)
 
 
 def build_run_name(dist_name: str, request_number: int, algorithm: str, seed: Optional[int]) -> str:
@@ -267,8 +705,11 @@ def build_run_name(dist_name: str, request_number: int, algorithm: str, seed: Op
     return f"run_{timestamp}_R{request_number}_{dist_name}_{algorithm}_{seed_tag}"
 
 
-def run_command(cmd: List[str], cwd: Optional[Path] = None) -> int:
-    proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None)
+def run_command(cmd: List[str], cwd: Optional[Path] = None, timeout_s: Optional[float] = None) -> int:
+    try:
+        proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return 124
     return proc.returncode
 
 
@@ -293,11 +734,15 @@ def _append_watchdog_event(run_dir: Path, payload: Dict[str, Any]) -> None:
         pass
 
 
-def _write_failed_marker(run_dir: Path, stage: str, code: Optional[int] = None) -> None:
+def _write_failed_marker(
+    run_dir: Path, stage: str, code: Optional[int] = None, extra: Optional[Dict[str, Any]] = None
+) -> None:
     try:
         payload: Dict[str, Any] = {"stage": stage, "status": "failed"}
         if code is not None:
             payload["exit_code"] = int(code)
+        if extra:
+            payload.update(extra)
         payload["ts"] = time.time()
         (run_dir / "FAILED.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -306,16 +751,43 @@ def _write_failed_marker(run_dir: Path, stage: str, code: Optional[int] = None) 
         pass
 
 
-def _rotate_baseline_files(run_dir: Path, attempt: int) -> None:
-    for path in run_dir.glob("baseline_*.csv"):
-        suffix = f".attempt{attempt}"
+def _rotate_files(run_dir: Path, file_names: Iterable[str], attempt: int) -> None:
+    suffix = f".attempt{attempt}"
+    for name in file_names:
+        path = run_dir / name
+        if not path.exists():
+            continue
         try:
             path.rename(path.with_name(path.name + suffix))
         except Exception:
-            try:
-                path.unlink()
-            except Exception:
-                pass
+            _safe_unlink(path)
+
+
+def _rotate_master_files(run_dir: Path, attempt: int) -> None:
+    _rotate_files(run_dir, MASTER_OUTPUT_FILES, attempt)
+    _safe_unlink(run_dir / "34959.txt")
+
+
+def _rotate_baseline_files(run_dir: Path, attempt: int) -> None:
+    _rotate_files(run_dir, BASELINE_OUTPUT_FILES, attempt)
+
+
+def _cleanup_attempt_files(run_dir: Path, file_names: Iterable[str]) -> None:
+    for name in file_names:
+        for path in run_dir.glob(name + ".attempt*"):
+            _safe_unlink(path)
+
+
+def _cleanup_master_attempts(run_dir: Path) -> None:
+    _cleanup_attempt_files(run_dir, MASTER_OUTPUT_FILES)
+
+
+def _resolve_master_watch_files(run_dir: Path) -> List[Path]:
+    return [
+        run_dir / "console_output.txt",
+        run_dir / "rl_trace.csv",
+        run_dir / "rl_training.csv",
+    ]
 
 
 def _resolve_baseline_watch_files(run_dir: Path) -> List[Path]:
@@ -327,11 +799,7 @@ def _resolve_baseline_watch_files(run_dir: Path) -> List[Path]:
 
 
 def _cleanup_baseline_attempts(run_dir: Path) -> None:
-    for path in run_dir.glob("baseline_*.csv.attempt*"):
-        try:
-            path.unlink()
-        except Exception:
-            pass
+    _cleanup_attempt_files(run_dir, BASELINE_OUTPUT_FILES)
 
 
 def _run_with_watchdog(
@@ -400,10 +868,236 @@ def _run_with_watchdog(
         time.sleep(poll_s)
 
 
-def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run: bool) -> Tuple[str, str]:
-    dist_name, request_number, algorithm, seed = task
-    run_name = build_run_name(dist_name, request_number, algorithm, seed)
-    run_dir = LOG_ROOT / run_name
+def _classify_exit_reason(code: int) -> str:
+    if int(code) == 124:
+        return "timeout"
+    if int(code) in {130, 137, 143}:
+        return "interrupted"
+    return "nonzero_exit"
+
+
+def _resolve_retry_budgets(stage: str, default_retries: int) -> Dict[str, int]:
+    stage_key = stage.upper()
+    timeout_retries = max(0, _env_int(f"{stage_key}_RETRIES_TIMEOUT", default_retries))
+    nonzero_default = max(0, default_retries // 2)
+    nonzero_retries = max(0, _env_int(f"{stage_key}_RETRIES_NONZERO", nonzero_default))
+    interrupted_retries = max(0, _env_int(f"{stage_key}_RETRIES_INTERRUPTED", 0))
+    return {
+        "timeout": timeout_retries,
+        "nonzero_exit": nonzero_retries,
+        "interrupted": interrupted_retries,
+    }
+
+
+def _can_retry(reason: str, attempt: int, budgets: Dict[str, int]) -> bool:
+    retries = int(budgets.get(reason, 0))
+    # attempt starts at 1. retries means extra retries after first attempt.
+    return attempt <= retries
+
+
+def _retry_backoff_seconds(stage: str, attempt: int) -> float:
+    base = max(0.0, _env_float("RETRY_BACKOFF_BASE_S", 5.0))
+    cap = max(base, _env_float("RETRY_BACKOFF_MAX_S", 120.0))
+    per_stage_mult = _env_float(f"{stage.upper()}_RETRY_BACKOFF_MULT", 1.0)
+    delay = base * (2 ** max(0, attempt - 1)) * max(0.1, per_stage_mult)
+    return min(cap, delay)
+
+
+def _is_master_complete(run_dir: Path) -> bool:
+    return _file_has_content(run_dir / "rl_trace.csv", min_bytes=32) and _file_has_content(
+        run_dir / "rl_training.csv", min_bytes=32
+    )
+
+
+def _is_baseline_complete(run_dir: Path, include_random: bool) -> bool:
+    required = ["baseline_wait.csv", "baseline_reroute.csv"]
+    if include_random:
+        required.append("baseline_random.csv")
+    return all(_file_has_content(run_dir / name, min_bytes=16) for name in required)
+
+
+def _is_metrics_complete(run_dir: Path) -> bool:
+    return _file_has_content(run_dir / "metrics.json", min_bytes=16)
+
+
+def _is_plots_complete(run_dir: Path) -> bool:
+    return _dir_has_content(run_dir / "paper_figures")
+
+
+def _collect_stage_state(run_dir: Path, config: ExperimentConfig) -> Dict[str, bool]:
+    state: Dict[str, bool] = {
+        "master": _is_master_complete(run_dir),
+        "baseline": True,
+        "metrics": True,
+        "plot": True,
+    }
+    if config.run_baseline:
+        state["baseline"] = _is_baseline_complete(run_dir, config.baseline_include_random)
+    if config.run_metrics:
+        state["metrics"] = _is_metrics_complete(run_dir)
+    if config.run_plots:
+        state["plot"] = _is_plots_complete(run_dir)
+    return state
+
+
+def _is_run_complete(run_dir: Path, config: ExperimentConfig) -> bool:
+    if (run_dir / "FAILED.json").exists():
+        return False
+    done_path = _done_marker_path(run_dir)
+    has_done = _file_has_content(done_path, min_bytes=2)
+    state = _collect_stage_state(run_dir, config)
+    all_complete = all(state.values())
+    if has_done and all_complete:
+        return True
+    if has_done and not all_complete:
+        # Marker is stale compared to actual files.
+        _clear_done_marker(run_dir)
+        return False
+    if all_complete:
+        # Backfill for old runs without marker.
+        _write_done_marker(run_dir, {"source": "legacy_backfill", "state": state})
+        return True
+    return False
+
+
+def _extract_run_key_from_meta(run_dir: Path) -> Optional[Tuple[str, int, str, int]]:
+    meta_path = run_dir / "meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    try:
+        dist_name = str(data.get("distribution", "")).strip()
+        request_number = int(data.get("request_number"))
+        algorithm = str(data.get("algorithm", "")).strip()
+        seed = int(data.get("seed"))
+    except Exception:
+        return None
+    if not dist_name or not algorithm:
+        return None
+    return dist_name, request_number, algorithm, seed
+
+
+def _parse_run_name_key(run_name: str, known_algorithms: Iterable[str]) -> Optional[Tuple[str, int, str, int]]:
+    if not run_name.startswith("run_") or "_R" not in run_name or "_S" not in run_name:
+        return None
+    try:
+        left, seed_raw = run_name.rsplit("_S", 1)
+        seed = int(seed_raw)
+        _, suffix = left.split("_R", 1)
+        request_raw, rest = suffix.split("_", 1)
+        request_number = int(request_raw)
+    except Exception:
+        return None
+
+    algos = sorted({str(a).strip() for a in known_algorithms if str(a).strip()}, key=len, reverse=True)
+    for algorithm in algos:
+        token = f"_{algorithm}"
+        if not rest.endswith(token):
+            continue
+        dist_name = rest[: -len(token)]
+        if dist_name:
+            return dist_name, request_number, algorithm, seed
+    return None
+
+
+def _extract_run_key(run_dir: Path, known_algorithms: Iterable[str]) -> Optional[Tuple[str, int, str, int]]:
+    key = _extract_run_key_from_meta(run_dir)
+    if key is not None:
+        return key
+    return _parse_run_name_key(run_dir.name, known_algorithms)
+
+
+def _discover_existing_runs(
+    target_keys: Iterable[Tuple[str, int, str, int]], known_algorithms: Iterable[str]
+) -> Dict[Tuple[str, int, str, int], List[Path]]:
+    mapping: Dict[Tuple[str, int, str, int], List[Path]] = {}
+    key_set = set(target_keys)
+    if not LOG_ROOT.exists():
+        return mapping
+    for run_dir in LOG_ROOT.iterdir():
+        if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
+            continue
+        key = _extract_run_key(run_dir, known_algorithms)
+        if key is None or key not in key_set:
+            continue
+        mapping.setdefault(key, []).append(run_dir)
+
+    for key, paths in mapping.items():
+        paths.sort(key=_safe_mtime, reverse=True)
+        mapping[key] = paths
+    return mapping
+
+
+def build_execution_plan(config: ExperimentConfig, tasks: List[Tuple[str, int, str, int]]) -> Tuple[List[TaskPlan], int]:
+    plans: List[TaskPlan] = []
+    skipped_completed = 0
+    existing = _discover_existing_runs(tasks, config.algorithms)
+
+    for dist_name, request_number, algorithm, seed in tasks:
+        key = (str(dist_name), int(request_number), str(algorithm), int(seed))
+        candidates = existing.get(key, [])
+
+        completed_dir = None
+        for run_dir in candidates:
+            if _is_run_complete(run_dir, config):
+                completed_dir = run_dir
+                break
+
+        if completed_dir is not None and config.skip_completed:
+            skipped_completed += 1
+            print(f"[{config.name}] skip completed {_format_task_key(key)} -> {completed_dir.name}")
+            continue
+
+        if config.resume_existing and candidates:
+            chosen = candidates[0]
+            plans.append(
+                TaskPlan(
+                    dist_name=dist_name,
+                    request_number=request_number,
+                    algorithm=algorithm,
+                    seed=seed,
+                    run_name=chosen.name,
+                    run_dir=chosen,
+                    mode="resume",
+                    source_run=chosen.name,
+                )
+            )
+            continue
+
+        run_name = build_run_name(dist_name, request_number, algorithm, seed)
+        run_dir = LOG_ROOT / run_name
+        plans.append(
+            TaskPlan(
+                dist_name=dist_name,
+                request_number=request_number,
+                algorithm=algorithm,
+                seed=seed,
+                run_name=run_name,
+                run_dir=run_dir,
+                mode="new",
+                source_run=None,
+            )
+        )
+
+    return plans, skipped_completed
+
+
+def run_task(
+    plan: TaskPlan,
+    config: ExperimentConfig,
+    dry_run: bool,
+    notifier: Optional[NotificationManager] = None,
+) -> Tuple[str, str]:
+    dist_name = plan.dist_name
+    request_number = int(plan.request_number)
+    algorithm = plan.algorithm
+    seed = int(plan.seed)
+    run_name = plan.run_name
+    run_dir = plan.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
 
     master_cmd = [
@@ -455,49 +1149,173 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
         str(run_dir),
     ]
 
-    print(f"[{config.name}] start {run_name}")
+    print(f"[{config.name}] start {run_name} mode={plan.mode}")
+    state = _collect_stage_state(run_dir, config)
+    if plan.mode == "resume":
+        print(
+            f"[{config.name}] resume stage_state {run_name}: "
+            f"master={int(state['master'])} baseline={int(state['baseline'])} "
+            f"metrics={int(state['metrics'])} plot={int(state['plot'])}"
+        )
+        _append_watchdog_event(run_dir, {"stage": "resume", "event": "stage_state", "state": state})
+
     if dry_run:
         print("  master:", " ".join(master_cmd))
         if config.run_baseline:
             print("  baseline:", " ".join(baseline_cmd))
-        if config.run_plots:
-            print("  plot:", " ".join(plot_cmd))
         if config.run_metrics:
             print("  metrics:", " ".join(metrics_cmd))
+        if config.run_plots:
+            print("  plot:", " ".join(plot_cmd))
         if config.cleanup_after_run:
             print("  cleanup:", " ".join(cleanup_cmd))
         return run_name, "dry_run"
+
+    lease = RunLease(run_dir)
+    if not lease.acquire():
+        _append_watchdog_event(
+            run_dir,
+            {
+                "stage": "lock",
+                "event": "lock_busy_skip",
+                "owner": _load_json_file(run_dir / LOCK_FILE) or {},
+            },
+        )
+        print(f"[{config.name}] lock busy -> skip {run_name}")
+        return run_name, "skipped_locked"
+
+    state = _collect_stage_state(run_dir, config)
+    if not all(state.values()):
+        _clear_done_marker(run_dir)
 
     monitor = ResourceMonitor(interval_s=1.0)
     monitor.start()
     stage_times: Dict[str, float] = {}
     started_at = time.monotonic()
     status = "ok"
+    failure_detail: Dict[str, Any] = {}
 
-    baseline_stall_s = float(os.environ.get("BASELINE_STALL_S", "600") or 600)
-    baseline_startup_s = float(os.environ.get("BASELINE_STARTUP_S", "300") or 300)
-    baseline_min_bytes = int(os.environ.get("BASELINE_MIN_BYTES", "4096") or 4096)
-    baseline_retries = int(os.environ.get("BASELINE_RETRIES", "3") or 3)
-    baseline_poll_s = float(os.environ.get("BASELINE_POLL_S", "5") or 5)
+    master_stall_s = _env_float("MASTER_STALL_S", 1800.0)
+    master_startup_s = _env_float("MASTER_STARTUP_S", 600.0)
+    master_min_bytes = _env_int("MASTER_MIN_BYTES", 1024)
+    master_retries = max(0, _env_int("MASTER_RETRIES", 2))
+    master_poll_s = _env_float("MASTER_POLL_S", 5.0)
+    master_retry_budgets = _resolve_retry_budgets("master", master_retries)
+
+    baseline_stall_s = _env_float("BASELINE_STALL_S", 600.0)
+    baseline_startup_s = _env_float("BASELINE_STARTUP_S", 300.0)
+    baseline_min_bytes = _env_int("BASELINE_MIN_BYTES", 4096)
+    baseline_retries = max(0, _env_int("BASELINE_RETRIES", 3))
+    baseline_poll_s = _env_float("BASELINE_POLL_S", 5.0)
+    baseline_retry_budgets = _resolve_retry_budgets("baseline", baseline_retries)
+
+    metrics_timeout_s = _env_float("METRICS_TIMEOUT_S", 3600.0)
+    metrics_retries = max(0, _env_int("METRICS_RETRIES", 1))
+    metrics_retry_budgets = _resolve_retry_budgets("metrics", metrics_retries)
+    plots_timeout_s = _env_float("PLOTS_TIMEOUT_S", 3600.0)
+    plots_retries = max(0, _env_int("PLOTS_RETRIES", 1))
+    plots_retry_budgets = _resolve_retry_budgets("plots", plots_retries)
+    cleanup_timeout_s = _env_float("CLEANUP_TIMEOUT_S", 900.0)
+    cleanup_retries = max(0, _env_int("CLEANUP_RETRIES", 0))
+    cleanup_retry_budgets = _resolve_retry_budgets("cleanup", cleanup_retries)
+
+    master_complete = state["master"]
+    baseline_complete = state["baseline"]
+    metrics_complete = state["metrics"]
+    plot_complete = state["plot"]
 
     try:
-        t0 = time.monotonic()
-        _write_run_status(run_dir, {"stage": "master", "status": "running"})
-        code = run_command(master_cmd, cwd=ROOT_DIR)
-        stage_times["master_sec"] = time.monotonic() - t0
-        if code != 0:
-            status = "failed_master"
-            _write_failed_marker(run_dir, "master", code)
+        if config.skip_completed and _is_run_complete(run_dir, config):
+            status = "skipped_completed"
             return run_name, status
 
-        if config.run_baseline:
+        if not master_complete:
+            _clear_done_marker(run_dir)
             attempt = 0
             code = 1
-            watch_files = _resolve_baseline_watch_files(run_dir)
-            while attempt <= baseline_retries:
+            last_reason = "nonzero_exit"
+            watch_files = _resolve_master_watch_files(run_dir)
+            while True:
                 attempt += 1
-                if attempt > 1:
-                    _rotate_baseline_files(run_dir, attempt)
+                _rotate_master_files(run_dir, attempt)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "master",
+                        "event": "attempt_start",
+                        "attempt": attempt,
+                        "max_attempts": master_retries + 1,
+                    },
+                )
+                t0 = time.monotonic()
+                code = _run_with_watchdog(
+                    master_cmd,
+                    ROOT_DIR,
+                    run_dir=run_dir,
+                    stage="master",
+                    watch_files=watch_files,
+                    stall_s=master_stall_s,
+                    startup_s=master_startup_s,
+                    min_bytes=master_min_bytes,
+                    poll_s=master_poll_s,
+                )
+                stage_times[f"master_sec_attempt_{attempt}"] = time.monotonic() - t0
+                if code == 0:
+                    break
+                last_reason = _classify_exit_reason(code)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "master",
+                        "event": "attempt_failed",
+                        "attempt": attempt,
+                        "exit_code": code,
+                        "reason": last_reason,
+                    },
+                )
+                if not _can_retry(last_reason, attempt, master_retry_budgets):
+                    break
+                backoff = _retry_backoff_seconds("master", attempt)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "master",
+                        "event": "retry_scheduled",
+                        "attempt": attempt + 1,
+                        "after_s": backoff,
+                        "reason": last_reason,
+                    },
+                )
+                time.sleep(backoff)
+            if code != 0:
+                status = "failed_master"
+                failure_detail = {
+                    "stage": "master",
+                    "attempts": attempt,
+                    "retry_budgets": master_retry_budgets,
+                    "exit_code": code,
+                    "reason": last_reason,
+                }
+                _write_failed_marker(run_dir, "master", code, failure_detail)
+                return run_name, status
+            master_complete = True
+            baseline_complete = False
+            metrics_complete = False
+            plot_complete = False
+            for name in BASELINE_OUTPUT_FILES:
+                _safe_unlink(run_dir / name)
+            _safe_unlink(run_dir / "metrics.json")
+            _safe_rmtree(run_dir / "paper_figures")
+
+        if config.run_baseline and not baseline_complete:
+            _clear_done_marker(run_dir)
+            attempt = 0
+            code = 1
+            last_reason = "nonzero_exit"
+            watch_files = _resolve_baseline_watch_files(run_dir)
+            while True:
+                attempt += 1
+                _rotate_baseline_files(run_dir, attempt)
                 _append_watchdog_event(
                     run_dir,
                     {
@@ -522,6 +1340,7 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
                 stage_times[f"baseline_sec_attempt_{attempt}"] = time.monotonic() - t0
                 if code == 0:
                     break
+                last_reason = _classify_exit_reason(code)
                 _append_watchdog_event(
                     run_dir,
                     {
@@ -529,84 +1348,272 @@ def run_task(task: Tuple[str, int, str, int], config: ExperimentConfig, dry_run:
                         "event": "attempt_failed",
                         "attempt": attempt,
                         "exit_code": code,
+                        "reason": last_reason,
                     },
                 )
+                if not _can_retry(last_reason, attempt, baseline_retry_budgets):
+                    break
+                backoff = _retry_backoff_seconds("baseline", attempt)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "baseline",
+                        "event": "retry_scheduled",
+                        "attempt": attempt + 1,
+                        "after_s": backoff,
+                        "reason": last_reason,
+                    },
+                )
+                time.sleep(backoff)
             if code != 0:
                 status = "failed_baseline"
-                _write_failed_marker(run_dir, "baseline", code)
-                (run_dir / "FAILED.json").write_text(
-                    json.dumps(
-                        {
-                            "stage": "baseline",
-                            "status": status,
-                            "attempts": attempt,
-                            "max_attempts": baseline_retries + 1,
-                            "exit_code": code,
-                            "reason": "stall_timeout" if code == 124 else "nonzero_exit",
-                            "ts": time.time(),
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
-                )
+                failure_detail = {
+                    "stage": "baseline",
+                    "attempts": attempt,
+                    "retry_budgets": baseline_retry_budgets,
+                    "exit_code": code,
+                    "reason": last_reason,
+                }
+                _write_failed_marker(run_dir, "baseline", code, failure_detail)
                 return run_name, status
+            baseline_complete = True
+            metrics_complete = False
+            plot_complete = False
+            _safe_unlink(run_dir / "metrics.json")
+            _safe_rmtree(run_dir / "paper_figures")
 
-        if config.run_metrics:
-            t0 = time.monotonic()
-            code = run_command(metrics_cmd, cwd=ROOT_DIR)
-            stage_times["metrics_sec"] = time.monotonic() - t0
+        if config.run_metrics and not metrics_complete:
+            _clear_done_marker(run_dir)
+            attempt = 0
+            code = 1
+            last_reason = "nonzero_exit"
+            while True:
+                attempt += 1
+                _safe_unlink(run_dir / "metrics.json")
+                t0 = time.monotonic()
+                code = run_command(metrics_cmd, cwd=ROOT_DIR, timeout_s=metrics_timeout_s)
+                stage_times[f"metrics_sec_attempt_{attempt}"] = time.monotonic() - t0
+                if code == 0:
+                    break
+                last_reason = _classify_exit_reason(code)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "metrics",
+                        "event": "attempt_failed",
+                        "attempt": attempt,
+                        "exit_code": code,
+                        "reason": last_reason,
+                    },
+                )
+                if not _can_retry(last_reason, attempt, metrics_retry_budgets):
+                    break
+                backoff = _retry_backoff_seconds("metrics", attempt)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "metrics",
+                        "event": "retry_scheduled",
+                        "attempt": attempt + 1,
+                        "after_s": backoff,
+                        "reason": last_reason,
+                    },
+                )
+                time.sleep(backoff)
             if code != 0:
                 status = "failed_metrics"
-                _write_failed_marker(run_dir, "metrics", code)
+                failure_detail = {
+                    "stage": "metrics",
+                    "attempts": attempt,
+                    "retry_budgets": metrics_retry_budgets,
+                    "exit_code": code,
+                    "reason": last_reason,
+                }
+                _write_failed_marker(run_dir, "metrics", code, failure_detail)
                 return run_name, status
+            stage_times["metrics_sec"] = sum(
+                value for key, value in stage_times.items() if key.startswith("metrics_sec_attempt_")
+            )
+            metrics_complete = True
 
-        if config.run_plots:
-            t0 = time.monotonic()
-            code = run_command(plot_cmd, cwd=ROOT_DIR)
-            stage_times["plot_sec"] = time.monotonic() - t0
+        if config.run_plots and not plot_complete:
+            _clear_done_marker(run_dir)
+            attempt = 0
+            code = 1
+            last_reason = "nonzero_exit"
+            while True:
+                attempt += 1
+                _safe_rmtree(run_dir / "paper_figures")
+                t0 = time.monotonic()
+                code = run_command(plot_cmd, cwd=ROOT_DIR, timeout_s=plots_timeout_s)
+                stage_times[f"plot_sec_attempt_{attempt}"] = time.monotonic() - t0
+                if code == 0:
+                    break
+                last_reason = _classify_exit_reason(code)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "plot",
+                        "event": "attempt_failed",
+                        "attempt": attempt,
+                        "exit_code": code,
+                        "reason": last_reason,
+                    },
+                )
+                if not _can_retry(last_reason, attempt, plots_retry_budgets):
+                    break
+                backoff = _retry_backoff_seconds("plots", attempt)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "plot",
+                        "event": "retry_scheduled",
+                        "attempt": attempt + 1,
+                        "after_s": backoff,
+                        "reason": last_reason,
+                    },
+                )
+                time.sleep(backoff)
             if code != 0:
                 status = "failed_plot"
-                _write_failed_marker(run_dir, "plot", code)
+                failure_detail = {
+                    "stage": "plot",
+                    "attempts": attempt,
+                    "retry_budgets": plots_retry_budgets,
+                    "exit_code": code,
+                    "reason": last_reason,
+                }
+                _write_failed_marker(run_dir, "plot", code, failure_detail)
                 return run_name, status
-
-        monitor.stop()
-        usage: Dict[str, Any] = monitor.summary()
-        usage["stage_wall_time_sec"] = stage_times
-        usage["wall_time_sec"] = time.monotonic() - started_at
-        (run_dir / "resource_usage.json").write_text(json.dumps(usage, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        parts = [f"wall={usage.get('wall_time_sec'):.1f}s" if usage.get("wall_time_sec") is not None else "wall=?"]
-        if usage.get("cpu_percent_avg") is not None:
-            parts.append(f"cpu_avg={usage['cpu_percent_avg']:.1f}%")
-        if usage.get("gpu_util_percent_avg") is not None:
-            parts.append(f"gpu_avg={usage['gpu_util_percent_avg']:.1f}%")
-        if stage_times.get("master_sec") is not None:
-            parts.append(f"master={stage_times['master_sec']:.1f}s")
-        print(f"[{config.name}] {run_name} resource: " + " | ".join(parts))
+            stage_times["plot_sec"] = sum(
+                value for key, value in stage_times.items() if key.startswith("plot_sec_attempt_")
+            )
+            plot_complete = True
 
         if config.cleanup_after_run:
-            t0 = time.monotonic()
-            code = run_command(cleanup_cmd, cwd=ROOT_DIR)
-            stage_times["cleanup_sec"] = time.monotonic() - t0
+            attempt = 0
+            code = 1
+            last_reason = "nonzero_exit"
+            while True:
+                attempt += 1
+                t0 = time.monotonic()
+                code = run_command(cleanup_cmd, cwd=ROOT_DIR, timeout_s=cleanup_timeout_s)
+                stage_times[f"cleanup_sec_attempt_{attempt}"] = time.monotonic() - t0
+                if code == 0:
+                    break
+                last_reason = _classify_exit_reason(code)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "cleanup",
+                        "event": "attempt_failed",
+                        "attempt": attempt,
+                        "exit_code": code,
+                        "reason": last_reason,
+                    },
+                )
+                if not _can_retry(last_reason, attempt, cleanup_retry_budgets):
+                    break
+                backoff = _retry_backoff_seconds("cleanup", attempt)
+                _append_watchdog_event(
+                    run_dir,
+                    {
+                        "stage": "cleanup",
+                        "event": "retry_scheduled",
+                        "attempt": attempt + 1,
+                        "after_s": backoff,
+                        "reason": last_reason,
+                    },
+                )
+                time.sleep(backoff)
             if code != 0:
                 status = "failed_cleanup"
-                _write_failed_marker(run_dir, "cleanup", code)
+                failure_detail = {
+                    "stage": "cleanup",
+                    "attempts": attempt,
+                    "retry_budgets": cleanup_retry_budgets,
+                    "exit_code": code,
+                    "reason": last_reason,
+                }
+                _write_failed_marker(run_dir, "cleanup", code, failure_detail)
                 return run_name, status
+            stage_times["cleanup_sec"] = sum(
+                value for key, value in stage_times.items() if key.startswith("cleanup_sec_attempt_")
+            )
+
+        final_state = _collect_stage_state(run_dir, config)
+        if not all(final_state.values()):
+            status = "failed_postcheck"
+            failure_detail = {
+                "stage": "postcheck",
+                "reason": "incomplete_outputs_after_success",
+                "state": final_state,
+            }
+            _write_failed_marker(run_dir, "postcheck", 1, failure_detail)
+            return run_name, status
+
+        _write_done_marker(
+            run_dir,
+            {
+                "run_name": run_name,
+                "mode": plan.mode,
+                "state": final_state,
+                "stage_wall_time_sec": stage_times,
+            },
+        )
 
         return run_name, status
     finally:
         try:
-            _cleanup_baseline_attempts(run_dir)
+            _cleanup_master_attempts(run_dir)
         except Exception:
             pass
         try:
-            failed_marker = run_dir / "FAILED.json"
-            if status == "ok" and failed_marker.exists():
-                failed_marker.unlink()
+            _cleanup_baseline_attempts(run_dir)
         except Exception:
             pass
-        monitor.stop()
+        if status in {"ok", "dry_run", "skipped_completed"}:
+            _safe_unlink(run_dir / "FAILED.json")
+        if status.startswith("failed_"):
+            _clear_done_marker(run_dir)
+        try:
+            monitor.stop()
+            usage: Dict[str, Any] = monitor.summary()
+            usage["status"] = status
+            usage["mode"] = plan.mode
+            usage["stage_wall_time_sec"] = stage_times
+            usage["wall_time_sec"] = time.monotonic() - started_at
+            if failure_detail:
+                usage["failure"] = failure_detail
+            (run_dir / "resource_usage.json").write_text(
+                json.dumps(usage, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+        try:
+            lease.release(status)
+        except Exception:
+            pass
+
+        if status.startswith("failed_"):
+            print(f"[{config.name}] {run_name} -> {status} | detail={failure_detail}")
+            if notifier is not None and config.notify_on_failure:
+                msg = "\n".join(
+                    [
+                        f"run_name={run_name}",
+                        f"run_dir={run_dir}",
+                        f"mode={plan.mode}",
+                        f"status={status}",
+                        f"detail={json.dumps(failure_detail, ensure_ascii=False)}",
+                    ]
+                )
+                notifier.send(
+                    event="task_failed",
+                    title=f"[{config.name}] task failed: {run_name}",
+                    message=msg,
+                    payload={"run_name": run_name, "status": status, "failure_detail": failure_detail},
+                )
 
 
 def build_tasks(config: ExperimentConfig) -> List[Tuple[str, int, str, int]]:
@@ -632,15 +1639,78 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
         print("No tasks to run.")
         return 1
 
-    worker_count = resolve_max_workers(config, max_workers)
-    print(f"[{config.name}] total tasks: {len(tasks)} | workers: {worker_count}")
+    plans, skipped_completed = build_execution_plan(config, tasks)
+    if not plans:
+        print(f"[{config.name}] all tasks already completed. skipped={skipped_completed}")
+        notifier = NotificationManager()
+        if notifier.enabled and config.notify_on_success:
+            notifier.send(
+                event="all_completed",
+                title=f"[{config.name}] all tasks already completed",
+                message=f"total={len(tasks)} skipped_completed={skipped_completed}",
+                payload={"total": len(tasks), "skipped_completed": skipped_completed},
+            )
+        return 0
+
+    worker_count = min(resolve_max_workers(config, max_workers), len(plans))
+    notifier = NotificationManager()
+    print(
+        f"[{config.name}] total tasks={len(tasks)} | queued={len(plans)} | "
+        f"skipped_completed={skipped_completed} | workers={worker_count}"
+    )
+    if notifier.enabled:
+        print(f"[{config.name}] notifications enabled: {', '.join(notifier.channels)}")
+    else:
+        print(
+            f"[{config.name}] notifications disabled "
+            f"(set EXP_NOTIFY_WEBHOOK_URL / SMTP env / Twilio env to enable)"
+        )
 
     failed = 0
+    status_counter: Dict[str, int] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(run_task, task, config, dry_run) for task in tasks]
+        futures = [executor.submit(run_task, plan, config, dry_run, notifier) for plan in plans]
         for future in concurrent.futures.as_completed(futures):
-            run_name, status = future.result()
-            print(f"[{config.name}] {run_name} -> {status}")
-            if status not in {"ok", "dry_run"}:
+            try:
+                run_name, status = future.result()
+            except Exception:
                 failed += 1
+                status = "failed_internal_exception"
+                status_counter[status] = status_counter.get(status, 0) + 1
+                err = traceback.format_exc()
+                print(f"[{config.name}] internal exception:\n{err}")
+                if notifier.enabled and config.notify_on_failure:
+                    notifier.send(
+                        event="task_exception",
+                        title=f"[{config.name}] internal exception",
+                        message=err[-3000:],
+                        payload={"status": status},
+                    )
+                continue
+
+            status_counter[status] = status_counter.get(status, 0) + 1
+            print(f"[{config.name}] {run_name} -> {status}")
+            if status not in {"ok", "dry_run", "skipped_completed", "skipped_locked"}:
+                failed += 1
+
+    summary_payload = {
+        "total_tasks": len(tasks),
+        "queued_tasks": len(plans),
+        "skipped_completed": skipped_completed,
+        "failed": failed,
+        "status_counter": status_counter,
+    }
+    print(f"[{config.name}] summary: {json.dumps(summary_payload, ensure_ascii=False)}")
+
+    should_notify_summary = notifier.enabled and (
+        (failed > 0 and config.notify_on_failure) or (failed == 0 and config.notify_on_success)
+    )
+    if should_notify_summary:
+        notifier.send(
+            event="run_summary",
+            title=f"[{config.name}] summary failed={failed}",
+            message=json.dumps(summary_payload, ensure_ascii=False, indent=2),
+            payload=summary_payload,
+        )
+
     return failed

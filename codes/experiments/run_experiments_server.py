@@ -43,15 +43,67 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--precheck", action="store_true", help="run rerun_incomplete before experiments")
+    parser.add_argument(
+        "--precheck",
+        action="store_true",
+        default=True,
+        help="run rerun_incomplete before experiments (default: on)",
+    )
+    parser.add_argument(
+        "--no-precheck",
+        action="store_false",
+        dest="precheck",
+        help="disable rerun_incomplete precheck",
+    )
     parser.add_argument("--precheck-workers", type=int, default=0, help="workers for rerun_incomplete (0=auto)")
     parser.add_argument("--precheck-logs-root", type=str, default="", help="logs root for rerun_incomplete")
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        default=True,
+        help="resume latest incomplete run for same (dist,R,algo,seed) (default: on)",
+    )
+    parser.add_argument(
+        "--no-resume-existing",
+        action="store_false",
+        dest="resume_existing",
+        help="always create a new run_* folder",
+    )
+    parser.add_argument(
+        "--skip-completed",
+        action="store_true",
+        default=True,
+        help="skip task if an existing completed run is found (default: on)",
+    )
+    parser.add_argument(
+        "--no-skip-completed",
+        action="store_false",
+        dest="skip_completed",
+        help="do not skip tasks even if completed runs exist",
+    )
+    parser.add_argument(
+        "--notify-success",
+        action="store_true",
+        default=False,
+        help="send summary notification on success when notification channels are configured",
+    )
+    parser.add_argument(
+        "--no-notify-failure",
+        action="store_false",
+        dest="notify_failure",
+        default=True,
+        help="disable failure notifications",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     config = build_config()
+    config.resume_existing = bool(args.resume_existing)
+    config.skip_completed = bool(args.skip_completed)
+    config.notify_on_success = bool(args.notify_success)
+    config.notify_on_failure = bool(args.notify_failure)
     if args.precheck:
         logs_root = args.precheck_logs_root or str(CODES_DIR / "logs")
         cmd = [

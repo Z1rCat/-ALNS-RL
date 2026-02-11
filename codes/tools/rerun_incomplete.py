@@ -44,6 +44,13 @@ def parse_run_name(name: str) -> Optional[RunInfo]:
         return None
     tail = parts[1:]
     known_algos = [
+        "PPO_HAT_LSTM",
+        "PPO_HAT_PDI",
+        "PPO_HAT_MOE",
+        "A2C_HAT_MOE",
+        "QRDQN_CVAR",
+        "BE_CVAR_DQN",
+        "PPO_LSTM",
         "PPO_HAT",
         "A2C_HAT",
         "LBKLAC",
