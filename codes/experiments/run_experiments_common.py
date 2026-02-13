@@ -363,6 +363,8 @@ class ExperimentConfig:
     skip_completed: bool = True
     notify_on_failure: bool = True
     notify_on_success: bool = False
+    # Output root under codes/logs. If absolute path is provided, it will be used directly.
+    log_subdir: str = ""
 
 
 @dataclass
@@ -514,12 +516,13 @@ class RunLease:
 
 
 class NotificationManager:
-    def __init__(self) -> None:
+    def __init__(self, run_root: Optional[Path] = None) -> None:
         self._lock = threading.Lock()
         self.hostname = socket.gethostname()
         self.webhook_url = os.environ.get("EXP_NOTIFY_WEBHOOK_URL", "").strip()
         self.cooldown_s = max(0, _env_int("EXP_NOTIFY_COOLDOWN_S", 900))
-        self.cooldown_file = LOG_ROOT / "notify_cooldown.json"
+        self.run_root = run_root or LOG_ROOT
+        self.cooldown_file = self.run_root / "notify_cooldown.json"
         self.cooldown_on_send_fail = _env_bool("EXP_NOTIFY_COOLDOWN_ON_SEND_FAIL", True)
 
         self.smtp_host = os.environ.get("EXP_NOTIFY_SMTP_HOST", "").strip()
@@ -703,6 +706,16 @@ def build_run_name(dist_name: str, request_number: int, algorithm: str, seed: Op
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     seed_tag = f"S{seed}" if seed is not None else "SNA"
     return f"run_{timestamp}_R{request_number}_{dist_name}_{algorithm}_{seed_tag}"
+
+
+def resolve_run_root(config: ExperimentConfig) -> Path:
+    candidate = str(getattr(config, "log_subdir", "") or "").strip()
+    if not candidate:
+        return LOG_ROOT
+    path = Path(candidate)
+    if path.is_absolute():
+        return path
+    return LOG_ROOT / path
 
 
 def run_command(cmd: List[str], cwd: Optional[Path] = None, timeout_s: Optional[float] = None) -> int:
@@ -1012,13 +1025,15 @@ def _extract_run_key(run_dir: Path, known_algorithms: Iterable[str]) -> Optional
 
 
 def _discover_existing_runs(
-    target_keys: Iterable[Tuple[str, int, str, int]], known_algorithms: Iterable[str]
+    run_root: Path,
+    target_keys: Iterable[Tuple[str, int, str, int]],
+    known_algorithms: Iterable[str],
 ) -> Dict[Tuple[str, int, str, int], List[Path]]:
     mapping: Dict[Tuple[str, int, str, int], List[Path]] = {}
     key_set = set(target_keys)
-    if not LOG_ROOT.exists():
+    if not run_root.exists():
         return mapping
-    for run_dir in LOG_ROOT.iterdir():
+    for run_dir in run_root.iterdir():
         if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
             continue
         key = _extract_run_key(run_dir, known_algorithms)
@@ -1032,10 +1047,12 @@ def _discover_existing_runs(
     return mapping
 
 
-def build_execution_plan(config: ExperimentConfig, tasks: List[Tuple[str, int, str, int]]) -> Tuple[List[TaskPlan], int]:
+def build_execution_plan(
+    config: ExperimentConfig, tasks: List[Tuple[str, int, str, int]], run_root: Path
+) -> Tuple[List[TaskPlan], int]:
     plans: List[TaskPlan] = []
     skipped_completed = 0
-    existing = _discover_existing_runs(tasks, config.algorithms)
+    existing = _discover_existing_runs(run_root, tasks, config.algorithms)
 
     for dist_name, request_number, algorithm, seed in tasks:
         key = (str(dist_name), int(request_number), str(algorithm), int(seed))
@@ -1069,7 +1086,7 @@ def build_execution_plan(config: ExperimentConfig, tasks: List[Tuple[str, int, s
             continue
 
         run_name = build_run_name(dist_name, request_number, algorithm, seed)
-        run_dir = LOG_ROOT / run_name
+        run_dir = run_root / run_name
         plans.append(
             TaskPlan(
                 dist_name=dist_name,
@@ -1639,10 +1656,13 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
         print("No tasks to run.")
         return 1
 
-    plans, skipped_completed = build_execution_plan(config, tasks)
+    run_root = resolve_run_root(config)
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    plans, skipped_completed = build_execution_plan(config, tasks, run_root)
     if not plans:
         print(f"[{config.name}] all tasks already completed. skipped={skipped_completed}")
-        notifier = NotificationManager()
+        notifier = NotificationManager(run_root=run_root)
         if notifier.enabled and config.notify_on_success:
             notifier.send(
                 event="all_completed",
@@ -1653,10 +1673,10 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
         return 0
 
     worker_count = min(resolve_max_workers(config, max_workers), len(plans))
-    notifier = NotificationManager()
+    notifier = NotificationManager(run_root=run_root)
     print(
         f"[{config.name}] total tasks={len(tasks)} | queued={len(plans)} | "
-        f"skipped_completed={skipped_completed} | workers={worker_count}"
+        f"skipped_completed={skipped_completed} | workers={worker_count} | run_root={run_root}"
     )
     if notifier.enabled:
         print(f"[{config.name}] notifications enabled: {', '.join(notifier.channels)}")

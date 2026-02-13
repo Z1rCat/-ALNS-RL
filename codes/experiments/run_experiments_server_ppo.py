@@ -13,24 +13,17 @@ from experiments.run_experiments_common import ExperimentConfig, resolve_run_roo
 
 def build_config() -> ExperimentConfig:
     return ExperimentConfig(
-        name="server",
+        name="server_ppo",
         distributions=[
-            
-            
+            "S1_1",
+            "S2_1",
             "S3_1",
+            "S4_1",
             "S5_1",
             "S6_1",
-            "V1_1",
-            
-            
-            "T1_3",
-            
-            "W1_1",
-            
-            
         ],
         request_numbers=[30],
-        algorithms=["PPO", "A2C", "PPO_HAT", "DQN"],
+        algorithms=["PPO"],
         seeds=[42],
         generator_workers=1,
         baseline_include_random=True,
@@ -42,7 +35,7 @@ def build_config() -> ExperimentConfig:
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-workers", type=int, default=None)
+    parser.add_argument("--max-workers", type=int, default=None, help="parallel workers across scenarios")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--precheck",
@@ -119,7 +112,7 @@ def main() -> int:
             cmd.append("--dry-run")
         code = subprocess.run(cmd, cwd=str(CODES_DIR)).returncode
         if code != 0:
-            print(f"[server] precheck failed (exit={code})")
+            print(f"[server_ppo] precheck failed (exit={code})")
             return 1
     failed = run_experiments(config, args.max_workers, args.dry_run)
     return 1 if failed else 0
