@@ -10,7 +10,7 @@
 │   ├── Dynamic_master34959.py
 │   ├── run_benchmark_replay.py
 │   └── plot_paper_figure.py
-├── codes/logs/run_*/               # 每次运行的日志与结果
+├── codes/logs/run_*/               # master 直跑输出目录
 │   ├── data/                       # 本次运行生成的不确定性事件数据（隔离）
 │   ├── rl_trace.csv
 │   ├── rl_training.csv
@@ -18,6 +18,7 @@
 │   ├── baseline_wait.csv
 │   ├── baseline_reroute.csv
 │   └── paper_figures/              # 论文图表输出
+├── codes/nexus/<run_folder>/run_*/ # 服务器批量脚本输出目录（支持断点续跑）
 ├── distribution_config.json        # 分布配置（菜单自动读取）
 ├── ALNS_Research_Documentation/    # 文档与可视化脚本
 │   ├── reports/
@@ -61,13 +62,18 @@ python codes/Dynamic_master34959.py --dist_name S1_1 --request_number 10 --run_c
 5. 技术接口说明：见 `ALNS_Research_Documentation/reports/实现报告.md`（环境/日志/跳级/可扩展点）。
 
 ## 批量运行（本地/服务器）
-### 服务器版本（Top 6 + 全算法 + 3 seeds）
+### 服务器版本（可断点续跑）
 ```bash
-python codes/run_experiments_server.py
+python codes/experiments/run_experiments_server.py --run-folder server_batch_YYYYMMDD --max-workers 7
+python codes/experiments/run_experiments_server_ppo.py --run-folder ppo_batch_YYYYMMDD --max-workers 7
 ```
 可选参数：
 - `--max-workers`: 覆盖默认并发数（默认=物理核数-2）。
 - `--dry-run`: 只打印命令，不实际执行。
+- `--run-folder`: 指定本批次输出目录（位于 `codes/nexus/` 下，或绝对路径）。
+- `--no-precheck`: 关闭预检查（默认会执行断点预检查）。
+- `--no-resume-existing`: 不续跑，强制新建 run。
+- `--no-skip-completed`: 已完成任务也不跳过。
 
 ### 本地版本（调试用）
 ```bash
@@ -122,6 +128,27 @@ python codes/run_benchmark_replay.py --run-dir codes/logs/run_20260117_184322_R5
 ## 部署提示
 - 项目根目录自动推导，无需硬编码绝对路径。
 - 生成数据与日志跟随 `run_*` 目录，支持并行运行的物理隔离。
+
+## 系统升级前备份（Git/GitHub）
+建议在升级前完成一次“代码快照 + 运行结果离线备份”：
+
+### 1) 提交并推送代码
+```bash
+git status
+git add -A
+git commit -m "chore: pre-upgrade checkpoint"
+git push origin main
+```
+
+### 2) 给升级前状态打标签（可选但推荐）
+```bash
+git tag -a pre-upgrade-YYYYMMDD -m "pre system upgrade snapshot"
+git push origin pre-upgrade-YYYYMMDD
+```
+
+### 3) 备份运行结果目录（重要）
+`codes/logs/` 和 `codes/nexus/` 为大体积运行产物，默认不会推送到 GitHub。  
+升级前请额外复制到外部磁盘或云盘（可先压缩）。
 
 ## 收敛与跳级机制（简述）
 - 收敛判定基于近期奖励滑动平均（`rolling_avg`），默认窗口长度为 30，且需连续满足阈值若干次才算收敛。

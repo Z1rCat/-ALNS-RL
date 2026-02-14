@@ -5,10 +5,21 @@ from pathlib import Path
 
 THIS_DIR = Path(__file__).resolve().parent
 CODES_DIR = THIS_DIR.parent
+SERVER_OUTPUT_ROOT = CODES_DIR / "nexus"
 if str(CODES_DIR) not in sys.path:
     sys.path.insert(0, str(CODES_DIR))
 
-from experiments.run_experiments_common import ExperimentConfig, resolve_run_root, run_experiments
+from experiments.run_experiments_common import ExperimentConfig, run_experiments
+
+
+def resolve_target_run_root(run_folder: str) -> Path:
+    raw = str(run_folder or "").strip()
+    if not raw:
+        raise ValueError("--run-folder is required")
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    return (SERVER_OUTPUT_ROOT / candidate).resolve()
 
 
 def build_config() -> ExperimentConfig:
@@ -21,6 +32,7 @@ def build_config() -> ExperimentConfig:
             "S4_1",
             "S5_1",
             "S6_1",
+            "S6_2",
         ],
         request_numbers=[30],
         algorithms=["PPO"],
@@ -38,6 +50,12 @@ def parse_args():
     parser.add_argument("--max-workers", type=int, default=None, help="parallel workers across scenarios")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--run-folder",
+        type=str,
+        required=True,
+        help="target folder under codes/nexus (or absolute path)",
+    )
+    parser.add_argument(
         "--precheck",
         action="store_true",
         default=True,
@@ -50,7 +68,6 @@ def parse_args():
         help="disable rerun_incomplete precheck",
     )
     parser.add_argument("--precheck-workers", type=int, default=0, help="workers for rerun_incomplete (0=auto)")
-    parser.add_argument("--precheck-logs-root", type=str, default="", help="logs root for rerun_incomplete")
     parser.add_argument(
         "--resume-existing",
         action="store_true",
@@ -94,18 +111,26 @@ def parse_args():
 def main() -> int:
     args = parse_args()
     config = build_config()
+    run_root = resolve_target_run_root(args.run_folder)
+    run_root.mkdir(parents=True, exist_ok=True)
+    config.log_subdir = str(run_root)
     config.resume_existing = bool(args.resume_existing)
     config.skip_completed = bool(args.skip_completed)
     config.notify_on_success = bool(args.notify_success)
     config.notify_on_failure = bool(args.notify_failure)
-    if args.precheck:
-        logs_root = args.precheck_logs_root or str(resolve_run_root(config))
+    has_existing_runs = any(run_root.glob("run_*"))
+    if args.precheck and has_existing_runs:
         cmd = [
             sys.executable,
             str(CODES_DIR / "tools" / "rerun_incomplete.py"),
             "--logs-root",
-            logs_root,
+            str(run_root),
+            "--no-clean",
         ]
+        for algorithm in config.algorithms:
+            cmd.extend(["--algorithm", algorithm])
+        for dist_name in config.distributions:
+            cmd.extend(["--dist-name", dist_name])
         if args.precheck_workers:
             cmd.extend(["--workers", str(args.precheck_workers)])
         if args.dry_run:
@@ -114,6 +139,8 @@ def main() -> int:
         if code != 0:
             print(f"[server_ppo] precheck failed (exit={code})")
             return 1
+    elif args.precheck:
+        print(f"[server_ppo] precheck skipped (no existing run_* under {run_root})")
     failed = run_experiments(config, args.max_workers, args.dry_run)
     return 1 if failed else 0
 

@@ -124,3 +124,22 @@ ALNS_Research_Documentation/latex/old/*.pdf
 # Office documents (reports are generated artifacts by default)
 *.docx
 *.pptx
+
+# ===========================
+# Server Run Artifacts
+# ===========================
+# New server batch outputs (resume/checkpoint runs)
+codes/nexus/
+
+# Per-run runtime state files
+**/run.lock
+**/run.lock.stale.*
+**/heartbeat.json
+**/run_status.json
+**/watchdog_events.jsonl
+**/FAILED.json
+**/DONE.json
+**/notify_cooldown.json
+
+# Temporary retry files
+**/baseline_*.csv.attempt*

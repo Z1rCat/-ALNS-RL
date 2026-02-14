@@ -2,22 +2,36 @@
 轻量级日志工具，用于追加 CSV 行到 codes/logs 目录。
 """
 import csv
+import os
 import time
 import json
 import threading
 from pathlib import Path
 
-LOG_ROOT = Path(__file__).resolve().parent.parent / "logs"
+DEFAULT_LOG_ROOT = Path(__file__).resolve().parent.parent / "logs"
+LOG_ROOT = DEFAULT_LOG_ROOT
 RUN_DIR = LOG_ROOT
 _LOCK = threading.Lock()
+
+
+def _resolve_log_root() -> Path:
+    raw = os.environ.get("RL_LOG_ROOT", "").strip()
+    if not raw:
+        return DEFAULT_LOG_ROOT
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (Path(__file__).resolve().parent.parent / path).resolve()
+    return path
 
 
 def set_run_dir(run_name: str):
     """
     配置本次运行的日志目录，如 logs/run_xxx
     """
-    global RUN_DIR
-    RUN_DIR = LOG_ROOT / run_name
+    global RUN_DIR, LOG_ROOT
+    LOG_ROOT = _resolve_log_root()
+    run_path = Path(str(run_name))
+    RUN_DIR = run_path if run_path.is_absolute() else (LOG_ROOT / run_path)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     (RUN_DIR / "data").mkdir(parents=True, exist_ok=True)
 

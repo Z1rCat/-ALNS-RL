@@ -273,8 +273,11 @@ def select_algorithm():
     print("  [7] A2C_HAT (HAT: History-Attention Transform)")
     print("  [8] PPO_LSTM (RecurrentPPO + LSTM)")
     print("  [9] PPO_HAT_LSTM (HAT + RecurrentPPO + LSTM)")
-    print("  [10] PPO_HAT_MOE (HAT + MoE(K=2) + PPO)")
-    print("  [11] A2C_HAT_MOE (HAT + MoE(K=2) + A2C)")
+    print("  [10] PPO_HAT_PDI (HAT + PPO + PDI)")
+    print("  [11] PPO_HAT_MOE (HAT + MoE(K=2) + PPO)")
+    print("  [12] A2C_HAT_MOE (HAT + MoE(K=2) + A2C)")
+    print("  [13] QRDQN_CVAR (Distributional QRDQN + CVaR Inference)")
+    print("  [14] BE_CVAR_DQN (Belief+Ensemble+CVaR DQN)")
     print("=" * 50)
     mapping = {
         "1": "DQN",
@@ -286,8 +289,11 @@ def select_algorithm():
         "7": "A2C_HAT",
         "8": "PPO_LSTM",
         "9": "PPO_HAT_LSTM",
-        "10": "PPO_HAT_MOE",
-        "11": "A2C_HAT_MOE",
+        "10": "PPO_HAT_PDI",
+        "11": "PPO_HAT_MOE",
+        "12": "A2C_HAT_MOE",
+        "13": "QRDQN_CVAR",
+        "14": "BE_CVAR_DQN",
     }
     while True:
         choice = input("请选择算法 (默认 1=DQN): ").strip()
@@ -296,7 +302,7 @@ def select_algorithm():
         choice_upper = choice.upper()
         if choice_upper == "HAT":
             return "PPO_HAT"
-        if choice_upper in {"PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM"}:
+        if choice_upper in {"PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN"}:
             return choice_upper
         if choice_upper in mapping.values():
             return choice_upper
@@ -320,13 +326,15 @@ def resolve_algorithm(algorithm):
     algo_label = (algorithm or "DQN").upper()
     if algo_label == "HAT":
         algo_label = "PPO_HAT"
-    hat_enabled = algo_label in {"PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_HAT_LSTM"}
+    hat_enabled = algo_label in {"PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_HAT_LSTM", "PPO_HAT_PDI"}
     if algo_label in {"PPO_HAT", "PPO_HAT_MOE"}:
         base_algo = "PPO"
     elif algo_label == "PPO_LSTM":
         base_algo = "PPO_LSTM"
     elif algo_label == "PPO_HAT_LSTM":
         base_algo = "PPO_LSTM"
+    elif algo_label == "PPO_HAT_PDI":
+        base_algo = "PPO_HAT_PDI"
     elif algo_label in {"A2C_HAT", "A2C_HAT_MOE"}:
         base_algo = "A2C"
     else:
@@ -502,7 +510,7 @@ def parse_args():
     parser.add_argument("--dist_name", type=str)
     parser.add_argument("--request_number", type=int)
     parser.add_argument("--run_count", type=int)
-    parser.add_argument("--algorithm", type=str, help="DQN/PPO/A2C/PPO_HAT/A2C_HAT/PPO_LSTM/PPO_HAT_LSTM/HAT")
+    parser.add_argument("--algorithm", type=str, help="DQN/PPO/A2C/DRCB/LBKLAC/PPO_HAT/A2C_HAT/PPO_LSTM/PPO_HAT_LSTM/PPO_HAT_PDI/PPO_HAT_MOE/A2C_HAT_MOE/QRDQN_CVAR/BE_CVAR_DQN/HAT")
     parser.add_argument("--workers", type=int, help="generator workers (1=single core)")
     parser.add_argument("--single_core", action="store_true", help="force generator single core")
     parser.add_argument("--parallel-runs", type=int, help="parallel run count when run_count > 1")
@@ -520,7 +528,7 @@ def main():
     parallel_runs = int(args.parallel_runs) if args.parallel_runs else 1
     if parallel_runs < 1:
         parallel_runs = 1
-    if algorithm is not None and algorithm not in {"DQN", "PPO", "A2C", "DRCB", "LBKLAC", "PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "HAT"}:
+    if algorithm is not None and algorithm not in {"DQN", "PPO", "A2C", "DRCB", "LBKLAC", "PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN", "HAT"}:
         print(f"未知算法 {algorithm}，回退为 DQN")
         algorithm = "DQN"
 

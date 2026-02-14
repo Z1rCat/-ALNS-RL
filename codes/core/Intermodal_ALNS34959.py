@@ -253,6 +253,14 @@ TRACE_FIELDS = [
     # LB-KLAC diagnostics
     "belief_smooth_penalty", "value_residual", "delta_t", "policy_kl", "action_prob", "entropy",
     "bootstrap", "trust_region_scaled", "trust_region_scale",
+    # MoE (HAT+MoE) diagnostics (rolling means; safe to leave empty)
+    "gate_prob_0_mean", "gate_prob_1_mean", "gate_entropy_mean",
+    "expert0_action1_prob_mean", "expert1_action1_prob_mean",
+    "expert_selected_ratio",
+    "moe_div_mean",
+    # PDI diagnostics
+    "pdi_future_mean", "pdi_pref_mean", "pdi_hard_mean",
+    "pdi_fail0_mean", "pdi_fail1_mean",
 ]
 
 def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source="ALNS"):
@@ -9735,8 +9743,14 @@ def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward
         os._exit(0) # 比 sys.exit() 更强力，直接终止进程
 
 def stop_wait():
-    if os.path.exists(os.environ.get('STOP_FLAG_FILE', '34959.txt')):
-        sys.exit(78)
+    stop_flag = os.environ.get('STOP_FLAG_FILE', '34959.txt')
+    if not stop_flag:
+        return
+    try:
+        if os.path.exists(stop_flag):
+            sys.exit(78)
+    except (OSError, ValueError):
+        return
 
 
 def get_delay_tolerance(get_route, first_index, duration, index_r, influenced_r, k):

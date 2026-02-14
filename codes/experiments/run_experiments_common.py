@@ -1,4 +1,5 @@
 import base64
+import csv
 import concurrent.futures
 import datetime
 import json
@@ -65,6 +66,59 @@ def _env_bool(name: str, default: bool) -> bool:
 def _file_has_content(path: Path, min_bytes: int = 1) -> bool:
     try:
         return path.exists() and path.is_file() and path.stat().st_size >= int(min_bytes)
+    except Exception:
+        return False
+
+
+def _csv_has_data_row(path: Path, min_rows: int = 1) -> bool:
+    if not _file_has_content(path, min_bytes=8):
+        return False
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            # skip header
+            try:
+                next(reader)
+            except StopIteration:
+                return False
+            count = 0
+            for row in reader:
+                if not row:
+                    continue
+                if all((str(cell).strip() == "") for cell in row):
+                    continue
+                count += 1
+                if count >= int(min_rows):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _csv_has_phase_row(path: Path, phase: str, min_rows: int = 1) -> bool:
+    if not _file_has_content(path, min_bytes=8):
+        return False
+    target = str(phase).strip().lower()
+    if not target:
+        return False
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                return False
+            field_map = {str(name).strip().lower(): name for name in reader.fieldnames if name}
+            phase_key = field_map.get("phase")
+            if not phase_key:
+                return False
+            count = 0
+            for row in reader:
+                value = str(row.get(phase_key, "")).strip().lower()
+                if value != target:
+                    continue
+                count += 1
+                if count >= int(min_rows):
+                    return True
+        return False
     except Exception:
         return False
 
@@ -718,9 +772,14 @@ def resolve_run_root(config: ExperimentConfig) -> Path:
     return LOG_ROOT / path
 
 
-def run_command(cmd: List[str], cwd: Optional[Path] = None, timeout_s: Optional[float] = None) -> int:
+def run_command(
+    cmd: List[str],
+    cwd: Optional[Path] = None,
+    timeout_s: Optional[float] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> int:
     try:
-        proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, timeout=timeout_s)
+        proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, timeout=timeout_s, env=env)
     except subprocess.TimeoutExpired:
         return 124
     return proc.returncode
@@ -765,13 +824,12 @@ def _write_failed_marker(
 
 
 def _rotate_files(run_dir: Path, file_names: Iterable[str], attempt: int) -> None:
-    suffix = f".attempt{attempt}"
     for name in file_names:
         path = run_dir / name
         if not path.exists():
             continue
         try:
-            path.rename(path.with_name(path.name + suffix))
+            path.unlink()
         except Exception:
             _safe_unlink(path)
 
@@ -781,8 +839,99 @@ def _rotate_master_files(run_dir: Path, attempt: int) -> None:
     _safe_unlink(run_dir / "34959.txt")
 
 
-def _rotate_baseline_files(run_dir: Path, attempt: int) -> None:
-    _rotate_files(run_dir, BASELINE_OUTPUT_FILES, attempt)
+def _baseline_required_policies(include_random: bool) -> List[str]:
+    policies = ["wait", "reroute"]
+    if include_random:
+        policies.append("random")
+    return policies
+
+
+def _baseline_policy_filename(policy: str) -> str:
+    value = str(policy).strip().lower()
+    if value == "wait":
+        return "baseline_wait.csv"
+    if value == "reroute":
+        return "baseline_reroute.csv"
+    if value == "random":
+        return "baseline_random.csv"
+    raise ValueError(f"unknown baseline policy: {policy}")
+
+
+def _baseline_policy_path(run_dir: Path, policy: str) -> Path:
+    return run_dir / _baseline_policy_filename(policy)
+
+
+def _baseline_presence_flags(run_dir: Path) -> Dict[str, bool]:
+    wait_path = _baseline_policy_path(run_dir, "wait")
+    reroute_path = _baseline_policy_path(run_dir, "reroute")
+    random_path = _baseline_policy_path(run_dir, "random")
+    wait_file = _csv_has_data_row(wait_path, min_rows=1)
+    reroute_file = _csv_has_data_row(reroute_path, min_rows=1)
+    random_file = _csv_has_data_row(random_path, min_rows=1)
+    return {
+        "wait": wait_file,
+        "reroute": reroute_file,
+        "random": random_file,
+        "wait_file": wait_file,
+        "reroute_file": reroute_file,
+        "random_file": random_file,
+        "wait_impl": _csv_has_phase_row(wait_path, phase="implement", min_rows=1),
+        "reroute_impl": _csv_has_phase_row(reroute_path, phase="implement", min_rows=1),
+        "random_impl": _csv_has_phase_row(random_path, phase="implement", min_rows=1),
+        "paper": _dir_has_content(run_dir / "paper_figures"),
+    }
+
+
+def _baseline_success_flags(run_dir: Path) -> Dict[str, bool]:
+    flags = _baseline_presence_flags(run_dir)
+    # Avoid baseline/plot cyclic dependency: baseline success should not require paper.
+    wait_success = bool(flags["reroute"] or flags["wait_impl"] or (flags["paper"] and flags["wait"]))
+    reroute_success = bool(
+        flags["random"] or flags["reroute_impl"] or (flags["paper"] and flags["wait"] and flags["reroute"])
+    )
+    random_success = bool(flags["random_impl"] or (flags["paper"] and flags["wait"] and flags["reroute"] and flags["random"]))
+    return {
+        "wait": wait_success,
+        "reroute": reroute_success,
+        "random": random_success,
+        "paper": bool(flags["paper"]),
+        "wait_file": bool(flags["wait_file"]),
+        "reroute_file": bool(flags["reroute_file"]),
+        "random_file": bool(flags["random_file"]),
+        "wait_impl": bool(flags["wait_impl"]),
+        "reroute_impl": bool(flags["reroute_impl"]),
+        "random_impl": bool(flags["random_impl"]),
+    }
+
+
+def _missing_baseline_policies(run_dir: Path, include_random: bool) -> List[str]:
+    success = _baseline_success_flags(run_dir)
+    missing: List[str] = []
+    for policy in _baseline_required_policies(include_random):
+        if not bool(success.get(policy, False)):
+            missing.append(policy)
+    return missing
+
+
+def _build_baseline_cmd(run_dir: Path, policy: str) -> List[str]:
+    return [
+        sys.executable,
+        str(CODES_DIR / "experiments" / "run_benchmark_replay.py"),
+        "--run-dir",
+        str(run_dir),
+        "--policy",
+        str(policy),
+    ]
+
+
+def _rotate_baseline_policy_file(run_dir: Path, policy: str, attempt: int) -> None:
+    path = _baseline_policy_path(run_dir, policy)
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except Exception:
+        _safe_unlink(path)
 
 
 def _cleanup_attempt_files(run_dir: Path, file_names: Iterable[str]) -> None:
@@ -803,12 +952,10 @@ def _resolve_master_watch_files(run_dir: Path) -> List[Path]:
     ]
 
 
-def _resolve_baseline_watch_files(run_dir: Path) -> List[Path]:
-    return [
-        run_dir / "baseline_wait.csv",
-        run_dir / "baseline_reroute.csv",
-        run_dir / "baseline_random.csv",
-    ]
+def _resolve_baseline_watch_files(run_dir: Path, policy: Optional[str] = None) -> List[Path]:
+    if policy:
+        return [_baseline_policy_path(run_dir, policy)]
+    return [_baseline_policy_path(run_dir, p) for p in ["wait", "reroute", "random"]]
 
 
 def _cleanup_baseline_attempts(run_dir: Path) -> None:
@@ -826,8 +973,9 @@ def _run_with_watchdog(
     startup_s: float,
     min_bytes: int,
     poll_s: float = 5.0,
+    env: Optional[Dict[str, str]] = None,
 ) -> int:
-    proc = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None)
+    proc = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None, env=env)
     _write_run_status(run_dir, {"stage": stage, "status": "running", "pid": proc.pid})
     _append_watchdog_event(run_dir, {"stage": stage, "event": "start", "pid": proc.pid})
 
@@ -855,12 +1003,13 @@ def _run_with_watchdog(
                 last_sizes[path] = size
                 last_growth_ts = now
 
-        if now - start_ts >= startup_s and now - last_growth_ts >= stall_s and max_size <= min_bytes:
+        if now - start_ts >= startup_s and now - last_growth_ts >= stall_s:
             _append_watchdog_event(
                 run_dir,
                 {
                     "stage": stage,
                     "event": "stall_timeout",
+                    "reason": "no_output" if max_size <= min_bytes else "no_growth",
                     "stall_s": stall_s,
                     "startup_s": startup_s,
                     "min_bytes": min_bytes,
@@ -917,16 +1066,22 @@ def _retry_backoff_seconds(stage: str, attempt: int) -> float:
 
 
 def _is_master_complete(run_dir: Path) -> bool:
-    return _file_has_content(run_dir / "rl_trace.csv", min_bytes=32) and _file_has_content(
-        run_dir / "rl_training.csv", min_bytes=32
+    trace_ok = _csv_has_data_row(run_dir / "rl_trace.csv", min_rows=max(1, _env_int("MASTER_MIN_TRACE_ROWS", 5)))
+    train_ok = _csv_has_data_row(
+        run_dir / "rl_training.csv", min_rows=max(1, _env_int("MASTER_MIN_TRAIN_ROWS", 5))
     )
+    summary_ok = _csv_has_data_row(
+        run_dir / "rl_summary.csv", min_rows=max(1, _env_int("MASTER_MIN_SUMMARY_ROWS", 1))
+    )
+    baseline_any = any(
+        _csv_has_data_row(run_dir / name, min_rows=1)
+        for name in ("baseline_wait.csv", "baseline_reroute.csv", "baseline_random.csv")
+    )
+    return trace_ok and train_ok and (summary_ok or baseline_any)
 
 
 def _is_baseline_complete(run_dir: Path, include_random: bool) -> bool:
-    required = ["baseline_wait.csv", "baseline_reroute.csv"]
-    if include_random:
-        required.append("baseline_random.csv")
-    return all(_file_has_content(run_dir / name, min_bytes=16) for name in required)
+    return len(_missing_baseline_policies(run_dir, include_random)) == 0
 
 
 def _is_metrics_complete(run_dir: Path) -> bool:
@@ -935,6 +1090,10 @@ def _is_metrics_complete(run_dir: Path) -> bool:
 
 def _is_plots_complete(run_dir: Path) -> bool:
     return _dir_has_content(run_dir / "paper_figures")
+
+
+def _is_cleanup_complete(run_dir: Path) -> bool:
+    return not (run_dir / "data").exists() and not (run_dir / "alns_outputs").exists()
 
 
 def _collect_stage_state(run_dir: Path, config: ExperimentConfig) -> Dict[str, bool]:
@@ -1133,17 +1292,8 @@ def run_task(
         "--run-name",
         run_name,
     ]
-
-    baseline_cmd = [
-        sys.executable,
-        str(CODES_DIR / "experiments" / "run_benchmark_replay.py"),
-        "--run-dir",
-        str(run_dir),
-        "--policy",
-        "all",
-    ]
-    if config.baseline_include_random:
-        baseline_cmd.append("--include-random")
+    master_env = dict(os.environ)
+    master_env["RL_LOG_ROOT"] = str(run_dir.parent)
 
     plot_cmd = [
         sys.executable,
@@ -1168,18 +1318,41 @@ def run_task(
 
     print(f"[{config.name}] start {run_name} mode={plan.mode}")
     state = _collect_stage_state(run_dir, config)
+    baseline_detail = _baseline_success_flags(run_dir) if config.run_baseline else {}
     if plan.mode == "resume":
         print(
             f"[{config.name}] resume stage_state {run_name}: "
             f"master={int(state['master'])} baseline={int(state['baseline'])} "
             f"metrics={int(state['metrics'])} plot={int(state['plot'])}"
         )
-        _append_watchdog_event(run_dir, {"stage": "resume", "event": "stage_state", "state": state})
+        if config.run_baseline:
+            print(
+                f"[{config.name}] resume baseline_flags {run_name}: "
+                f"W={int(baseline_detail.get('wait_file', False))} "
+                f"R={int(baseline_detail.get('reroute_file', False))} "
+                f"N={int(baseline_detail.get('random_file', False))} "
+                f"WI={int(baseline_detail.get('wait_impl', False))} "
+                f"RI={int(baseline_detail.get('reroute_impl', False))} "
+                f"NI={int(baseline_detail.get('random_impl', False))} "
+                f"P={int(baseline_detail.get('paper', False))} | "
+                f"wait_ok={int(baseline_detail.get('wait', False))} "
+                f"reroute_ok={int(baseline_detail.get('reroute', False))} "
+                f"random_ok={int(baseline_detail.get('random', False))}"
+            )
+        _append_watchdog_event(
+            run_dir,
+            {"stage": "resume", "event": "stage_state", "state": state, "baseline_detail": baseline_detail},
+        )
 
     if dry_run:
         print("  master:", " ".join(master_cmd))
         if config.run_baseline:
-            print("  baseline:", " ".join(baseline_cmd))
+            missing_policies = _missing_baseline_policies(run_dir, config.baseline_include_random)
+            if not missing_policies:
+                print("  baseline: <skip, already complete>")
+            else:
+                for policy in missing_policies:
+                    print(f"  baseline[{policy}]:", " ".join(_build_baseline_cmd(run_dir, policy)))
         if config.run_metrics:
             print("  metrics:", " ".join(metrics_cmd))
         if config.run_plots:
@@ -1240,9 +1413,63 @@ def run_task(
     baseline_complete = state["baseline"]
     metrics_complete = state["metrics"]
     plot_complete = state["plot"]
+    master_reran = False
 
     try:
         if config.skip_completed and _is_run_complete(run_dir, config):
+            if config.cleanup_after_run and not _is_cleanup_complete(run_dir):
+                attempt = 0
+                code = 1
+                last_reason = "nonzero_exit"
+                while True:
+                    attempt += 1
+                    t0 = time.monotonic()
+                    code = run_command(cleanup_cmd, cwd=ROOT_DIR, timeout_s=cleanup_timeout_s)
+                    stage_times[f"cleanup_sec_attempt_{attempt}"] = time.monotonic() - t0
+                    if code == 0:
+                        break
+                    last_reason = _classify_exit_reason(code)
+                    _append_watchdog_event(
+                        run_dir,
+                        {
+                            "stage": "cleanup",
+                            "event": "attempt_failed",
+                            "attempt": attempt,
+                            "exit_code": code,
+                            "reason": last_reason,
+                            "source": "skip_completed",
+                        },
+                    )
+                    if not _can_retry(last_reason, attempt, cleanup_retry_budgets):
+                        break
+                    backoff = _retry_backoff_seconds("cleanup", attempt)
+                    _append_watchdog_event(
+                        run_dir,
+                        {
+                            "stage": "cleanup",
+                            "event": "retry_scheduled",
+                            "attempt": attempt + 1,
+                            "after_s": backoff,
+                            "reason": last_reason,
+                            "source": "skip_completed",
+                        },
+                    )
+                    time.sleep(backoff)
+                if code != 0:
+                    status = "failed_cleanup"
+                    failure_detail = {
+                        "stage": "cleanup",
+                        "attempts": attempt,
+                        "retry_budgets": cleanup_retry_budgets,
+                        "exit_code": code,
+                        "reason": last_reason,
+                        "source": "skip_completed",
+                    }
+                    _write_failed_marker(run_dir, "cleanup", code, failure_detail)
+                    return run_name, status
+                stage_times["cleanup_sec"] = sum(
+                    value for key, value in stage_times.items() if key.startswith("cleanup_sec_attempt_")
+                )
             status = "skipped_completed"
             return run_name, status
 
@@ -1275,6 +1502,7 @@ def run_task(
                     startup_s=master_startup_s,
                     min_bytes=master_min_bytes,
                     poll_s=master_poll_s,
+                    env=master_env,
                 )
                 stage_times[f"master_sec_attempt_{attempt}"] = time.monotonic() - t0
                 if code == 0:
@@ -1316,88 +1544,115 @@ def run_task(
                 _write_failed_marker(run_dir, "master", code, failure_detail)
                 return run_name, status
             master_complete = True
+            master_reran = True
             baseline_complete = False
             metrics_complete = False
             plot_complete = False
-            for name in BASELINE_OUTPUT_FILES:
-                _safe_unlink(run_dir / name)
             _safe_unlink(run_dir / "metrics.json")
             _safe_rmtree(run_dir / "paper_figures")
 
         if config.run_baseline and not baseline_complete:
             _clear_done_marker(run_dir)
-            attempt = 0
-            code = 1
-            last_reason = "nonzero_exit"
-            watch_files = _resolve_baseline_watch_files(run_dir)
-            while True:
-                attempt += 1
-                _rotate_baseline_files(run_dir, attempt)
-                _append_watchdog_event(
-                    run_dir,
-                    {
+            if master_reran:
+                missing_policies = _baseline_required_policies(config.baseline_include_random)
+            else:
+                missing_policies = _missing_baseline_policies(run_dir, config.baseline_include_random)
+            baseline_ran_any = False
+            for policy in missing_policies:
+                attempt = 0
+                code = 1
+                last_reason = "nonzero_exit"
+                baseline_cmd = _build_baseline_cmd(run_dir, policy)
+                watch_files = _resolve_baseline_watch_files(run_dir, policy=policy)
+                while True:
+                    attempt += 1
+                    _rotate_baseline_policy_file(run_dir, policy, attempt)
+                    _append_watchdog_event(
+                        run_dir,
+                        {
+                            "stage": "baseline",
+                            "event": "attempt_start",
+                            "policy": policy,
+                            "attempt": attempt,
+                            "max_attempts": baseline_retries + 1,
+                        },
+                    )
+                    t0 = time.monotonic()
+                    code = _run_with_watchdog(
+                        baseline_cmd,
+                        ROOT_DIR,
+                        run_dir=run_dir,
+                        stage=f"baseline_{policy}",
+                        watch_files=watch_files,
+                        stall_s=baseline_stall_s,
+                        startup_s=baseline_startup_s,
+                        min_bytes=baseline_min_bytes,
+                        poll_s=baseline_poll_s,
+                    )
+                    stage_times[f"baseline_{policy}_sec_attempt_{attempt}"] = time.monotonic() - t0
+                    if code == 0:
+                        break
+                    last_reason = _classify_exit_reason(code)
+                    _append_watchdog_event(
+                        run_dir,
+                        {
+                            "stage": "baseline",
+                            "event": "attempt_failed",
+                            "policy": policy,
+                            "attempt": attempt,
+                            "exit_code": code,
+                            "reason": last_reason,
+                        },
+                    )
+                    if not _can_retry(last_reason, attempt, baseline_retry_budgets):
+                        break
+                    backoff = _retry_backoff_seconds("baseline", attempt)
+                    _append_watchdog_event(
+                        run_dir,
+                        {
+                            "stage": "baseline",
+                            "event": "retry_scheduled",
+                            "policy": policy,
+                            "attempt": attempt + 1,
+                            "after_s": backoff,
+                            "reason": last_reason,
+                        },
+                    )
+                    time.sleep(backoff)
+                if code != 0:
+                    status = "failed_baseline"
+                    failure_detail = {
                         "stage": "baseline",
-                        "event": "attempt_start",
-                        "attempt": attempt,
-                        "max_attempts": baseline_retries + 1,
-                    },
-                )
-                t0 = time.monotonic()
-                code = _run_with_watchdog(
-                    baseline_cmd,
-                    ROOT_DIR,
-                    run_dir=run_dir,
-                    stage="baseline",
-                    watch_files=watch_files,
-                    stall_s=baseline_stall_s,
-                    startup_s=baseline_startup_s,
-                    min_bytes=baseline_min_bytes,
-                    poll_s=baseline_poll_s,
-                )
-                stage_times[f"baseline_sec_attempt_{attempt}"] = time.monotonic() - t0
-                if code == 0:
-                    break
-                last_reason = _classify_exit_reason(code)
-                _append_watchdog_event(
-                    run_dir,
-                    {
-                        "stage": "baseline",
-                        "event": "attempt_failed",
-                        "attempt": attempt,
+                        "policy": policy,
+                        "attempts": attempt,
+                        "retry_budgets": baseline_retry_budgets,
                         "exit_code": code,
                         "reason": last_reason,
-                    },
+                        "missing_policies": missing_policies,
+                    }
+                    _write_failed_marker(run_dir, "baseline", code, failure_detail)
+                    return run_name, status
+                baseline_ran_any = True
+                stage_times[f"baseline_{policy}_sec"] = sum(
+                    value for key, value in stage_times.items() if key.startswith(f"baseline_{policy}_sec_attempt_")
                 )
-                if not _can_retry(last_reason, attempt, baseline_retry_budgets):
-                    break
-                backoff = _retry_backoff_seconds("baseline", attempt)
-                _append_watchdog_event(
-                    run_dir,
-                    {
-                        "stage": "baseline",
-                        "event": "retry_scheduled",
-                        "attempt": attempt + 1,
-                        "after_s": backoff,
-                        "reason": last_reason,
-                    },
-                )
-                time.sleep(backoff)
-            if code != 0:
+
+            baseline_complete = len(_missing_baseline_policies(run_dir, config.baseline_include_random)) == 0
+            if not baseline_complete:
                 status = "failed_baseline"
                 failure_detail = {
                     "stage": "baseline",
-                    "attempts": attempt,
-                    "retry_budgets": baseline_retry_budgets,
-                    "exit_code": code,
-                    "reason": last_reason,
+                    "reason": "incomplete_after_policy_runs",
+                    "missing_policies": _missing_baseline_policies(run_dir, config.baseline_include_random),
                 }
-                _write_failed_marker(run_dir, "baseline", code, failure_detail)
+                _write_failed_marker(run_dir, "baseline", 1, failure_detail)
                 return run_name, status
-            baseline_complete = True
-            metrics_complete = False
-            plot_complete = False
-            _safe_unlink(run_dir / "metrics.json")
-            _safe_rmtree(run_dir / "paper_figures")
+
+            if baseline_ran_any:
+                metrics_complete = False
+                plot_complete = False
+                _safe_unlink(run_dir / "metrics.json")
+                _safe_rmtree(run_dir / "paper_figures")
 
         if config.run_metrics and not metrics_complete:
             _clear_done_marker(run_dir)

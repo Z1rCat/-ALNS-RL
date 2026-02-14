@@ -28,6 +28,12 @@ except Exception:
     RecurrentPPO = None
     _SB3_CONTRIB_AVAILABLE = False
 try:
+    from sb3_contrib import QRDQN as SB3_QRDQN
+    _QRDQN_AVAILABLE = True
+except Exception:
+    SB3_QRDQN = None
+    _QRDQN_AVAILABLE = False
+try:
     from robust_rl.lbklac import LBKLACAgent, LBKLACConfig
     _LBKLAC_AVAILABLE = True
 except Exception:
@@ -124,6 +130,9 @@ LSTM_CHAIN_LEN = 1
 LSTM_CHAIN_STEP = 0
 USE_LSTM = False
 STAGE_IN_OBS = False
+PDI_GT_MEAN_LIST = []
+PDI_PHASE_LIST = []
+PDI_REWARD_LIST = []
 
 
 def _ema_update(prev, value, alpha):
@@ -134,7 +143,7 @@ def _ema_update(prev, value, alpha):
 
 def _hat_is_active():
     try:
-        return os.environ.get("RL_HAT", "0").strip() == "1" and algorithm in ("PPO", "A2C")
+        return os.environ.get("RL_HAT", "0").strip() == "1" and algorithm in ("PPO", "A2C", "PPO_HAT_PDI")
     except Exception:
         return False
 
@@ -247,7 +256,7 @@ def _flush_impl_reward_lists(env):
             log_trace_from_row(state_row, "receive_reward", action=action_val, reward=reward, source="RL")
         except Exception:
             pass
-        if _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
+        if _hat_is_active() and implement == 1:
             try:
                 _hat_update_stats(float(reward), float(action_val))
                 _hat_update_history_wrapper(env, action_val, reward)
@@ -257,6 +266,29 @@ def _flush_impl_reward_lists(env):
             Intermodal_ALNS34959.log_impl_reward(reward)
         except Exception:
             pass
+        if algorithm == "DRCB" and os.environ.get("DRCB_IMPL_ONLINE_UPDATE", "1").strip() == "1":
+            try:
+                row_order = [
+                    "uncertainty_index", "uncertainty_type", "request", "vehicle",
+                    "delay_tolerance", "passed_terminals", "current_time", "action", "reward",
+                ]
+                row_series = pd.Series({k: state_row.get(k, "") for k in row_order})
+                obs_upd = get_state(row_series)
+                model._update(obs_upd, int(action_val), float(reward))
+            except Exception:
+                pass
+        elif algorithm == "BE_CVAR_DQN" and os.environ.get("BE_IMPL_ONLINE_OBS", "1").strip() == "1":
+            try:
+                row_order = [
+                    "uncertainty_index", "uncertainty_type", "request", "vehicle",
+                    "delay_tolerance", "passed_terminals", "current_time", "action", "reward",
+                ]
+                row_series = pd.Series({k: state_row.get(k, "") for k in row_order})
+                obs_upd = get_state(row_series)
+                if hasattr(model, "observe_impl"):
+                    model.observe_impl(obs_upd, int(action_val), float(reward))
+            except Exception:
+                pass
         _IMPL_REMOVAL_IDX += 1
 
     try:
@@ -279,7 +311,7 @@ def _flush_impl_reward_lists(env):
             log_trace_from_row(state_row, "receive_reward", action=action_val, reward=reward, source="RL")
         except Exception:
             pass
-        if _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
+        if _hat_is_active() and implement == 1:
             try:
                 _hat_update_stats(float(reward), float(action_val))
                 _hat_update_history_wrapper(env, action_val, reward)
@@ -289,6 +321,29 @@ def _flush_impl_reward_lists(env):
             Intermodal_ALNS34959.log_impl_reward(reward)
         except Exception:
             pass
+        if algorithm == "DRCB" and os.environ.get("DRCB_IMPL_ONLINE_UPDATE", "1").strip() == "1":
+            try:
+                row_order = [
+                    "uncertainty_index", "uncertainty_type", "request", "vehicle",
+                    "delay_tolerance", "passed_terminals", "current_time", "action", "reward",
+                ]
+                row_series = pd.Series({k: state_row.get(k, "") for k in row_order})
+                obs_upd = get_state(row_series)
+                model._update(obs_upd, int(action_val), float(reward))
+            except Exception:
+                pass
+        elif algorithm == "BE_CVAR_DQN" and os.environ.get("BE_IMPL_ONLINE_OBS", "1").strip() == "1":
+            try:
+                row_order = [
+                    "uncertainty_index", "uncertainty_type", "request", "vehicle",
+                    "delay_tolerance", "passed_terminals", "current_time", "action", "reward",
+                ]
+                row_series = pd.Series({k: state_row.get(k, "") for k in row_order})
+                obs_upd = get_state(row_series)
+                if hasattr(model, "observe_impl"):
+                    model.observe_impl(obs_upd, int(action_val), float(reward))
+            except Exception:
+                pass
         _IMPL_INSERTION_IDX += 1
 
 
@@ -356,6 +411,9 @@ CURRICULUM_SUCCESS_REQUIRED = 3
 curriculum_converged = 0
 curriculum_last_avg_reward = ""
 SCENARIO_NAME = os.environ.get("SCENARIO_NAME", "")
+# Baseline replay may call env.step without going through main(), so keep safe defaults.
+algorithm = (os.environ.get("RL_ALGORITHM", "DQN") or "DQN").strip().upper()
+mode = (os.environ.get("RL_MODE", "barge") or "barge").strip().lower()
 
 TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
@@ -372,6 +430,9 @@ TRACE_FIELDS = [
     "expert0_action1_prob_mean", "expert1_action1_prob_mean",
     "expert_selected_ratio",
     "moe_div_mean",
+    # PDI diagnostics
+    "pdi_future_mean", "pdi_pref_mean", "pdi_hard_mean",
+    "pdi_fail0_mean", "pdi_fail1_mean",
 ]
 
 current_gt_mean = ""
@@ -393,6 +454,8 @@ TRAIN_FIELDS = [
     "value_pred_mean", "value_pred_std",
     "advantage_mean", "advantage_std",
     "explained_variance", "policy_entropy", "lstm_hidden_norm",
+    # PDI training diagnostics
+    "pdi_future_loss", "pdi_teach_loss", "pdi_actfail_loss",
 ]
 
 def _drift_snapshot():
@@ -469,6 +532,12 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
         try:
             if model is not None and hasattr(model, "policy") and hasattr(model.policy, "get_moe_log"):
                 payload.update(model.policy.get_moe_log())
+        except Exception:
+            pass
+        # Best-effort PDI stats from policy
+        try:
+            if model is not None and hasattr(model, "policy") and hasattr(model.policy, "get_pdi_log"):
+                payload.update(model.policy.get_pdi_log())
         except Exception:
             pass
         if extra:
@@ -974,6 +1043,13 @@ class coordinationEnv(Env):
                             if type(reward).__module__ == 'numpy':
                                 reward = reward[0,0]
                             all_rewards_list.append(reward)
+                            if algorithm == "PPO_HAT_PDI" and evaluate == 0 and implement == 0:
+                                try:
+                                    PDI_REWARD_LIST.append(float(reward))
+                                    PDI_GT_MEAN_LIST.append(float(current_gt_mean) if current_gt_mean != "" else 0.0)
+                                    PDI_PHASE_LIST.append(str(current_phase_label))
+                                except Exception:
+                                    pass
                             recent_rewards.append(reward)
                             if _hat_is_active():
                                 _hat_update_stats(reward, action)
@@ -1304,7 +1380,7 @@ def append_new_line(file_name, text_to_append):
         file_object.write(text_to_append)
 
 def main(algorithm2, mode2):
-    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward, LBKLAC_CUSTOM_LOGGING, USE_LSTM, STAGE_IN_OBS, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP
+    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward, LBKLAC_CUSTOM_LOGGING, USE_LSTM, STAGE_IN_OBS, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP, PDI_GT_MEAN_LIST, PDI_PHASE_LIST, PDI_REWARD_LIST
     add_event_types =0 
     stop_everything_in_learning_and_go_to_implementation_phase = 0
     clear_pairs_done = 0
@@ -1337,6 +1413,10 @@ def main(algorithm2, mode2):
         STAGE_IN_OBS = os.environ.get("RL_STAGE_IN_OBS", "0").strip() == "1"
         LSTM_CHAIN_LEN = 1
         LSTM_CHAIN_STEP = 0
+    # reset PDI buffers per run
+    PDI_GT_MEAN_LIST = []
+    PDI_PHASE_LIST = []
+    PDI_REWARD_LIST = []
     seed_val = resolve_seed()
     set_global_seed(seed_val)
     episode_length = 1
@@ -1389,7 +1469,7 @@ def main(algorithm2, mode2):
         env=coordinationEnv()
         hat_policy_kwargs = None
         use_hat = os.environ.get("RL_HAT", "0").strip() == "1"
-        if use_hat and algorithm in ("PPO", "A2C"):
+        if use_hat and algorithm in ("PPO", "A2C", "PPO_HAT_PDI", "PPO_HAT_LSTM"):
             try:
                 from robust_rl.sb3_attention import HistoryAttentionWrapper, AttentionExtractor, HATConfig
                 hat_cfg = HATConfig(
@@ -1534,22 +1614,113 @@ def main(algorithm2, mode2):
             LBKLAC_CUSTOM_LOGGING = True
         elif algorithm == 'DRCB':
             from robust_rl.drcb import DriftRobustContextualBandit
+            use_hidden_meta = os.environ.get("DRCB_INCLUDE_META", "0").strip() == "1"
+
+            def _drcb_context_getter():
+                ctx = {
+                    "phase": "implement" if implement == 1 else "train",
+                    "stage": current_stage_label,
+                    "severity": globals().get("severity_level", ""),
+                    "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+                    "vehicle": globals().get("vehicle", ""),
+                    "request": globals().get("request", ""),
+                }
+                if use_hidden_meta:
+                    # Optional only: may leak privileged info in strict hidden-mode evaluation.
+                    ctx["gt_mean"] = current_gt_mean
+                    ctx["phase_label"] = current_phase_label
+                return ctx
+
             model = DriftRobustContextualBandit(
                 env,
                 seed=seed_val,
-                decay=0.995,
-                ridge=1.0,
-                ucb_alpha=0.2,
-                context_getter=lambda: {
-                    "gt_mean": current_gt_mean,
-                    "phase_label": current_phase_label,
-                    "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
-                },
+                decay=float(os.environ.get("DRCB_DECAY", "0.995")),
+                ridge=float(os.environ.get("DRCB_RIDGE", "1.0")),
+                ucb_alpha=float(os.environ.get("DRCB_UCB_ALPHA", "0.4")),
+                risk_alpha=float(os.environ.get("DRCB_RISK_ALPHA", "0.1")),
+                drift_alpha=float(os.environ.get("DRCB_DRIFT_ALPHA", "0.05")),
+                drift_scale=float(os.environ.get("DRCB_DRIFT_SCALE", "1.5")),
+                drift_cap=float(os.environ.get("DRCB_DRIFT_CAP", "2.0")),
+                warm_start_min_pulls=int(os.environ.get("DRCB_WARM_START_MIN_PULLS", "8")),
+                impl_eps=float(os.environ.get("DRCB_IMPL_EPS", "0.08")),
+                include_entity_ids=os.environ.get("DRCB_INCLUDE_ENTITY_IDS", "0").strip() == "1",
+                use_regime_buckets=os.environ.get("DRCB_USE_REGIME_BUCKETS", "1").strip() == "1",
+                use_context_features=os.environ.get("DRCB_USE_CONTEXT_FEATS", "1").strip() == "1",
+                context_getter=_drcb_context_getter,
             )
         elif algorithm == 'DQN':
             if not _SB3_AVAILABLE or DQN is None:
                 raise ImportError("stable_baselines3 is required for DQN. Please install stable-baselines3 + torch.")
             model = DQN('MlpPolicy', env, verbose=1, learning_starts=10, device='cpu', seed=seed_val)
+        elif algorithm == 'QRDQN_CVAR':
+            if not _QRDQN_AVAILABLE or SB3_QRDQN is None:
+                raise ImportError("sb3-contrib with QRDQN is required for QRDQN_CVAR.")
+            from robust_rl.qrdqn_cvar import QRDQNCVaRAgent, QRDQNCVaRConfig
+
+            qcfg = QRDQNCVaRConfig(
+                cvar_alpha=float(os.environ.get("QRDQN_CVAR_ALPHA", "0.25")),
+                n_quantiles=int(os.environ.get("QRDQN_N_QUANTILES", "64")),
+                learning_rate=float(os.environ.get("QRDQN_LR", "0.001")),
+                buffer_size=int(os.environ.get("QRDQN_BUFFER_SIZE", "50000")),
+                learning_starts=int(os.environ.get("QRDQN_LEARNING_STARTS", "200")),
+                batch_size=int(os.environ.get("QRDQN_BATCH_SIZE", "64")),
+                train_freq=int(os.environ.get("QRDQN_TRAIN_FREQ", "4")),
+                gradient_steps=int(os.environ.get("QRDQN_GRAD_STEPS", "1")),
+                target_update_interval=int(os.environ.get("QRDQN_TARGET_UPDATE", "500")),
+                exploration_fraction=float(os.environ.get("QRDQN_EXPL_FRACTION", "0.1")),
+                exploration_initial_eps=float(os.environ.get("QRDQN_EXPL_INIT", "1.0")),
+                exploration_final_eps=float(os.environ.get("QRDQN_EXPL_FINAL", "0.02")),
+                max_grad_norm=float(os.environ.get("QRDQN_MAX_GRAD_NORM", "10.0")),
+                device=os.environ.get("QRDQN_DEVICE", "cpu"),
+            )
+            model = QRDQNCVaRAgent(
+                env,
+                config=qcfg,
+                seed=seed_val,
+            )
+        elif algorithm == 'BE_CVAR_DQN':
+            from robust_rl.be_cvar_dqn import BeliefEnsembleCvaRDQN, BECVaRDQNConfig
+
+            def _be_context_getter():
+                return {
+                    "phase": "implement" if implement == 1 else "train",
+                    "stage": current_stage_label,
+                    "severity": globals().get("severity_level", ""),
+                    "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+                }
+
+            be_cfg = BECVaRDQNConfig(
+                history_len=int(os.environ.get("BE_HISTORY_LEN", "20")),
+                belief_dim=int(os.environ.get("BE_BELIEF_DIM", "16")),
+                hidden_dim=int(os.environ.get("BE_HIDDEN_DIM", "64")),
+                n_heads=int(os.environ.get("BE_N_HEADS", "3")),
+                n_quantiles=int(os.environ.get("BE_N_QUANTILES", "51")),
+                gamma=float(os.environ.get("BE_GAMMA", "0.99")),
+                learning_rate=float(os.environ.get("BE_LR", "0.0003")),
+                batch_size=int(os.environ.get("BE_BATCH_SIZE", "64")),
+                buffer_size=int(os.environ.get("BE_BUFFER_SIZE", "50000")),
+                learning_starts=int(os.environ.get("BE_LEARNING_STARTS", "200")),
+                train_freq=int(os.environ.get("BE_TRAIN_FREQ", "1")),
+                gradient_steps=int(os.environ.get("BE_GRAD_STEPS", "1")),
+                target_update_interval=int(os.environ.get("BE_TARGET_UPDATE", "500")),
+                tau=float(os.environ.get("BE_TAU", "1.0")),
+                max_grad_norm=float(os.environ.get("BE_MAX_GRAD_NORM", "10.0")),
+                cvar_alpha=float(os.environ.get("BE_CVAR_ALPHA", "0.2")),
+                uncertainty_beta=float(os.environ.get("BE_UNCERTAINTY_BETA", "0.2")),
+                loss_ens_coef=float(os.environ.get("BE_LOSS_ENS", "0.01")),
+                loss_belief_coef=float(os.environ.get("BE_LOSS_BELIEF", "0.0001")),
+                exploration_initial_eps=float(os.environ.get("BE_EXPL_INIT", "1.0")),
+                exploration_final_eps=float(os.environ.get("BE_EXPL_FINAL", "0.05")),
+                exploration_fraction=float(os.environ.get("BE_EXPL_FRACTION", "0.3")),
+                impl_eps=float(os.environ.get("BE_IMPL_EPS", "0.05")),
+                device=os.environ.get("BE_DEVICE", "cpu"),
+            )
+            model = BeliefEnsembleCvaRDQN(
+                env,
+                config=be_cfg,
+                seed=seed_val,
+                context_getter=_be_context_getter,
+            )
         elif algorithm in ('PPO_LSTM', 'REC_PPO', 'RECURRENTPPO', 'PPO_HAT_LSTM'):
             if not _SB3_CONTRIB_AVAILABLE or RecurrentPPO is None:
                 raise ImportError("sb3-contrib is required for RecurrentPPO. Please install sb3-contrib==2.3.0.")
@@ -1595,6 +1766,34 @@ def main(algorithm2, mode2):
                 device='cpu',
                 seed=seed_val,
                 policy_kwargs=policy_kwargs,
+            )
+        elif algorithm == 'PPO_HAT_PDI':
+            if not _SB3_AVAILABLE or PPO is None:
+                raise ImportError("stable_baselines3 is required for PPO. Please install stable-baselines3 + torch.")
+            from robust_rl.hat_ppo_pdi import HATPdiPolicy, HATPdiPPO, PDIConfig
+
+            pdi_cfg = PDIConfig(
+                kappa=float(os.environ.get("PDI_KAPPA", "1.0")),
+                temp_coef=float(os.environ.get("PDI_TEMP_COEF", "0.0")),
+                lambda_future=float(os.environ.get("PDI_LAMBDA_FUTURE", "0.2")),
+                lambda_teach=float(os.environ.get("PDI_LAMBDA_TEACH", "0.1")),
+                lambda_actfail=float(os.environ.get("PDI_LAMBDA_ACTFAIL", "0.2")),
+                future_h=int(os.environ.get("PDI_FUTURE_H", "5")),
+                gt_mean_norm=float(os.environ.get("PDI_GT_MEAN_NORM", "100.0")),
+                phase_classes=int(os.environ.get("PDI_PHASE_CLASSES", "0")),
+                log_window=int(os.environ.get("PDI_LOG_WINDOW", "50")),
+            )
+            policy_kwargs = dict(hat_policy_kwargs or {})
+            policy_kwargs["pdi_config"] = pdi_cfg
+            model = HATPdiPPO(
+                HATPdiPolicy,
+                env,
+                n_steps=10,
+                verbose=1,
+                device='cpu',
+                seed=seed_val,
+                policy_kwargs=policy_kwargs,
+                pdi_config=pdi_cfg,
             )
         elif algorithm == 'PPO':
             if not _SB3_AVAILABLE or PPO is None:
@@ -1722,7 +1921,13 @@ def main(algorithm2, mode2):
                 else:
                     model.learn(total_timesteps=total_timesteps2)
             training_time = timeit.default_timer() - start_time
-            log_training_row("train", step_idx=global_step, training_time=training_time)
+            extra = None
+            try:
+                if hasattr(model, "last_pdi_losses"):
+                    extra = dict(getattr(model, "last_pdi_losses", {}) or {})
+            except Exception:
+                extra = None
+            log_training_row("train", step_idx=global_step, training_time=training_time, extra=extra)
             try:
                 with open(Intermodal_ALNS34959.path + "/finite_horizon_length" + str(
                         episode_length) + "_delay_reward_time_dependent" + str(
@@ -1871,7 +2076,16 @@ def main(algorithm2, mode2):
                     elif _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
                         action_scalar, _hat_info = _hat_select_action(model, obs)
                     else:
-                        action, _states = model.predict(obs)
+                        if algorithm == "DRCB":
+                            drcb_det = os.environ.get("DRCB_IMPL_DETERMINISTIC", "0").strip() == "1"
+                            action, _states = model.predict(obs, deterministic=drcb_det)
+                        elif algorithm == "BE_CVAR_DQN":
+                            be_det = os.environ.get("BE_IMPL_DETERMINISTIC", "0").strip() == "1"
+                            action, _states = model.predict(obs, deterministic=be_det)
+                        elif algorithm == "QRDQN_CVAR":
+                            action, _states = model.predict(obs, deterministic=True)
+                        else:
+                            action, _states = model.predict(obs)
                         try:
                             action_scalar = int(np.array(action).squeeze())
                         except Exception:
@@ -1990,7 +2204,10 @@ def main(algorithm2, mode2):
                 print('obs', obs)
                 while True:
                     # print('main 2')
-                    action, _states = model.predict(obs)
+                    if algorithm in ("DRCB", "QRDQN_CVAR", "BE_CVAR_DQN"):
+                        action, _states = model.predict(obs, deterministic=True)
+                    else:
+                        action, _states = model.predict(obs)
                     n_state, reward, done, info = env.step(action)
                     # env.render()
                     # print('action', action, 'n_state', n_state, 'reward', reward, 'info', info)

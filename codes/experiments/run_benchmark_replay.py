@@ -316,6 +316,33 @@ def load_request_number(run_dir):
     return 5
 
 
+def load_algorithm_label(run_dir):
+    meta_path = run_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                value = str(payload.get("algorithm", "")).strip()
+                if value:
+                    return value
+        except Exception:
+            pass
+    return "PPO"
+
+
+def to_base_algorithm(algo_label):
+    label = str(algo_label or "").strip().upper()
+    if label.startswith("PPO"):
+        return "PPO"
+    if label.startswith("A2C"):
+        return "A2C"
+    if label.startswith("DQN") or "DQN" in label:
+        return "DQN"
+    if label in {"DRCB", "LBKLAC"}:
+        return label
+    return "PPO"
+
+
 def build_policy(policy_name, seed):
     if policy_name == "wait":
         return lambda: 0
@@ -343,6 +370,11 @@ def run_policy(run_dir, table_sequence, request_number, policy_name, seed):
     _BASELINE_LOGGER = logger
 
     initialize_baseline_state()
+    algo_label = load_algorithm_label(run_dir)
+    base_algo = to_base_algorithm(algo_label)
+    os.environ["RL_ALGORITHM"] = base_algo
+    os.environ["RL_HAT"] = "1" if "HAT" in str(algo_label).upper() else "0"
+    dynamic_RL34959.algorithm = base_algo
     Dynamic_master34959.add_RL = 1
     os.environ["DYNAMIC_DATA_ROOT"] = str(run_dir / "data")
     os.environ["ALNS_OUTPUT_ROOT"] = str(run_dir)
