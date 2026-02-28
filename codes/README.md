@@ -1,115 +1,103 @@
-# 运行入口与目录结构说明
+# Codes 目录主入口（精简版）
 
-本文件用于说明 `codes/` 目录的主入口脚本、子目录功能以及常用运行方式。当前结构经过整理，**根目录只保留少量入口脚本**，其余功能模块均放入分类子目录。
+为避免重复脚本和参数分叉，`codes/` 现在只保留以下主入口思路：
 
-## 一、根目录主入口（建议从这里启动）
+1. `codes/experiments/run_experiments_server_unified.py`
+- 统一训练入口。
+- 支持 `PPO` / `PPO_NEW` 各版本（`v1/v2/v3/v3.1/v3.2/v4.1/v4.2_*/v4.3_*`）。
+- 支持多分布、多 seed、多请求数、多核心并行（`--max-workers`）。
 
-以下脚本是团队常用入口，位于 `codes/` 根目录：
+2. `codes/experiments/run_main_pipeline.py`
+- 一键流水线入口（推荐）。
+- 自动执行：训练 -> probe 汇总 -> phase 汇总 -> 汇总图绘制。
+- 适合论文/报告所需的批量对比产物生成。
 
-- `codes/Dynamic_master34959.py`  
-  主运行入口（单次实验/训练/实施），支持算法选择（DQN/PPO/A2C/PPO_HAT/A2C_HAT/LBKLAC 等）。
+3. `codes/experiments/run_experiments_server_stream.py`
+- 流式任务调度入口（新增）。
+- 按 `(variant, dist, R, seed)` 任务级队列并行。
+- 某个任务一结束立即补下一个任务，持续维持 `--max-workers` 并发，不再“按算法整批等待”。
 
-- `codes/run_experiments_server.py`  
-  服务器批量实验入口（当前配置：R=30、seed=42、算法含 DQN/PPO/A2C/PPO_HAT）。
+4. `codes/experiments/run_benchmark_replay.py`
+- 对既有 `run_*` 目录做 baseline replay（wait/reroute/random）补算。
 
-- `codes/run_experiments_local.py`  
-  本地批量实验入口（小规模调试用）。
+## 最常用命令
 
-- `codes/run_smoke_server.py`  
-  冒烟测试入口（快速验证环境）。
-
-## 二、子目录分类与用途
-
-- `codes/core/`  
-  核心算法与双线程系统核心逻辑（ALNS/RL 协调与环境实现）
-  - `Dynamic_ALNS_RL34959.py`
-  - `dynamic_RL34959.py`
-  - `Intermodal_ALNS34959.py`
-  - `rl_logging.py`
-  - `config.py`
-  - `emission_models.py`
-  - `fuzzy_HP.py`
-
-- `codes/experiments/`  
-  批量实验调度与基线 replay
-  - `run_experiments_common.py`
-  - `run_experiments_server.py`
-  - `run_experiments_local.py`
-  - `run_smoke_server.py`
-  - `run_benchmark_replay.py`
-
-- `codes/analysis/`  
-  指标与统计分析
-  - `compute_metrics.py`（会生成 `metrics.json` 和汇总 `metrics_summary.csv`）
-  - `calc_run_durations.py`
-
-- `codes/plotting/`  
-  绘图相关
-  - `plot_paper_figure.py`
-  - `redraw_paper_figures.py`
-
-- `codes/generation/`  
-  数据生成与事件模拟
-  - `generate_mixed_parallel.py`
-  - `generate_un_expected_events_by_stochastic_info_RL.py`
-
-- `codes/robust_rl/`  
-  鲁棒强化学习相关模型（LBKLAC、HAT 等）
-
-- `codes/tools/`  
-  工具类脚本（例如 run 清理）
-  - `cleanup_run.py`
-
-- `codes/logs/`  
-  每次运行的日志与输出（`run_*` 子目录）
-
-## 三、常用运行方式（示例）
-
-### 1) 单次实验
+### 1) 仅跑训练（统一入口）
 ```bash
-python codes/Dynamic_master34959.py --dist_name S5_1 --request_number 30 --algorithm PPO_HAT --seed 42 --workers 1
+python codes/experiments/run_experiments_server_unified.py ^
+  --run-folder ppo_main_runs ^
+  --variant PPO ^
+  --variant PPO_NEW:v1 ^
+  --variant PPO_NEW:v2 ^
+  --variant PPO_NEW:v3 ^
+  --dist-name O_10_90 ^
+  --dist-name O_10_60 ^
+  --dist-name G_10_30_60 ^
+  --dist-name G_10_60_90 ^
+  --request-number 30 ^
+  --seed 42 ^
+  --max-workers 6 ^
+  --no-run-baseline ^
+  --no-run-plots ^
+  --run-metrics
 ```
 
-### 2) 服务器批量实验
+### 2) 一键训练+汇总+绘图（推荐）
 ```bash
-python codes/run_experiments_server.py --max-workers 32
+python codes/experiments/run_main_pipeline.py ^
+  --run-folder ppo_main_runs ^
+  --report-folder ppo_main_report ^
+  --variant PPO ^
+  --variant PPO_NEW:v1 ^
+  --variant PPO_NEW:v2 ^
+  --variant PPO_NEW:v3 ^
+  --dist-name O_10_90 ^
+  --dist-name O_10_60 ^
+  --dist-name G_10_30_60 ^
+  --dist-name G_10_60_90 ^
+  --request-number 30 ^
+  --seed 42 ^
+  --max-workers 6
 ```
 
-### 3) 本地批量实验
+### 3) 流式任务并发（任务完成即补位）
 ```bash
-python codes/run_experiments_local.py --max-workers 2
+python codes/experiments/run_experiments_server_stream.py ^
+  --run-folder thesis_gapfill_patch ^
+  --variant A2C ^
+  --variant PPO ^
+  --variant PPO_NEW:v2 ^
+  --variant PPO_NEW:v3 ^
+  --variant PPO_NEW:v3.1 ^
+  --dist-name F1_10_90 ^
+  --dist-name G_10_90_60 ^
+  --dist-name O_10_60 ^
+  --dist-name O_10_90 ^
+  --request-number 30 ^
+  --seed 42 ^
+  --seed 2026 ^
+  --seed 3333 ^
+  --max-workers 8 ^
+  --no-run-baseline ^
+  --no-run-plots ^
+  --run-metrics ^
+  --skip-completed ^
+  --no-resume-existing ^
+  --no-precheck
 ```
 
-### 4) 基线 replay（对已有 run 目录）
-```bash
-python codes/experiments/run_benchmark_replay.py --run-dir codes/logs/run_xxx --policy all --include-random
-```
+## 一键流水线输出
 
-### 5) 计算指标（G 指标等）
-```bash
-python codes/analysis/compute_metrics.py --run-dir codes/logs/run_xxx
-```
+默认输出到 `codes/nexus/<report-folder>/`：
 
-### 6) 绘图
-```bash
-python codes/plotting/plot_paper_figure.py --run-dir codes/logs/run_xxx
-python codes/plotting/redraw_paper_figures.py
-```
+- `probe_summary.csv`
+- `<summary_prefix>_summary.csv`（默认 `phase_main_summary.csv`）
+- `<summary_prefix>_summary.md`
+- `<summary_prefix>_summary.html`
+- `plot_avg_reward_by_dist_variant.png`
+- `plot_action1_rate_vs_avg_reward.png`
+- `plot_probe_delta_bacc_by_variant.png`
+- `probe_reports/*.json`
+- `pipeline_manifest.json`
 
-## 四、关于路径与导入（重要）
-
-- 运行入口脚本会自动把 `codes/` 加入 `sys.path`，所以核心模块在 `codes/core/` 中以 `from core import ...` 方式统一导入。
-- 如需自定义脚本，请确保在脚本开头加入：
-  ```python
-  from pathlib import Path
-  import sys
-  CODES_DIR = Path(__file__).resolve().parent if "codes" in str(Path(__file__).resolve()) else Path("codes").resolve()
-  if str(CODES_DIR) not in sys.path:
-      sys.path.insert(0, str(CODES_DIR))
-  ```
-
-## 五、快速排查建议
-
-- 运行失败时，优先查看 `codes/logs/run_*/console_output.txt`
-- 基线卡死/超时会在 `run_*/watchdog_events.jsonl` 记录
-- 失败 run 会生成 `run_*/FAILED.json`
+运行日志与单次实验目录在 `codes/nexus/<run-folder>/run_*` 下。

@@ -221,7 +221,7 @@ def _get_distribution_spec(dist_name: str) -> dict:
     for item in _load_distribution_config():
         if str(item.get("name")) == dist_name:
             return item
-    return {"name": dist_name, "pattern": "ab", "means": {"A": 9, "B": 90}}
+    return {"name": dist_name, "pattern": "ab", "means": {"A": 10, "B": 60}}
 
 
 def _extract_mean_value(value: object) -> Optional[float]:
@@ -621,7 +621,7 @@ def _prepare_aligned_decisions(trace: pd.DataFrame, training: pd.DataFrame) -> p
 
 def _plot_environment_shift(run_dir: Path, out_path: Path) -> None:
     meta_path = run_dir / "meta.json"
-    dist_name = "S3_1"
+    dist_name = "O_10_60"
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))

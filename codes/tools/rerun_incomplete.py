@@ -50,6 +50,7 @@ def parse_run_name(name: str) -> Optional[RunInfo]:
     known_algos = [
         "PPO_HAT_LSTM",
         "PPO_HAT_PDI",
+        "PPO_PROTOMEM",
         "PPO_HAT_MOE",
         "A2C_HAT_MOE",
         "QRDQN_CVAR",

@@ -13,13 +13,13 @@ from experiments.run_experiments_common import ExperimentConfig, run_experiments
 def build_config() -> ExperimentConfig:
     return ExperimentConfig(
         name="local",
-        distributions=["S5_1", "S3_1", "V1_3"],
+        distributions=["F1_10_60", "O_10_60", "G_10_60_30"],
         request_numbers=[30],
         algorithms=["DQN", "A2C"],
         seeds=[42],
         generator_workers=1,
         max_workers=2,
-        exclude_tasks=[("S5_1", 30, "A2C", 42)],
+        exclude_tasks=[("F1_10_60", 30, "A2C", 42)],
     )
 
 

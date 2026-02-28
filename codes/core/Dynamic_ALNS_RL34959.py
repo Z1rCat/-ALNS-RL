@@ -31,6 +31,33 @@ def load_distribution_patterns():
 
 DISTRIBUTION_PATTERNS = load_distribution_patterns()
 
+TRAIN_TABLE_MIN = 0
+TRAIN_TABLE_MAX = 799
+TEST_TABLE_START = 999
+TEST_TABLE_MIN = 800
+PHASE_B_START_TABLE = 400
+MIN_SINGLE_STAGE_TRAIN_RANDOM = 10
+MIN_SINGLE_STAGE_TRAIN_OOD = 10
+MIN_PHASE_B_TRAIN = 420
+
+
+def _normalize_stage_mode(value):
+    mode = str(value or "train_eval").strip().lower()
+    if mode not in {"train_eval", "train_only", "eval_only"}:
+        mode = "train_eval"
+    return mode
+
+
+def _touch_stop_flag():
+    try:
+        stop_flag = dynamic_RL34959.get_stop_flag_path()
+        os.makedirs(os.path.dirname(stop_flag), exist_ok=True)
+        with open(stop_flag, "a", encoding="utf-8"):
+            pass
+    except Exception:
+        pass
+
+
 def Intermodal_ALNS_function(request_number_in_R):
     global dynamic_end
     Intermodal_ALNS34959.real_main(3, 0, request_number_in_R)
@@ -111,9 +138,29 @@ def main(approach, request_number_in_R = 5):
         else:
             reward_list_in_implementation, removal_reward_list_in_implementation, removal_state_list_in_implementation, removal_action_list_in_implementation, insertion_reward_list_in_implementation, insertion_state_list_in_implementation, insertion_action_list_in_implementation = [], [], [], [], [], [], []
             ALNS_reward_list_in_implementation, ALNS_removal_reward_list_in_implementation,  ALNS_removal_action_list_in_implementation, ALNS_insertion_reward_list_in_implementation, ALNS_insertion_action_list_in_implementation = [], [], [], [], []
-            table_number = 0
+            stage_mode = _normalize_stage_mode(os.environ.get("RL_STAGE_MODE", "train_eval"))
+            train_only = stage_mode == "train_only"
+            eval_only = stage_mode == "eval_only"
+            train_only_early_stop = os.environ.get("RL_TRAIN_ONLY_EARLY_STOP", "1").strip() == "1"
+            try:
+                train_only_min_table = int(os.environ.get("RL_TRAIN_ONLY_MIN_TABLE", str(MIN_SINGLE_STAGE_TRAIN_RANDOM)))
+            except Exception:
+                train_only_min_table = MIN_SINGLE_STAGE_TRAIN_RANDOM
+            train_only_min_table = max(TRAIN_TABLE_MIN, min(TRAIN_TABLE_MAX, int(train_only_min_table)))
+
+            table_number = TEST_TABLE_START if eval_only else 0
             start_from_end_table = 0
             implement_start_synced = 0
+            implement_reward_base = None
+            f2_implement_jump_done = 0
+            scenario_name = getattr(dynamic_RL34959, "SCENARIO_NAME", "") or SCENARIO_NAME or os.environ.get("SCENARIO_NAME", "")
+            scenario_name = str(scenario_name).upper()
+            scenario_pattern = DISTRIBUTION_PATTERNS.get(scenario_name, "")
+
+            if eval_only:
+                dynamic_RL34959.implement = 1
+                dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 0
+
             while True:
                 # When switching to implementation/test, RL may briefly set a stop flag
                 # to break the training loop and reset internal shared state. During that
@@ -125,9 +172,9 @@ def main(approach, request_number_in_R = 5):
                     if RL_can_start_implementation_phase_from_the_last_table == 0:
                         RL_can_start_implementation_phase_from_the_last_table = 1
                     if implement_start_synced == 0:
-                        # Ensure test phase starts from 499 once implement flips.
-                        if table_number < 499:
-                            table_number = 499
+                        # Ensure test phase starts from TEST_TABLE_START once implement flips.
+                        if table_number < TEST_TABLE_START:
+                            table_number = TEST_TABLE_START
                         implement_start_synced = 1
                     if getattr(dynamic_RL34959, "stop_everything_in_learning_and_go_to_implementation_phase", 0) == 1:
                         time.sleep(0.05)
@@ -136,9 +183,27 @@ def main(approach, request_number_in_R = 5):
                 Intermodal_ALNS_function(request_number_in_R)
                 try:
                     if getattr(dynamic_RL34959, "implement", 0) == 1:
+                        if implement_reward_base is None:
+                            implement_reward_base = len(reward_list_in_implementation)
                         table_number -= 1
-                        if table_number < 350:
-                            print(">>> TEST COMPLETE: Reached boundary (350). Saving data and exiting.")
+                        # F2-only fast switch in implement phase:
+                        # once implement reward count is high enough and we're still at 900..999,
+                        # jump directly to 899 so test can cover both A/B blocks before the fixed 200-stop.
+                        if scenario_pattern == "abba":
+                            implement_reward_count = max(0, len(reward_list_in_implementation) - implement_reward_base)
+                            if (
+                                f2_implement_jump_done == 0
+                                and 900 <= table_number <= TEST_TABLE_START
+                                and implement_reward_count > 100
+                            ):
+                                print(
+                                    f">>> [abba/F2] implement_reward_count={implement_reward_count} "
+                                    f"at table={table_number}. Jumping to 899."
+                                )
+                                table_number = 899
+                                f2_implement_jump_done = 1
+                        if table_number < TEST_TABLE_MIN:
+                            print(f">>> TEST COMPLETE: Reached boundary ({TEST_TABLE_MIN}). Saving data and exiting.")
                             try:
                                 dynamic_RL34959.save_plot_reward_list()
                             except Exception:
@@ -154,104 +219,66 @@ def main(approach, request_number_in_R = 5):
                                 pass
                             return
                     else:
-                        scenario_name = getattr(dynamic_RL34959, "SCENARIO_NAME", "") or SCENARIO_NAME or os.environ.get("SCENARIO_NAME", "")
-                        scenario_name = str(scenario_name).upper()
-                        scenario_pattern = DISTRIBUTION_PATTERNS.get(scenario_name, "")
                         converged = getattr(dynamic_RL34959, "curriculum_converged", 0) == 1
                         next_table_number = table_number + 1
-                        if converged:
-                            if scenario_pattern == "random_mix" or scenario_name.startswith("S1"):
-                                min_train = 10
-                                if table_number >= min_train:
-                                    print(">>> [S1] Mastery of mixed stage. Jumping to Test (499)...")
+                        if eval_only:
+                            dynamic_RL34959.implement = 1
+                            next_table_number = TEST_TABLE_START
+                        elif train_only and train_only_early_stop and converged and table_number >= train_only_min_table:
+                            print(
+                                f">>> TRAIN_ONLY EARLY STOP: converged at table={table_number} "
+                                f"(min={train_only_min_table})."
+                            )
+                            _touch_stop_flag()
+                            return
+                        elif converged and not train_only:
+                            if scenario_pattern == "random_mix":
+                                if table_number >= MIN_SINGLE_STAGE_TRAIN_RANDOM:
+                                    print(f">>> [random_mix] Mastery reached. Jumping to Test ({TEST_TABLE_START})...")
                                     dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
                                     RL_can_start_implementation_phase_from_the_last_table = 1
                                     dynamic_RL34959.implement = 1
-                                    next_table_number = 499
+                                    next_table_number = TEST_TABLE_START
                                     dynamic_RL34959.sucess_times = 0
                                     dynamic_RL34959.curriculum_converged = 0
-                            elif scenario_pattern == "aba" or scenario_name.startswith("S2"):
-                                phase_a_end = 175
-                                min_phase_b_train = 180
-                                if table_number < phase_a_end:
-                                    print(">>> [S2] Mastery of Phase A. Jumping to Phase B (175)...")
-                                    next_table_number = phase_a_end
-                                    dynamic_RL34959.sucess_times = 0
-                                    dynamic_RL34959.curriculum_converged = 0
-                                elif table_number >= min_phase_b_train:
-                                    print(">>> [S2] Mastery of Phase B. Jumping to Test (499)...")
+                            elif scenario_pattern == "ab":
+                                if table_number >= MIN_SINGLE_STAGE_TRAIN_OOD:
+                                    print(f">>> [ab] Mastery reached. Jumping to Test ({TEST_TABLE_START})...")
                                     dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
                                     RL_can_start_implementation_phase_from_the_last_table = 1
                                     dynamic_RL34959.implement = 1
-                                    next_table_number = 499
+                                    next_table_number = TEST_TABLE_START
                                     dynamic_RL34959.sucess_times = 0
                                     dynamic_RL34959.curriculum_converged = 0
-                            elif scenario_pattern == "ab" or scenario_name.startswith("S3"):
-                                min_train = 5
-                                if table_number >= min_train:
-                                    print(">>> [S3] Mastery of single stage. Jumping to Test (499)...")
+                            elif scenario_pattern in {"aba", "abba", "abc"}:
+                                if table_number < PHASE_B_START_TABLE:
+                                    print(f">>> [{scenario_pattern}] Mastery of Phase A. Jumping to Phase B ({PHASE_B_START_TABLE})...")
+                                    next_table_number = PHASE_B_START_TABLE
+                                    dynamic_RL34959.sucess_times = 0
+                                    dynamic_RL34959.curriculum_converged = 0
+                                elif table_number >= MIN_PHASE_B_TRAIN:
+                                    print(f">>> [{scenario_pattern}] Mastery of Phase B. Jumping to Test ({TEST_TABLE_START})...")
                                     dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
                                     RL_can_start_implementation_phase_from_the_last_table = 1
                                     dynamic_RL34959.implement = 1
-                                    next_table_number = 499
+                                    next_table_number = TEST_TABLE_START
                                     dynamic_RL34959.sucess_times = 0
                                     dynamic_RL34959.curriculum_converged = 0
-                            elif scenario_pattern == "recall" or scenario_name.startswith("S4"):
-                                min_train = 5
-                                if table_number >= min_train:
-                                    print(">>> [S4] Mastery of single stage. Jumping to Test (499)...")
-                                    dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
-                                    RL_can_start_implementation_phase_from_the_last_table = 1
-                                    dynamic_RL34959.implement = 1
-                                    next_table_number = 499
-                                    dynamic_RL34959.sucess_times = 0
-                                    dynamic_RL34959.curriculum_converged = 0
-                            elif scenario_pattern == "adaptation" or scenario_name.startswith("S5"):
-                                phase_a_end = 100
-                                min_phase_b_train = 105
-                                if scenario_name.startswith("S0"):
-                                    # Debug scenario: allow immediate test after entering Phase B.
-                                    min_phase_b_train = phase_a_end
-                                if table_number < phase_a_end:
-                                    print(">>> [S5] Mastery of Phase A. Jumping to Phase B (100)...")
-                                    next_table_number = phase_a_end
-                                    dynamic_RL34959.sucess_times = 0
-                                    dynamic_RL34959.curriculum_converged = 0
-                                elif table_number >= min_phase_b_train:
-                                    print(">>> [S5] Mastery of Phase B. Jumping to Test (499)...")
-                                    dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
-                                    RL_can_start_implementation_phase_from_the_last_table = 1
-                                    dynamic_RL34959.implement = 1
-                                    next_table_number = 499
-                                    dynamic_RL34959.sucess_times = 0
-                                    dynamic_RL34959.curriculum_converged = 0
-                            elif scenario_pattern == "abc" or scenario_name.startswith("S6"):
-                                phase_a_end = 175
-                                min_phase_b_train = 180
-                                if table_number < phase_a_end:
-                                    print(">>> [S6] Mastery of Phase A. Jumping to Phase B (175)...")
-                                    next_table_number = phase_a_end
-                                    dynamic_RL34959.sucess_times = 0
-                                    dynamic_RL34959.curriculum_converged = 0
-                                elif table_number >= min_phase_b_train:
-                                    print(">>> [S6] Mastery of Phase B. Jumping to Test (499)...")
-                                    dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
-                                    RL_can_start_implementation_phase_from_the_last_table = 1
-                                    dynamic_RL34959.implement = 1
-                                    next_table_number = 499
-                                    dynamic_RL34959.sucess_times = 0
-                                    dynamic_RL34959.curriculum_converged = 0
-                        if getattr(dynamic_RL34959, "implement", 0) == 0 and table_number >= 349:
-                            print(">>> FORCE SWITCH: Reached table_number 349. Jumping to Test (499)...")
+                        if getattr(dynamic_RL34959, "implement", 0) == 0 and table_number >= TRAIN_TABLE_MAX:
+                            if train_only:
+                                print(f">>> TRAIN_ONLY COMPLETE: reached train boundary ({TRAIN_TABLE_MAX}).")
+                                _touch_stop_flag()
+                                return
+                            print(f">>> FORCE SWITCH: Reached table_number {TRAIN_TABLE_MAX}. Jumping to Test ({TEST_TABLE_START})...")
                             dynamic_RL34959.stop_everything_in_learning_and_go_to_implementation_phase = 1
                             RL_can_start_implementation_phase_from_the_last_table = 1
                             dynamic_RL34959.implement = 1
-                            next_table_number = 499
+                            next_table_number = TEST_TABLE_START
                             dynamic_RL34959.sucess_times = 0
                             dynamic_RL34959.curriculum_converged = 0
                         table_number = next_table_number
-                        if getattr(dynamic_RL34959, "implement", 0) == 0 and table_number > 349:
-                            table_number = 349
+                        if getattr(dynamic_RL34959, "implement", 0) == 0 and table_number > TRAIN_TABLE_MAX:
+                            table_number = TRAIN_TABLE_MAX
                 except SystemExit:
                     raise
                 except Exception:
@@ -261,7 +288,7 @@ def main(approach, request_number_in_R = 5):
                         elif Intermodal_ALNS34959.ALNS_greedy_under_unknown_duration_assume_duration == 3 and len(
                                 ALNS_reward_list_in_implementation) > Intermodal_ALNS34959.number_of_training:
                             if start_from_end_table == 0:
-                                table_number = 999
+                                table_number = TEST_TABLE_START
                                 start_from_end_table = 1
                             else:
                                 table_number -= 1

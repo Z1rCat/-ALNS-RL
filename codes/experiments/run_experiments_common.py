@@ -30,6 +30,52 @@ LOCK_FILE = "run.lock"
 HEARTBEAT_FILE = "heartbeat.json"
 
 
+_ANSI_ENABLED = bool(sys.stdout and sys.stdout.isatty())
+
+
+def _enable_ansi_on_windows() -> None:
+    global _ANSI_ENABLED
+    if os.name != "nt" or not _ANSI_ENABLED:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        _ANSI_ENABLED = False
+
+
+def _c(text: str, color: str = "", bold: bool = False) -> str:
+    if not _ANSI_ENABLED:
+        return text
+    codes: List[str] = []
+    if bold:
+        codes.append("1")
+    if color:
+        palette = {
+            "red": "31",
+            "green": "32",
+            "yellow": "33",
+            "blue": "34",
+            "magenta": "35",
+            "cyan": "36",
+            "white": "37",
+        }
+        value = palette.get(color.lower())
+        if value:
+            codes.append(value)
+    if not codes:
+        return text
+    return f"\033[{';'.join(codes)}m{text}\033[0m"
+
+
+_enable_ansi_on_windows()
+
+
 def _mean(values: List[float]) -> Optional[float]:
     if not values:
         return None
@@ -419,6 +465,15 @@ class ExperimentConfig:
     notify_on_success: bool = False
     # Output root under codes/logs. If absolute path is provided, it will be used directly.
     log_subdir: str = ""
+    # Algorithm version tag for extensible entries (e.g., PPO_NEW v1/v2/...).
+    algo_version: str = "v1"
+    # Optional PPO_NEW stacked window size; when set, pass to master via RL_PPO_NEW_WINDOW.
+    ppo_new_window: Optional[int] = None
+    # train_eval/train_only/eval_only
+    stage_mode: str = "train_eval"
+    # Optional checkpoint I/O passthrough to master.
+    init_model_path: Optional[str] = None
+    save_model_path: Optional[str] = None
 
 
 @dataclass
@@ -625,7 +680,7 @@ class NotificationManager:
         ok = False
         with self._lock:
             if self._in_cooldown(key):
-                print(f"[notify] cooldown skip: {key}")
+                print(f"{_c('[notify]', 'yellow', True)} cooldown skip: {key}")
                 return False
             if self.webhook_url:
                 ok = self._send_webhook(event, title, body, payload_dict) or ok
@@ -691,7 +746,7 @@ class NotificationManager:
                 status = getattr(resp, "status", 200)
             return int(status) < 400
         except Exception as exc:
-            print(f"[notify] webhook failed: {exc}")
+            print(f"{_c('[notify]', 'red', True)} webhook failed: {exc}")
             return False
 
     def _send_email(self, subject: str, body: str) -> bool:
@@ -714,7 +769,7 @@ class NotificationManager:
                 server.send_message(msg)
             return True
         except Exception as exc:
-            print(f"[notify] email failed: {exc}")
+            print(f"{_c('[notify]', 'red', True)} email failed: {exc}")
             return False
 
     def _send_twilio_sms(self, body: str) -> bool:
@@ -731,7 +786,7 @@ class NotificationManager:
                 status = getattr(resp, "status", 200)
             return int(status) < 400
         except Exception as exc:
-            print(f"[notify] twilio failed: {exc}")
+            print(f"{_c('[notify]', 'red', True)} twilio failed: {exc}")
             return False
 
 
@@ -756,10 +811,38 @@ def resolve_max_workers(config: ExperimentConfig, override: Optional[int]) -> in
     return max(1, detect_physical_cores() - reserved)
 
 
-def build_run_name(dist_name: str, request_number: int, algorithm: str, seed: Optional[int]) -> str:
+def _normalize_algo_version_tag(version: Optional[str]) -> str:
+    value = str(version or "").strip().lower()
+    if not value:
+        return "v1"
+    # keep alnum and separators only, normalize for folder safety/readability
+    cleaned = []
+    for ch in value:
+        if ch.isalnum():
+            cleaned.append(ch)
+        elif ch in (".", "-", ":"):
+            cleaned.append("_")
+        elif ch == "_":
+            cleaned.append("_")
+    out = "".join(cleaned).strip("_")
+    return out or "v1"
+
+
+def _algorithm_run_tag(algorithm: str, algo_version: Optional[str]) -> str:
+    algo = str(algorithm or "").strip().upper()
+    if algo == "PPO_NEW":
+        v = _normalize_algo_version_tag(algo_version).upper()
+        return f"PPONEW{v}"
+    return algo
+
+
+def build_run_name(
+    dist_name: str, request_number: int, algorithm: str, seed: Optional[int], algo_version: Optional[str] = None
+) -> str:
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     seed_tag = f"S{seed}" if seed is not None else "SNA"
-    return f"run_{timestamp}_R{request_number}_{dist_name}_{algorithm}_{seed_tag}"
+    algo_tag = _algorithm_run_tag(algorithm, algo_version)
+    return f"run_{timestamp}_R{request_number}_{dist_name}_{algo_tag}_{seed_tag}"
 
 
 def resolve_run_root(config: ExperimentConfig) -> Path:
@@ -1167,13 +1250,45 @@ def _parse_run_name_key(run_name: str, known_algorithms: Iterable[str]) -> Optio
 
     algos = sorted({str(a).strip() for a in known_algorithms if str(a).strip()}, key=len, reverse=True)
     for algorithm in algos:
-        token = f"_{algorithm}"
-        if not rest.endswith(token):
-            continue
-        dist_name = rest[: -len(token)]
-        if dist_name:
-            return dist_name, request_number, algorithm, seed
+        marker = f"_{algorithm}"
+        if marker in rest:
+            idx = rest.rfind(marker)
+            dist_name = rest[:idx]
+            # supports suffixes like _PPO_NEW_V3_1, _PPONEWV3, etc.
+            suffix = rest[idx + 1 :]
+            if dist_name and str(suffix).startswith(algorithm):
+                return dist_name, request_number, algorithm, seed
+        if algorithm == "PPO_NEW":
+            marker_new = "_PPONEW"
+            if marker_new in rest:
+                idx = rest.rfind(marker_new)
+                dist_name = rest[:idx]
+                if dist_name:
+                    return dist_name, request_number, algorithm, seed
     return None
+
+
+def _normalize_algo_version_for_match(version: Any) -> str:
+    return _normalize_algo_version_tag(str(version or "").strip().lower())
+
+
+def _run_matches_algo_version(run_dir: Path, algorithm: str, algo_version: str) -> bool:
+    algo = str(algorithm or "").strip().upper()
+    if algo != "PPO_NEW":
+        return True
+    target = _normalize_algo_version_for_match(algo_version)
+    meta_path = run_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            run_ver = _normalize_algo_version_for_match(data.get("algo_version", "v1"))
+            return run_ver == target
+        except Exception:
+            pass
+    # Fallback by run name tag when meta is missing.
+    name = run_dir.name.upper()
+    needle = f"PPONEW{target.upper()}"
+    return needle in name
 
 
 def _extract_run_key(run_dir: Path, known_algorithms: Iterable[str]) -> Optional[Tuple[str, int, str, int]]:
@@ -1216,6 +1331,10 @@ def build_execution_plan(
     for dist_name, request_number, algorithm, seed in tasks:
         key = (str(dist_name), int(request_number), str(algorithm), int(seed))
         candidates = existing.get(key, [])
+        if str(algorithm).strip().upper() == "PPO_NEW":
+            candidates = [
+                p for p in candidates if _run_matches_algo_version(p, str(algorithm), getattr(config, "algo_version", "v1"))
+            ]
 
         completed_dir = None
         for run_dir in candidates:
@@ -1225,7 +1344,10 @@ def build_execution_plan(
 
         if completed_dir is not None and config.skip_completed:
             skipped_completed += 1
-            print(f"[{config.name}] skip completed {_format_task_key(key)} -> {completed_dir.name}")
+            print(
+                f"{_c(f'[{config.name}]', 'cyan', True)} "
+                f"{_c('SKIP', 'yellow', True)} completed {_format_task_key(key)} -> {completed_dir.name}"
+            )
             continue
 
         if config.resume_existing and candidates:
@@ -1244,7 +1366,13 @@ def build_execution_plan(
             )
             continue
 
-        run_name = build_run_name(dist_name, request_number, algorithm, seed)
+        run_name = build_run_name(
+            dist_name,
+            request_number,
+            algorithm,
+            seed,
+            algo_version=getattr(config, "algo_version", "v1"),
+        )
         run_dir = run_root / run_name
         plans.append(
             TaskPlan(
@@ -1292,8 +1420,26 @@ def run_task(
         "--run-name",
         run_name,
     ]
+    if str(algorithm).strip().upper() == "PPO_NEW":
+        master_cmd.extend(["--algo_version", str(getattr(config, "algo_version", "v1") or "v1")])
+    stage_mode = str(getattr(config, "stage_mode", "train_eval") or "train_eval").strip()
+    if stage_mode:
+        master_cmd.extend(["--stage-mode", stage_mode])
+    init_model_path = str(getattr(config, "init_model_path", "") or "").strip()
+    if init_model_path:
+        master_cmd.extend(["--init-model-path", init_model_path])
+    save_model_path = str(getattr(config, "save_model_path", "") or "").strip()
+    if save_model_path:
+        master_cmd.extend(["--save-model-path", save_model_path])
     master_env = dict(os.environ)
     master_env["RL_LOG_ROOT"] = str(run_dir.parent)
+    if str(algorithm).strip().upper() == "PPO_NEW":
+        window_k = getattr(config, "ppo_new_window", None)
+        if window_k is not None:
+            try:
+                master_env["RL_PPO_NEW_WINDOW"] = str(max(1, int(window_k)))
+            except Exception:
+                pass
 
     plot_cmd = [
         sys.executable,
@@ -1316,18 +1462,21 @@ def run_task(
         str(run_dir),
     ]
 
-    print(f"[{config.name}] start {run_name} mode={plan.mode}")
+    print(
+        f"{_c(f'[{config.name}]', 'cyan', True)} "
+        f"{_c('START', 'green', True)} {run_name} mode={plan.mode}"
+    )
     state = _collect_stage_state(run_dir, config)
     baseline_detail = _baseline_success_flags(run_dir) if config.run_baseline else {}
     if plan.mode == "resume":
         print(
-            f"[{config.name}] resume stage_state {run_name}: "
+            f"{_c(f'[{config.name}]', 'cyan', True)} {_c('RESUME', 'blue', True)} stage_state {run_name}: "
             f"master={int(state['master'])} baseline={int(state['baseline'])} "
             f"metrics={int(state['metrics'])} plot={int(state['plot'])}"
         )
         if config.run_baseline:
             print(
-                f"[{config.name}] resume baseline_flags {run_name}: "
+                f"{_c(f'[{config.name}]', 'cyan', True)} {_c('RESUME', 'blue', True)} baseline_flags {run_name}: "
                 f"W={int(baseline_detail.get('wait_file', False))} "
                 f"R={int(baseline_detail.get('reroute_file', False))} "
                 f"N={int(baseline_detail.get('random_file', False))} "
@@ -1345,20 +1494,20 @@ def run_task(
         )
 
     if dry_run:
-        print("  master:", " ".join(master_cmd))
+        print(f"  {_c('MASTER', 'green', True)}:", " ".join(master_cmd))
         if config.run_baseline:
             missing_policies = _missing_baseline_policies(run_dir, config.baseline_include_random)
             if not missing_policies:
-                print("  baseline: <skip, already complete>")
+                print(f"  {_c('BASELINE', 'yellow', True)}: <skip, already complete>")
             else:
                 for policy in missing_policies:
-                    print(f"  baseline[{policy}]:", " ".join(_build_baseline_cmd(run_dir, policy)))
+                    print(f"  {_c(f'BASELINE[{policy}]', 'yellow', True)}:", " ".join(_build_baseline_cmd(run_dir, policy)))
         if config.run_metrics:
-            print("  metrics:", " ".join(metrics_cmd))
+            print(f"  {_c('METRICS', 'magenta', True)}:", " ".join(metrics_cmd))
         if config.run_plots:
-            print("  plot:", " ".join(plot_cmd))
+            print(f"  {_c('PLOT', 'blue', True)}:", " ".join(plot_cmd))
         if config.cleanup_after_run:
-            print("  cleanup:", " ".join(cleanup_cmd))
+            print(f"  {_c('CLEANUP', 'cyan', True)}:", " ".join(cleanup_cmd))
         return run_name, "dry_run"
 
     lease = RunLease(run_dir)
@@ -1371,7 +1520,7 @@ def run_task(
                 "owner": _load_json_file(run_dir / LOCK_FILE) or {},
             },
         )
-        print(f"[{config.name}] lock busy -> skip {run_name}")
+        print(f"{_c(f'[{config.name}]', 'cyan', True)} {_c('LOCK', 'yellow', True)} busy -> skip {run_name}")
         return run_name, "skipped_locked"
 
     state = _collect_stage_state(run_dir, config)
@@ -1869,7 +2018,11 @@ def run_task(
             pass
 
         if status.startswith("failed_"):
-            print(f"[{config.name}] {run_name} -> {status} | detail={failure_detail}")
+            print(
+                f"{_c(f'[{config.name}]', 'cyan', True)} "
+                f"{_c('RESULT', 'red' if status.startswith('failed_') else 'green', True)} "
+                f"{run_name} -> {status} | detail={failure_detail}"
+            )
             if notifier is not None and config.notify_on_failure:
                 msg = "\n".join(
                     [
@@ -1908,7 +2061,7 @@ def build_tasks(config: ExperimentConfig) -> List[Tuple[str, int, str, int]]:
 def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_run: bool) -> int:
     tasks = build_tasks(config)
     if not tasks:
-        print("No tasks to run.")
+        print(_c("No tasks to run.", "yellow", True))
         return 1
 
     run_root = resolve_run_root(config)
@@ -1916,7 +2069,7 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
 
     plans, skipped_completed = build_execution_plan(config, tasks, run_root)
     if not plans:
-        print(f"[{config.name}] all tasks already completed. skipped={skipped_completed}")
+        print(f"{_c(f'[{config.name}]', 'cyan', True)} {_c('DONE', 'green', True)} all tasks already completed. skipped={skipped_completed}")
         notifier = NotificationManager(run_root=run_root)
         if notifier.enabled and config.notify_on_success:
             notifier.send(
@@ -1930,16 +2083,14 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
     worker_count = min(resolve_max_workers(config, max_workers), len(plans))
     notifier = NotificationManager(run_root=run_root)
     print(
-        f"[{config.name}] total tasks={len(tasks)} | queued={len(plans)} | "
-        f"skipped_completed={skipped_completed} | workers={worker_count} | run_root={run_root}"
+        f"{_c(f'[{config.name}]', 'cyan', True)} {_c('QUEUE', 'blue', True)} "
+        f"total={len(tasks)} queued={len(plans)} skipped_completed={skipped_completed} "
+        f"workers={worker_count} run_root={run_root}"
     )
     if notifier.enabled:
-        print(f"[{config.name}] notifications enabled: {', '.join(notifier.channels)}")
+        print(f"{_c(f'[{config.name}]', 'cyan', True)} {_c('NOTIFY', 'green', True)} enabled: {', '.join(notifier.channels)}")
     else:
-        print(
-            f"[{config.name}] notifications disabled "
-            f"(set EXP_NOTIFY_WEBHOOK_URL / SMTP env / Twilio env to enable)"
-        )
+        print(f"{_c(f'[{config.name}]', 'cyan', True)} {_c('NOTIFY', 'yellow', True)} disabled (set webhook/SMTP/Twilio env to enable)")
 
     failed = 0
     status_counter: Dict[str, int] = {}
@@ -1953,7 +2104,7 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
                 status = "failed_internal_exception"
                 status_counter[status] = status_counter.get(status, 0) + 1
                 err = traceback.format_exc()
-                print(f"[{config.name}] internal exception:\n{err}")
+                print(f"{_c(f'[{config.name}]', 'cyan', True)} {_c('EXCEPTION', 'red', True)}\n{err}")
                 if notifier.enabled and config.notify_on_failure:
                     notifier.send(
                         event="task_exception",
@@ -1964,7 +2115,11 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
                 continue
 
             status_counter[status] = status_counter.get(status, 0) + 1
-            print(f"[{config.name}] {run_name} -> {status}")
+            print(
+                f"{_c(f'[{config.name}]', 'cyan', True)} "
+                f"{_c('RESULT', 'red' if status.startswith('failed_') else 'green', True)} "
+                f"{run_name} -> {status}"
+            )
             if status not in {"ok", "dry_run", "skipped_completed", "skipped_locked"}:
                 failed += 1
 
@@ -1975,7 +2130,10 @@ def run_experiments(config: ExperimentConfig, max_workers: Optional[int], dry_ru
         "failed": failed,
         "status_counter": status_counter,
     }
-    print(f"[{config.name}] summary: {json.dumps(summary_payload, ensure_ascii=False)}")
+    print(
+        f"{_c(f'[{config.name}]', 'cyan', True)} {_c('SUMMARY', 'magenta', True)} "
+        f"{json.dumps(summary_payload, ensure_ascii=False)}"
+    )
 
     should_notify_summary = notifier.enabled and (
         (failed > 0 and config.notify_on_failure) or (failed == 0 and config.notify_on_success)

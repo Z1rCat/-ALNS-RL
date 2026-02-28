@@ -9,6 +9,8 @@ Minimal, plug-in friendly RL/decision-making components designed for:
 from .drcb import DriftRobustContextualBandit
 from .lbklac import LBKLACAgent, LBKLACConfig
 from .sb3_attention import HATConfig, HistoryAttentionWrapper, AttentionExtractor
+from .protomem_ppo import ProtoMemConfig, ProtoMemInputWrapper, ProtoMemPolicy, ProtoMemPPO
+from .ppo_new import build_model as build_ppo_new_model
 
 __all__ = [
     "DriftRobustContextualBandit",
@@ -17,4 +19,9 @@ __all__ = [
     "HATConfig",
     "HistoryAttentionWrapper",
     "AttentionExtractor",
+    "ProtoMemConfig",
+    "ProtoMemInputWrapper",
+    "ProtoMemPolicy",
+    "ProtoMemPPO",
+    "build_ppo_new_model",
 ]

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 import argparse
 import json
@@ -30,6 +30,49 @@ try:
 except Exception:
     pass
 
+_ANSI_ENABLED = bool(sys.stdout and sys.stdout.isatty())
+
+
+def _enable_ansi_on_windows():
+    global _ANSI_ENABLED
+    if os.name != "nt" or not _ANSI_ENABLED:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        _ANSI_ENABLED = False
+
+
+def _c(text, color="", bold=False):
+    if not _ANSI_ENABLED:
+        return text
+    palette = {
+        "red": "31",
+        "green": "32",
+        "yellow": "33",
+        "blue": "34",
+        "magenta": "35",
+        "cyan": "36",
+        "white": "37",
+    }
+    codes = []
+    if bold:
+        codes.append("1")
+    if color and color in palette:
+        codes.append(palette[color])
+    if not codes:
+        return text
+    return f"\033[{';'.join(codes)}m{text}\033[0m"
+
+
+_enable_ansi_on_windows()
+
 # ================= CONFIGURATION =================
 # 自动获取项目根目录 (假设脚本在 codes/ 下)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,36 +86,24 @@ EXP_NUMBERS = {5: 12793, 10: 12792, 20: 12794, 30: 12816, 50: 12817, 100: 12818}
 CONFIG_PATH = os.path.join(ROOT_DIR, "distribution_config.json")
 
 DEFAULT_DISTRIBUTIONS = [
-    {"name": "S1_1", "pattern": "random_mix", "means": {"A": 9, "B": 90}, "display": "S1_1 random mix A=9 B=90"},
-    {"name": "S1_2", "pattern": "random_mix", "means": {"A": 3, "B": 30}, "display": "S1_2 random mix A=3 B=30"},
-    {"name": "S1_3", "pattern": "random_mix", "means": {"A": 6, "B": 60}, "display": "S1_3 random mix A=6 B=60"},
-    {"name": "S2_1", "pattern": "aba", "means": {"A": 9, "B": 90}, "display": "S2_1 ABA A=9 B=90"},
-    {"name": "S2_2", "pattern": "aba", "means": {"A": 90, "B": 9}, "display": "S2_2 ABA A=90 B=9"},
-    {"name": "S2_3", "pattern": "aba", "means": {"A": 3, "B": 30}, "display": "S2_3 ABA A=3 B=30"},
-    {"name": "S2_4", "pattern": "aba", "means": {"A": 30, "B": 3}, "display": "S2_4 ABA A=30 B=3"},
-    {"name": "S2_5", "pattern": "aba", "means": {"A": 6, "B": 60}, "display": "S2_5 ABA A=6 B=60"},
-    {"name": "S2_6", "pattern": "aba", "means": {"A": 60, "B": 6}, "display": "S2_6 ABA A=60 B=6"},
-    {"name": "S3_1", "pattern": "ab", "means": {"A": 9, "B": 90}, "display": "S3_1 OOD A=9 B=90"},
-    {"name": "S3_2", "pattern": "ab", "means": {"A": 90, "B": 9}, "display": "S3_2 OOD A=90 B=9"},
-    {"name": "S3_3", "pattern": "ab", "means": {"A": 3, "B": 30}, "display": "S3_3 OOD A=3 B=30"},
-    {"name": "S3_4", "pattern": "ab", "means": {"A": 30, "B": 3}, "display": "S3_4 OOD A=30 B=3"},
-    {"name": "S3_5", "pattern": "ab", "means": {"A": 6, "B": 60}, "display": "S3_5 OOD A=6 B=60"},
-    {"name": "S3_6", "pattern": "ab", "means": {"A": 60, "B": 6}, "display": "S3_6 OOD A=60 B=6"},
-    {"name": "S4_1", "pattern": "recall", "means": {"A": 9, "B": 90}, "display": "S4_1 recall A=9 B=90"},
-    {"name": "S4_2", "pattern": "recall", "means": {"A": 90, "B": 9}, "display": "S4_2 recall A=90 B=9"},
-    {"name": "S4_3", "pattern": "recall", "means": {"A": 3, "B": 30}, "display": "S4_3 recall A=3 B=30"},
-    {"name": "S4_4", "pattern": "recall", "means": {"A": 30, "B": 3}, "display": "S4_4 recall A=30 B=3"},
-    {"name": "S4_5", "pattern": "recall", "means": {"A": 6, "B": 60}, "display": "S4_5 recall A=6 B=60"},
-    {"name": "S4_6", "pattern": "recall", "means": {"A": 60, "B": 6}, "display": "S4_6 recall A=60 B=6"},
-    {"name": "S5_1", "pattern": "adaptation", "means": {"A": 9, "B": 90}, "display": "S5_1 adaptation A=9 B=90"},
-    {"name": "S5_2", "pattern": "adaptation", "means": {"A": 90, "B": 9}, "display": "S5_2 adaptation A=90 B=9"},
-    {"name": "S5_3", "pattern": "adaptation", "means": {"A": 3, "B": 30}, "display": "S5_3 adaptation A=3 B=30"},
-    {"name": "S5_4", "pattern": "adaptation", "means": {"A": 30, "B": 3}, "display": "S5_4 adaptation A=30 B=3"},
-    {"name": "S5_5", "pattern": "adaptation", "means": {"A": 6, "B": 60}, "display": "S5_5 adaptation A=6 B=60"},
-    {"name": "S5_6", "pattern": "adaptation", "means": {"A": 60, "B": 6}, "display": "S5_6 adaptation A=60 B=6"},
-    {"name": "S6_1", "pattern": "abc", "means": {"A": 9, "B": 90, "C": 30}, "display": "S6_1 ABC A=9 B=90 C=30"},
-    {"name": "S6_2", "pattern": "abc", "means": {"A": 9, "B": 30, "C": 90}, "display": "S6_2 ABC A=9 B=30 C=90"},
-    {"name": "S6_3", "pattern": "abc", "means": {"A": 90, "B": 30, "C": 9}, "display": "S6_3 ABC A=90 B=30 C=9"},
+    {"name": "R_10_30", "pattern": "random_mix", "means": {"A": 10, "B": 30}, "display": "R_10_30 random mix A=10 B=30"},
+    {"name": "R_30_60", "pattern": "random_mix", "means": {"A": 30, "B": 60}, "display": "R_30_60 random mix A=30 B=60"},
+    {"name": "R_10_60", "pattern": "random_mix", "means": {"A": 10, "B": 60}, "display": "R_10_60 random mix A=10 B=60"},
+    {"name": "O_10_60", "pattern": "ab", "means": {"A": 10, "B": 60}, "display": "O_10_60 OOD train A=10 test B=60"},
+    {"name": "O_30_60", "pattern": "ab", "means": {"A": 30, "B": 60}, "display": "O_30_60 OOD train A=30 test B=60"},
+    {"name": "O_10_30", "pattern": "ab", "means": {"A": 10, "B": 30}, "display": "O_10_30 OOD train A=10 test B=30"},
+    {"name": "O_60_10", "pattern": "ab", "means": {"A": 60, "B": 10}, "display": "O_60_10 OOD train A=60 test B=10"},
+    {"name": "O_60_30", "pattern": "ab", "means": {"A": 60, "B": 30}, "display": "O_60_30 OOD train A=60 test B=30"},
+    {"name": "O_30_10", "pattern": "ab", "means": {"A": 30, "B": 10}, "display": "O_30_10 OOD train A=30 test B=10"},
+    {"name": "F1_10_60", "pattern": "aba", "means": {"A": 10, "B": 60}, "display": "F1_10_60 forgetting train A,B test A"},
+    {"name": "F1_30_60", "pattern": "aba", "means": {"A": 30, "B": 60}, "display": "F1_30_60 forgetting train A,B test A"},
+    {"name": "F1_10_30", "pattern": "aba", "means": {"A": 10, "B": 30}, "display": "F1_10_30 forgetting train A,B test A"},
+    {"name": "F2_10_60", "pattern": "abba", "means": {"A": 10, "B": 60}, "display": "F2_10_60 forgetting train A,B test A,B"},
+    {"name": "F2_30_60", "pattern": "abba", "means": {"A": 30, "B": 60}, "display": "F2_30_60 forgetting train A,B test A,B"},
+    {"name": "F2_10_30", "pattern": "abba", "means": {"A": 10, "B": 30}, "display": "F2_10_30 forgetting train A,B test A,B"},
+    {"name": "G_10_30_60", "pattern": "abc", "means": {"A": 10, "B": 30, "C": 60}, "display": "G_10_30_60 generalization train A,B test C"},
+    {"name": "G_10_60_30", "pattern": "abc", "means": {"A": 10, "B": 60, "C": 30}, "display": "G_10_60_30 generalization train A,B test C"},
+    {"name": "G_60_30_10", "pattern": "abc", "means": {"A": 60, "B": 30, "C": 10}, "display": "G_60_30_10 generalization train A,B test C"},
 ]
 
 DIST_DISPLAY = {}
@@ -80,7 +111,7 @@ DIST_DISPLAY = {}
 # 子进程全局缓存
 GLOBAL_DATA = {}
 
-EXPECTED_TOTAL_FILES = 500
+EXPECTED_TOTAL_FILES = 1000
 
 SCENARIO_CONFIGS = {}
 
@@ -169,14 +200,28 @@ def sample_durations(mean_val, max_events, std=None, dist="normal"):
     return samples.astype(int)
 
 def build_phase_labels(pattern, total_files):
+    if pattern in {"single_mean", "single", "constant", "aa"}:
+        return ["A"] * total_files
     if pattern == "random_mix":
         return list(np.random.choice(["A", "B"], size=total_files, p=[0.5, 0.5]))
+    train_files = int(total_files * 0.8)
+    test_start = train_files
+    half_train = train_files // 2
+    half_test = (total_files - train_files) // 2
     segments = {
-        "aba": [(0, 174, "A"), (175, 349, "B"), (350, 499, "A")],
-        "ab": [(0, 349, "A"), (350, 499, "B")],
-        "recall": [(0, 424, "A"), (425, 499, "B")],
-        "adaptation": [(0, 99, "A"), (100, 499, "B")],
-        "abc": [(0, 174, "A"), (175, 349, "B"), (350, 499, "C")],
+        # OOD: train A, test B
+        "ab": [(0, train_files - 1, "A"), (test_start, total_files - 1, "B")],
+        # Forgetting type-1: train A,B; test A
+        "aba": [(0, half_train - 1, "A"), (half_train, train_files - 1, "B"), (test_start, total_files - 1, "A")],
+        # Forgetting type-2: train A,B; test A,B (reverse read should be A then B)
+        "abba": [
+            (0, half_train - 1, "A"),
+            (half_train, train_files - 1, "B"),
+            (test_start, test_start + half_test - 1, "B"),
+            (test_start + half_test, total_files - 1, "A"),
+        ],
+        # Generalization: train A,B; test C
+        "abc": [(0, half_train - 1, "A"), (half_train, train_files - 1, "B"), (test_start, total_files - 1, "C")],
     }
     labels = [""] * total_files
     for start, end, label in segments[pattern]:
@@ -228,8 +273,12 @@ def build_scenario_matrix_and_meta(dist_name, total_files, max_events):
     matrix = np.zeros((total_files, max_events), dtype=int)
     meta_rows = []
     variance_spec = config.get("variance")
+    means_map = dict(config.get("means", {}) or {})
+    fallback_label = "A" if "A" in means_map else (next(iter(means_map.keys())) if means_map else "")
+    if not fallback_label:
+        raise ValueError(f"distribution '{dist_name}' has empty means map")
     for i, label in enumerate(labels):
-        phase_spec = config["means"][label]
+        phase_spec = means_map.get(label, means_map[fallback_label])
         phase_params = parse_phase_spec(phase_spec)
         mean_val = phase_params["mean"]
         std_val = phase_params["std"]
@@ -255,7 +304,7 @@ def verify_output_dir(r_dir, total_files):
         fpath = os.path.join(r_dir, f"Intermodal_EGS_data_dynamic_congestion{idx}.xlsx")
         if not os.path.exists(fpath) or not verify_excel_file(fpath):
             failures += 1
-            print(f"!! Corrupted or missing file: {fpath}")
+            print(f"{_c('[VERIFY]', 'yellow', True)} corrupted or missing file: {fpath}")
     return failures
 
 def build_default_meta(matrix, phase_label):
@@ -269,7 +318,7 @@ def get_distribution_matrix(dist_name, total_files, max_events):
     【兵工厂核心】根据策略生成随机数矩阵 [Files, Events]
     """
     dist_label = DIST_DISPLAY.get(dist_name, dist_name)
-    print(f"   -> distribution: {dist_label}")
+    print(f"{_c('[DIST]', 'cyan', True)} {dist_label}")
 
     if dist_name in SCENARIO_CONFIGS:
         return build_scenario_matrix_and_meta(dist_name, total_files, max_events)
@@ -321,7 +370,7 @@ def init_worker(base_data_path, exp_mapping, figures_dir):
                 GLOBAL_DATA['triggers'][r] = None
                 
     except Exception as e:
-        print(f"?????????{e}")
+        print(f"{_c('[WORKER-INIT]', 'red', True)} failed: {e}")
 
 def generate_single_file(args):
     """写入单个 Excel"""
@@ -409,7 +458,7 @@ def generate_single_file(args):
                 os.remove(tmp_path)
         except Exception:
             pass
-        print(f"!! Failed to write {fpath}: {exc}")
+        print(f"{_c('[WRITE]', 'red', True)} failed: {fpath} | {exc}")
         return False
 
 def main():
@@ -418,8 +467,12 @@ def main():
     parser.add_argument("--target_folder", required=True)
     parser.add_argument("--total_files", type=int, default=EXPECTED_TOTAL_FILES)
     parser.add_argument("--workers", type=int, default=os.cpu_count())
-    parser.add_argument("--request_numbers", type=str, default="5",
-                        help="指定要生成的R数量，单个值如'5'或逗号分隔如'5,10'")
+    parser.add_argument(
+        "--request_numbers",
+        type=str,
+        default="5",
+        help="Target request numbers, e.g. '5' or '5,10'",
+    )
     parser.add_argument("--seed", type=int, default=None, help="random seed for generator")
     parser.add_argument("--verify", action="store_true", help="verify generated excel files")
     args = parser.parse_args()
@@ -427,58 +480,56 @@ def main():
     try:
         target_rs = [int(x) for x in args.request_numbers.split(",") if x.strip()]
     except ValueError:
-        print(f"?? 无效的 --request_numbers 参数: {args.request_numbers}")
+        print(f"{_c('[ARG]', 'red', True)} invalid --request_numbers: {args.request_numbers}")
         sys.exit(1)
     target_rs = [r for r in target_rs if r in EXP_NUMBERS]
     if not target_rs:
-        print("?? --request_numbers 为空或不在预设列表 {5,10,20,30,50,100} 中")
+        print(f"{_c('[ARG]', 'red', True)} --request_numbers is empty or out of allowed set: 5,10,20,30,50,100")
         sys.exit(1)
 
     if args.total_files != EXPECTED_TOTAL_FILES:
-        print(f"?? total_files overridden to {EXPECTED_TOTAL_FILES} for physical isolation")
+        print(f"{_c('[INFO]', 'yellow', True)} total_files overridden to {EXPECTED_TOTAL_FILES} for physical isolation")
         args.total_files = EXPECTED_TOTAL_FILES
 
-    dist_label = DIST_DISPLAY.get(args.dist_name, "????")
-    print(f"=== ?????: {dist_label} ===")
-    print(f"   target: {args.target_folder}")
-    print(f"   ?? R ???: {args.total_files}")
-    print(f"   ????: {args.workers}")
-    print(f"   R 集合: {target_rs}")
+    dist_label = DIST_DISPLAY.get(args.dist_name, "<unknown_distribution>")
+    print(_c("=" * 72, "blue", True))
+    print(f"{_c('[GENERATOR]', 'blue', True)} distribution: {dist_label}")
+    print(f"{_c('[TARGET]', 'cyan', True)} {args.target_folder}")
+    print(f"{_c('[FILES]', 'cyan', True)} total_files={args.total_files}")
+    print(f"{_c('[WORKERS]', 'cyan', True)} {args.workers}")
+    print(f"{_c('[REQUESTS]', 'cyan', True)} {target_rs}")
     if args.seed is not None:
-        print(f"   seed: {args.seed}")
+        print(f"{_c('[SEED]', 'cyan', True)} {args.seed}")
+    print(_c("=" * 72, "blue", True))
 
     start_all = time.time()
     if args.seed is not None:
         np.random.seed(args.seed)
-    
-    # 1. 生成数据矩阵
+
     MAX_EVT = 60
     full_matrix, meta_rows = get_distribution_matrix(args.dist_name, args.total_files, MAX_EVT)
-    
-    # 2. 准备输出路径
+
     if os.path.isabs(args.target_folder):
         base_out = args.target_folder
     else:
         base_out = os.path.join(OUTPUT_ROOT, args.target_folder)
     if not os.path.exists(base_out):
         os.makedirs(base_out, exist_ok=True)
-        
-    # 3. 并行处理
-    with ProcessPoolExecutor(max_workers=args.workers, 
-                             initializer=init_worker, 
-                             initargs=(DATA_FILE, EXP_NUMBERS, FIGURES_DIR)) as executor:
-        
+
+    with ProcessPoolExecutor(
+        max_workers=args.workers,
+        initializer=init_worker,
+        initargs=(DATA_FILE, EXP_NUMBERS, FIGURES_DIR),
+    ) as executor:
         for r in target_rs:
-            print(f"\n>> Generating R_{r}...")
+            print(f"\n{_c('[RUN]', 'green', True)} generating R_{r} ...")
             r_dir = os.path.join(base_out, f"R{r}")
             os.makedirs(r_dir, exist_ok=True)
-            
-            # 准备任务
+
             tasks = []
             for i in range(args.total_files):
                 tasks.append((i, r, full_matrix[i], r_dir, meta_rows[i], args.seed))
-            
-            # 提交并监控进度
+
             futures = [executor.submit(generate_single_file, t) for t in tasks]
             failures = 0
             if HAS_TQDM:
@@ -495,22 +546,22 @@ def main():
                 if not ok:
                     failures += 1
                 if not HAS_TQDM and done % 100 == 0:
-                    sys.stdout.write(f"\r   ??: {done}/{len(futures)}")
+                    sys.stdout.write(f"\r{_c('[PROGRESS]', 'magenta', True)} {done}/{len(futures)}")
                     sys.stdout.flush()
             if not HAS_TQDM:
                 print("")
             if failures:
-                print(f"!! Generator failed on {failures} files.")
+                print(f"{_c('[ERROR]', 'red', True)} generator failed on {failures} files.")
                 sys.exit(1)
 
             if args.verify:
-                print(">> Verifying generated Excel files...")
+                print(f"{_c('[VERIFY]', 'yellow', True)} verifying generated Excel files...")
                 verify_failures = verify_output_dir(r_dir, args.total_files)
                 if verify_failures:
-                    print(f"!! Verification failed on {verify_failures} files.")
+                    print(f"{_c('[ERROR]', 'red', True)} verification failed on {verify_failures} files.")
                     sys.exit(1)
-                
-    print(f"\n=== ??????? {time.time() - start_all:.2f} ? ===")
 
+    print(f"\n{_c('[DONE]', 'green', True)} generation finished in {time.time() - start_all:.2f}s")
 if __name__ == "__main__":
     main()
+

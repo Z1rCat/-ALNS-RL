@@ -88,39 +88,27 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(ROOT_DIR, "distribution_config.json")
 
 DEFAULT_DISTRIBUTIONS = [
-    {"name": "S1_1", "pattern": "random_mix", "means": {"A": 9, "B": 90}, "display": "S1_1 random mix A=9 B=90"},
-    {"name": "S1_2", "pattern": "random_mix", "means": {"A": 3, "B": 30}, "display": "S1_2 random mix A=3 B=30"},
-    {"name": "S1_3", "pattern": "random_mix", "means": {"A": 6, "B": 60}, "display": "S1_3 random mix A=6 B=60"},
-    {"name": "S2_1", "pattern": "aba", "means": {"A": 9, "B": 90}, "display": "S2_1 ABA A=9 B=90"},
-    {"name": "S2_2", "pattern": "aba", "means": {"A": 90, "B": 9}, "display": "S2_2 ABA A=90 B=9"},
-    {"name": "S2_3", "pattern": "aba", "means": {"A": 3, "B": 30}, "display": "S2_3 ABA A=3 B=30"},
-    {"name": "S2_4", "pattern": "aba", "means": {"A": 30, "B": 3}, "display": "S2_4 ABA A=30 B=3"},
-    {"name": "S2_5", "pattern": "aba", "means": {"A": 6, "B": 60}, "display": "S2_5 ABA A=6 B=60"},
-    {"name": "S2_6", "pattern": "aba", "means": {"A": 60, "B": 6}, "display": "S2_6 ABA A=60 B=6"},
-    {"name": "S3_1", "pattern": "ab", "means": {"A": 9, "B": 90}, "display": "S3_1 OOD A=9 B=90"},
-    {"name": "S3_2", "pattern": "ab", "means": {"A": 90, "B": 9}, "display": "S3_2 OOD A=90 B=9"},
-    {"name": "S3_3", "pattern": "ab", "means": {"A": 3, "B": 30}, "display": "S3_3 OOD A=3 B=30"},
-    {"name": "S3_4", "pattern": "ab", "means": {"A": 30, "B": 3}, "display": "S3_4 OOD A=30 B=3"},
-    {"name": "S3_5", "pattern": "ab", "means": {"A": 6, "B": 60}, "display": "S3_5 OOD A=6 B=60"},
-    {"name": "S3_6", "pattern": "ab", "means": {"A": 60, "B": 6}, "display": "S3_6 OOD A=60 B=6"},
-    {"name": "S4_1", "pattern": "recall", "means": {"A": 9, "B": 90}, "display": "S4_1 recall A=9 B=90"},
-    {"name": "S4_2", "pattern": "recall", "means": {"A": 90, "B": 9}, "display": "S4_2 recall A=90 B=9"},
-    {"name": "S4_3", "pattern": "recall", "means": {"A": 3, "B": 30}, "display": "S4_3 recall A=3 B=30"},
-    {"name": "S4_4", "pattern": "recall", "means": {"A": 30, "B": 3}, "display": "S4_4 recall A=30 B=3"},
-    {"name": "S4_5", "pattern": "recall", "means": {"A": 6, "B": 60}, "display": "S4_5 recall A=6 B=60"},
-    {"name": "S4_6", "pattern": "recall", "means": {"A": 60, "B": 6}, "display": "S4_6 recall A=60 B=6"},
-    {"name": "S5_1", "pattern": "adaptation", "means": {"A": 9, "B": 90}, "display": "S5_1 adaptation A=9 B=90"},
-    {"name": "S5_2", "pattern": "adaptation", "means": {"A": 90, "B": 9}, "display": "S5_2 adaptation A=90 B=9"},
-    {"name": "S5_3", "pattern": "adaptation", "means": {"A": 3, "B": 30}, "display": "S5_3 adaptation A=3 B=30"},
-    {"name": "S5_4", "pattern": "adaptation", "means": {"A": 30, "B": 3}, "display": "S5_4 adaptation A=30 B=3"},
-    {"name": "S5_5", "pattern": "adaptation", "means": {"A": 6, "B": 60}, "display": "S5_5 adaptation A=6 B=60"},
-    {"name": "S5_6", "pattern": "adaptation", "means": {"A": 60, "B": 6}, "display": "S5_6 adaptation A=60 B=6"},
-    {"name": "S6_1", "pattern": "abc", "means": {"A": 9, "B": 90, "C": 30}, "display": "S6_1 ABC A=9 B=90 C=30"},
-    {"name": "S6_2", "pattern": "abc", "means": {"A": 9, "B": 30, "C": 90}, "display": "S6_2 ABC A=9 B=30 C=90"},
-    {"name": "S6_3", "pattern": "abc", "means": {"A": 90, "B": 30, "C": 9}, "display": "S6_3 ABC A=90 B=30 C=9"},
+    {"name": "R_10_30", "pattern": "random_mix", "means": {"A": 10, "B": 30}, "display": "R_10_30 random mix A=10 B=30"},
+    {"name": "R_30_60", "pattern": "random_mix", "means": {"A": 30, "B": 60}, "display": "R_30_60 random mix A=30 B=60"},
+    {"name": "R_10_60", "pattern": "random_mix", "means": {"A": 10, "B": 60}, "display": "R_10_60 random mix A=10 B=60"},
+    {"name": "O_10_60", "pattern": "ab", "means": {"A": 10, "B": 60}, "display": "O_10_60 OOD train A=10 test B=60"},
+    {"name": "O_30_60", "pattern": "ab", "means": {"A": 30, "B": 60}, "display": "O_30_60 OOD train A=30 test B=60"},
+    {"name": "O_10_30", "pattern": "ab", "means": {"A": 10, "B": 30}, "display": "O_10_30 OOD train A=10 test B=30"},
+    {"name": "O_60_10", "pattern": "ab", "means": {"A": 60, "B": 10}, "display": "O_60_10 OOD train A=60 test B=10"},
+    {"name": "O_60_30", "pattern": "ab", "means": {"A": 60, "B": 30}, "display": "O_60_30 OOD train A=60 test B=30"},
+    {"name": "O_30_10", "pattern": "ab", "means": {"A": 30, "B": 10}, "display": "O_30_10 OOD train A=30 test B=10"},
+    {"name": "F1_10_60", "pattern": "aba", "means": {"A": 10, "B": 60}, "display": "F1_10_60 forgetting train A,B test A"},
+    {"name": "F1_30_60", "pattern": "aba", "means": {"A": 30, "B": 60}, "display": "F1_30_60 forgetting train A,B test A"},
+    {"name": "F1_10_30", "pattern": "aba", "means": {"A": 10, "B": 30}, "display": "F1_10_30 forgetting train A,B test A"},
+    {"name": "F2_10_60", "pattern": "abba", "means": {"A": 10, "B": 60}, "display": "F2_10_60 forgetting train A,B test A,B"},
+    {"name": "F2_30_60", "pattern": "abba", "means": {"A": 30, "B": 60}, "display": "F2_30_60 forgetting train A,B test A,B"},
+    {"name": "F2_10_30", "pattern": "abba", "means": {"A": 10, "B": 30}, "display": "F2_10_30 forgetting train A,B test A,B"},
+    {"name": "G_10_30_60", "pattern": "abc", "means": {"A": 10, "B": 30, "C": 60}, "display": "G_10_30_60 generalization train A,B test C"},
+    {"name": "G_10_60_30", "pattern": "abc", "means": {"A": 10, "B": 60, "C": 30}, "display": "G_10_60_30 generalization train A,B test C"},
+    {"name": "G_60_30_10", "pattern": "abc", "means": {"A": 60, "B": 30, "C": 10}, "display": "G_60_30_10 generalization train A,B test C"},
 ]
 
-PHYSICAL_TOTAL_FILES = 500
+PHYSICAL_TOTAL_FILES = 1000
 
 def load_distribution_config():
     dist_entries = DEFAULT_DISTRIBUTIONS
@@ -210,7 +198,7 @@ def select_distribution_mode():
     while True:
         choice = input(f"Choose [1-{len(dist_entries)}] or name (default 1): ").strip()
         if choice == "":
-            return dist_entries[0]["name"] if dist_entries else "S1_1"
+            return dist_entries[0]["name"] if dist_entries else "R_10_30"
         if choice in mapping:
             return mapping[choice]
         choice_upper = choice.upper()
@@ -278,6 +266,8 @@ def select_algorithm():
     print("  [12] A2C_HAT_MOE (HAT + MoE(K=2) + A2C)")
     print("  [13] QRDQN_CVAR (Distributional QRDQN + CVaR Inference)")
     print("  [14] BE_CVAR_DQN (Belief+Ensemble+CVaR DQN)")
+    print("  [15] PPO_PROTOMEM (ProtoMem-PPO)")
+    print("  [16] PPO_NEW (new PPO entry with versioning)")
     print("=" * 50)
     mapping = {
         "1": "DQN",
@@ -294,6 +284,8 @@ def select_algorithm():
         "12": "A2C_HAT_MOE",
         "13": "QRDQN_CVAR",
         "14": "BE_CVAR_DQN",
+        "15": "PPO_PROTOMEM",
+        "16": "PPO_NEW",
     }
     while True:
         choice = input("请选择算法 (默认 1=DQN): ").strip()
@@ -302,7 +294,7 @@ def select_algorithm():
         choice_upper = choice.upper()
         if choice_upper == "HAT":
             return "PPO_HAT"
-        if choice_upper in {"PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN"}:
+        if choice_upper in {"PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN", "PPO_PROTOMEM", "PPO_NEW"}:
             return choice_upper
         if choice_upper in mapping.values():
             return choice_upper
@@ -423,10 +415,32 @@ def run_simulation(request_number):
                     print(traceback.format_exc())
 
 
-def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=None, run_name=None):
+def _normalize_stage_mode(value):
+    mode = str(value or "train_eval").strip().lower()
+    if mode not in {"train_eval", "train_only", "eval_only"}:
+        mode = "train_eval"
+    return mode
+
+
+def run_single(
+    dist_name,
+    request_number,
+    workers=None,
+    algorithm="DQN",
+    seed=None,
+    run_name=None,
+    algo_version="v1",
+    stage_mode="train_eval",
+    init_model_path=None,
+    save_model_path=None,
+):
     base_algo, hat_enabled, algo_label = resolve_algorithm(algorithm)
+    algo_version = str(algo_version or "v1").strip().lower()
+    stage_mode = _normalize_stage_mode(stage_mode)
     os.environ["SCENARIO_NAME"] = dist_name
     os.environ["RL_ALGORITHM"] = base_algo
+    os.environ["RL_ALGO_VERSION"] = algo_version
+    os.environ["RL_STAGE_MODE"] = stage_mode
     os.environ["RL_HAT"] = "1" if hat_enabled else "0"
     os.environ["RL_MOE"] = "1" if algo_label in {"PPO_HAT_MOE", "A2C_HAT_MOE"} else "0"
     if algo_label in {"PPO_LSTM", "PPO_HAT_LSTM"}:
@@ -437,6 +451,14 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=No
         os.environ.pop("RL_SEED", None)
     else:
         os.environ["RL_SEED"] = str(seed)
+    if init_model_path:
+        os.environ["RL_INIT_MODEL_PATH"] = str(init_model_path)
+    else:
+        os.environ.pop("RL_INIT_MODEL_PATH", None)
+    if save_model_path:
+        os.environ["RL_SAVE_MODEL_PATH"] = str(save_model_path)
+    else:
+        os.environ.pop("RL_SAVE_MODEL_PATH", None)
     Dynamic_ALNS_RL34959.SCENARIO_NAME = dist_name
     Dynamic_ALNS_RL34959.RL_ALGORITHM = base_algo
     dynamic_RL34959.SCENARIO_NAME = dist_name
@@ -461,10 +483,14 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=No
         "request_number": request_number,
         "generator_workers": workers if workers is not None else "auto",
         "algorithm": algo_label,
+        "algo_version": algo_version,
         "hat_enabled": int(hat_enabled),
         "hat_base": base_algo if hat_enabled else "",
         "seed": seed,
         "run_name": run_id,
+        "stage_mode": stage_mode,
+        "init_model_path": str(init_model_path or ""),
+        "save_model_path": str(save_model_path or ""),
         "curriculum_reward_threshold": curriculum_threshold,
         "curriculum_success_required": getattr(dynamic_RL34959, "CURRICULUM_SUCCESS_REQUIRED", None),
         "stop_flag_file": stop_flag_path,
@@ -488,13 +514,26 @@ def run_single(dist_name, request_number, workers=None, algorithm="DQN", seed=No
         sys.stderr = original_stderr
 
 
-def run_single_in_subprocess(dist_name, request_number, workers=None, algorithm="DQN", seed=None, run_name=None):
+def run_single_in_subprocess(
+    dist_name,
+    request_number,
+    workers=None,
+    algorithm="DQN",
+    seed=None,
+    run_name=None,
+    algo_version="v1",
+    stage_mode="train_eval",
+    init_model_path=None,
+    save_model_path=None,
+):
     script_path = os.path.abspath(__file__)
     cmd = [
         sys.executable, script_path,
         "--dist_name", dist_name,
         "--request_number", str(request_number),
         "--algorithm", algorithm,
+        "--algo_version", str(algo_version),
+        "--stage-mode", str(_normalize_stage_mode(stage_mode)),
     ]
     if workers is not None:
         cmd.extend(["--workers", str(workers)])
@@ -502,6 +541,10 @@ def run_single_in_subprocess(dist_name, request_number, workers=None, algorithm=
         cmd.extend(["--seed", str(seed)])
     if run_name:
         cmd.extend(["--run-name", run_name])
+    if init_model_path:
+        cmd.extend(["--init-model-path", str(init_model_path)])
+    if save_model_path:
+        cmd.extend(["--save-model-path", str(save_model_path)])
     subprocess.run(cmd, check=True)
 
 
@@ -510,12 +553,16 @@ def parse_args():
     parser.add_argument("--dist_name", type=str)
     parser.add_argument("--request_number", type=int)
     parser.add_argument("--run_count", type=int)
-    parser.add_argument("--algorithm", type=str, help="DQN/PPO/A2C/DRCB/LBKLAC/PPO_HAT/A2C_HAT/PPO_LSTM/PPO_HAT_LSTM/PPO_HAT_PDI/PPO_HAT_MOE/A2C_HAT_MOE/QRDQN_CVAR/BE_CVAR_DQN/HAT")
+    parser.add_argument("--algorithm", type=str, help="DQN/PPO/PPO_NEW/A2C/DRCB/LBKLAC/PPO_HAT/A2C_HAT/PPO_LSTM/PPO_HAT_LSTM/PPO_HAT_PDI/PPO_HAT_MOE/A2C_HAT_MOE/QRDQN_CVAR/BE_CVAR_DQN/PPO_PROTOMEM/HAT")
+    parser.add_argument("--algo_version", type=str, default="v1", help="algorithm version tag for extensible entries such as PPO_NEW")
     parser.add_argument("--workers", type=int, help="generator workers (1=single core)")
     parser.add_argument("--single_core", action="store_true", help="force generator single core")
     parser.add_argument("--parallel-runs", type=int, help="parallel run count when run_count > 1")
     parser.add_argument("--seed", type=int, help="random seed")
     parser.add_argument("--run-name", type=str, help="override run folder name")
+    parser.add_argument("--stage-mode", type=str, default="train_eval", help="train_eval/train_only/eval_only")
+    parser.add_argument("--init-model-path", type=str, default="", help="optional checkpoint to load before run")
+    parser.add_argument("--save-model-path", type=str, default="", help="optional checkpoint path to save after run")
     return parser.parse_args()
 
 
@@ -523,12 +570,16 @@ def main():
     args = parse_args()
     workers = resolve_worker_count(args)
     algorithm = args.algorithm.upper() if args.algorithm else None
+    algo_version = str(args.algo_version or "v1").strip().lower()
+    stage_mode = _normalize_stage_mode(args.stage_mode)
+    init_model_path = str(args.init_model_path or "").strip() or None
+    save_model_path = str(args.save_model_path or "").strip() or None
     seed = args.seed
     run_name = args.run_name
     parallel_runs = int(args.parallel_runs) if args.parallel_runs else 1
     if parallel_runs < 1:
         parallel_runs = 1
-    if algorithm is not None and algorithm not in {"DQN", "PPO", "A2C", "DRCB", "LBKLAC", "PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN", "HAT"}:
+    if algorithm is not None and algorithm not in {"DQN", "PPO", "PPO_NEW", "A2C", "DRCB", "LBKLAC", "PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN", "PPO_PROTOMEM", "HAT"}:
         print(f"未知算法 {algorithm}，回退为 DQN")
         algorithm = "DQN"
 
@@ -537,13 +588,35 @@ def main():
         if algorithm is None:
             algorithm = select_algorithm()
         if run_count <= 1:
-            run_single(args.dist_name, args.request_number, workers, algorithm, seed, run_name)
+            run_single(
+                args.dist_name,
+                args.request_number,
+                workers,
+                algorithm,
+                seed,
+                run_name,
+                algo_version,
+                stage_mode=stage_mode,
+                init_model_path=init_model_path,
+                save_model_path=save_model_path,
+            )
         else:
             max_workers = min(run_count, parallel_runs)
             if max_workers <= 1:
                 for idx in range(run_count):
                     child_run_name = f"{run_name}_{idx + 1}" if run_name else None
-                    run_single_in_subprocess(args.dist_name, args.request_number, workers, algorithm, seed, child_run_name)
+                    run_single_in_subprocess(
+                        args.dist_name,
+                        args.request_number,
+                        workers,
+                        algorithm,
+                        seed,
+                        child_run_name,
+                        algo_version,
+                        stage_mode=stage_mode,
+                        init_model_path=init_model_path,
+                        save_model_path=save_model_path,
+                    )
             else:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = []
@@ -557,6 +630,10 @@ def main():
                             algorithm,
                             seed,
                             child_run_name,
+                            algo_version,
+                            stage_mode,
+                            init_model_path,
+                            save_model_path,
                         ))
                     for future in concurrent.futures.as_completed(futures):
                         future.result()
@@ -572,7 +649,18 @@ def main():
     if run_count <= 1:
         dist_name = select_distribution_mode()
         request_number = select_request_number()
-        run_single(dist_name, request_number, workers, algorithm, seed, run_name)
+        run_single(
+            dist_name,
+            request_number,
+            workers,
+            algorithm,
+            seed,
+            run_name,
+            algo_version,
+            stage_mode=stage_mode,
+            init_model_path=init_model_path,
+            save_model_path=save_model_path,
+        )
         return
 
     plan = collect_batch_plan(run_count, algorithm)
@@ -584,7 +672,17 @@ def main():
             print("=" * 50)
             print(f">>> [batch] running {idx}/{run_count} dist[{dist_label}] | R={request_number}")
             print("=" * 50)
-            run_single_in_subprocess(dist_name, request_number, workers, algorithm, seed)
+            run_single_in_subprocess(
+                dist_name,
+                request_number,
+                workers,
+                algorithm,
+                seed,
+                algo_version=algo_version,
+                stage_mode=stage_mode,
+                init_model_path=init_model_path,
+                save_model_path=save_model_path,
+            )
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
@@ -601,6 +699,11 @@ def main():
                     workers,
                     algorithm,
                     seed,
+                    None,
+                    algo_version,
+                    stage_mode,
+                    init_model_path,
+                    save_model_path,
                 ))
             for future in concurrent.futures.as_completed(futures):
                 future.result()

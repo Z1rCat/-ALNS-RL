@@ -245,9 +245,9 @@ from core import rl_logging
 # 日志字段定义（与 RL 侧保持一致）
 TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
-    "table_number", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label",
+    "table_number", "table_id", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label", "oracle_ctx_mode",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "action_meaning", "feasible", "source",
+    "action", "reward", "action_meaning", "feasible", "source", "p_action1",
     # Drift/robustness interpretability fields (optional; safe to leave empty)
     "algo", "regime_id", "context_id", "drift_score",
     # LB-KLAC diagnostics
@@ -286,10 +286,12 @@ def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source=
             "request": row_dict.get("request", ""),
             "vehicle": row_dict.get("vehicle", ""),
             "table_number": globals().get("Dynamic_ALNS_RL34959", None) and getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+            "table_id": globals().get("Dynamic_ALNS_RL34959", None) and getattr(Dynamic_ALNS_RL34959, "table_number", ""),
             "dynamic_t_begin": globals().get("dynamic_t_begin", ""),
             "duration_type": globals().get("duration_type", ""),
             "gt_mean": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "current_gt_mean", ""),
             "phase_label": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "current_phase_label", ""),
+            "oracle_ctx_mode": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "ORACLE_CTX_MODE", "none"),
             "delay_tolerance": row_dict.get("delay_tolerance", ""),
             "severity": globals().get("dynamic_RL34959", None) and getattr(dynamic_RL34959, "severity_level", ""),
             "passed_terminals": row_dict.get("passed_terminals", ""),
@@ -299,6 +301,7 @@ def log_rl_event(row_dict, stage, action=None, reward=None, feasible="", source=
             "action_meaning": action_meaning,
             "feasible": feasible,
             "source": source,
+            "p_action1": "",
         }
         # Keep drift fields consistent with RL side when available.
         try:
@@ -9736,9 +9739,14 @@ def save_action_reward_table(segment_length_in_RL_or_ALNS_implementation, reward
             print(f"!!! [Fix] Saved to fallback: {os.path.abspath(fallback_path)}")
 
         ALNS_end_flag = 1
-        
+
         # 3. 暴力退出
         print(">>> [Fix] Force Exiting Process...")
+        try:
+            if hasattr(dynamic_RL34959, "_decision_finalize_on_exit"):
+                dynamic_RL34959._decision_finalize_on_exit()
+        except Exception as e:
+            print(f"[DecisionExport] finalize before force-exit failed: {e}")
         import os
         os._exit(0) # 比 sys.exit() 更强力，直接终止进程
 
@@ -13896,7 +13904,7 @@ def real_main(parallel_number2, dynamic_t2 = 0, request_number_in_R2 = None):
             after_action_review = 0
             ALNS_removal_implementation_store = {}
             ALNS_insertion_implementation_store = {}
-            number_of_training, number_of_implementation = 500, 200
+            number_of_training, number_of_implementation = 800, 200
         # Dynamic_ALNS_RL34959.reward_list_in_implementation = []
     different_companies = 0
     during_iteration = 1

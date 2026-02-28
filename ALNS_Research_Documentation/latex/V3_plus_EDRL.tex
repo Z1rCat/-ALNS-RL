@@ -1,0 +1,668 @@
+% !TEX program = xelatex
+\documentclass[UTF8,11pt,a4paper]{ctexart}
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,mathtools}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{tcolorbox}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{caption}
+\usepackage{array}
+
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+\setlist[itemize]{topsep=2pt,itemsep=2pt,parsep=0pt,leftmargin=1.6em}
+\setlist[enumerate]{topsep=2pt,itemsep=2pt,parsep=0pt,leftmargin=1.6em}
+
+\title{在 V3 基础上的改进方案：\,\textbf{事件分布生成策略}驱动的课程/对抗训练（V3+EDRL）}
+\author{（面向：二值动作\,\&\,二值奖励的 ALNS--RL 联合系统）}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+针对现有 V3 在纯 OOD（训练仅见分布 $A$，部署切换到未见分布 $B$ 且测试期不可更新参数）场景下的性能上限与动作塌缩问题，本文给出一个在工程上可落地、与现有``不确定性事件文件''生成机制完全兼容的改进框架：\textbf{V3+EDRL}（Environment-Designer RL）。该框架在 V3 主策略（内层）之外引入一个\textbf{事件分布生成策略}（外层），外层策略输出不确定性事件生成参数（如均值组合、占比、切换模式等），生成事件文件并驱动主策略训练。外层奖励采用``难但可学''（hard-but-learnable）原则：既推动主策略暴露薄弱点，又避免退化到不可辨识噪声；同时显式加入\textbf{反塌缩约束}，确保动作 1 不被样本饥饿。我们给出严格的数学形式化（双层优化/对抗课程）、完整训练分期（Phase1--Phase4）、可复现的配置建议与伪代码，并分析该机制为何能够在不改变 V3 编码归纳偏置的前提下，主要从\textbf{数据分布覆盖与样本结构}层面缓解 OOD 失败。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{问题背景与符号约定}
+
+\subsection{任务结构（与你们系统口径一致）}
+系统在每个 episode（或一个可重复的交互单元）中，主策略（记为``内层''策略）与 ALNS/环境进行交互，决策为二值动作
+\begin{equation}
+ a_t \in \{0,1\},
+\end{equation}
+并获得二值奖励
+\begin{equation}
+ r_t \in \{0,1\}.
+\end{equation}
+环境包含由不确定性事件驱动的随机因素。当前工程实现中，不确定性事件在运行前由脚本生成并写入文件（例如 CSV/JSON），主程序读取该文件驱动后续交互。
+
+\subsection{分布键与 OOD 模式}
+用 $\mathcal{D}(\phi)$ 表示事件分布族，$\phi$ 是可配置参数（例如均值、方差、切换模式、占比、种子等）。你们现有的 distribution key（如 $O\_{10,90}$、$F2\_{10,60}$、$G\_{10,90,60}$ 等）可视作对 $\phi$ 的离散化封装。
+
+纯 OOD 的典型设定（对应你们的 $O$ 类 key）：
+\begin{itemize}
+\item 训练：采样 $\phi=\phi_A$（如均值 10）；
+\item 测试：切换到未见的 $\phi=\phi_B$（如均值 60/90）；
+\item 测试期：不允许更新主策略参数。
+\end{itemize}
+
+\subsection{V3 的输入结构化编码}
+V3 的核心归纳偏置是将输入分解为
+\begin{equation}
+ x_t = [o_t,\, m_t,\, \Delta o_t],\quad \Delta o_t=o_t-o_{t-1},
+\end{equation}
+并采用分路编码/聚合（见第\ref{sec:v3}节）。该结构通常能在训练分布内抑噪、提高样本效率，但在纯 OOD 下仍可能失败，尤其在二值奖励+极不平衡样本时容易出现动作塌缩。
+
+\section{V3 基线：结构化编码 + PPO 目标}
+\label{sec:v3}
+
+\subsection{网络结构（抽象表达）}
+将三路输入分别编码：
+\begin{equation}
+ h^{(o)}_t=f_o(o_t),\quad h^{(m)}_t=f_m(m_t),\quad h^{(\Delta)}_t=f_\Delta(\Delta o_t),
+\end{equation}
+聚合得到表征
+\begin{equation}
+ h_t = \textsc{Agg}\big(h^{(o)}_t, h^{(m)}_t, h^{(\Delta)}_t\big),
+\end{equation}
+并输出策略与价值：
+\begin{equation}
+ \pi_\theta(a_t\mid x_t)=\textsc{Softmax}(W_\pi h_t),\qquad V_\theta(x_t)=W_V h_t.
+\end{equation}
+
+\subsection{PPO 目标（你们工程可直接复用）}
+记优势估计为 $\hat A_t$，重要性比率为 $r_t(\theta)=\frac{\pi_\theta(a_t\mid x_t)}{\pi_{\theta_{\mathrm{old}}}(a_t\mid x_t)}$。PPO 的 clipped surrogate：
+\begin{equation}
+\label{eq:ppo}
+\mathcal{L}^{\mathrm{CLIP}}(\theta)=\mathbb{E}_t\Big[\min\big(r_t(\theta)\hat A_t,\, \mathrm{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat A_t\big)\Big].
+\end{equation}
+总体损失：
+\begin{equation}
+\mathcal{L}(\theta)= -\mathcal{L}^{\mathrm{CLIP}}(\theta) + c_v\,\mathcal{L}^{V}(\theta) - c_e\,\mathcal{H}(\pi_\theta),
+\end{equation}
+其中 $\mathcal{H}$ 为熵项。
+
+\section{为何纯 OOD 下仍失败：动作塌缩与信息-样本结构瓶颈}
+
+\subsection{动作塌缩的自增强机制}
+在二值动作/二值奖励设定中，若训练分布 $\phi_A$ 下 action=0 的即时回报显著更高（或方差更低），策略会快速把 $\pi(a=1\mid x)$ 压到极小。之后采样中 action=1 变得稀缺，导致：
+\begin{itemize}
+\item action=1 的正样本更稀缺；
+\item 价值/优势估计对 action=1 更不稳定；
+\item 梯度进一步推动 action=1 概率下降。
+\end{itemize}
+这一反馈环会把策略锁死在 action=0，形成你们观察到的 ``action1\_rate $\approx 0$'' 现象。
+
+\subsection{``补数据''何时有效、何时无效}
+直观上，若仅增加训练量但仍只采样 $\phi_A$，主策略只会更确信``做 0''；因此需要让训练阶段覆盖 $\phi_B$ 或其邻域。
+
+但要注意：\textbf{覆盖并不等于可学}。若在 $\phi_B$ 下，当前可观测输入 $x_t$ 对奖励差异几乎不可辨识（例如 $P(r=1\mid a=1,x)\approx P(r=1\mid a=0,x)$ 在大部分 $x$ 上成立），则再多数据也只能学到常数策略或随机化。V3+EDRL 的设计原则之一，就是让外层策略倾向生成 ``难但可学'' 的分布，而不是纯噪声。
+
+\section{V3+EDRL：外层事件分布生成策略驱动的课程/对抗训练}
+
+\subsection{核心思想}
+保持 V3 主策略架构不变，通过外层策略 $\pi_\psi$ 输出事件生成参数 $a_g$，生成事件文件 $E$，驱动内层训练。
+
+\begin{tcolorbox}[title=一句话定义,width=\textwidth,colback=gray!4]
+\textbf{V3+EDRL}：\;在不改变 V3 编码归纳偏置的前提下，引入外层 RL 在``事件分布参数空间''上做自动课程/受约束对抗，使内层主策略在训练期就看到目标 OOD 分布及其关键样本结构，从而缓解动作塌缩与分布覆盖不足。
+\end{tcolorbox}
+
+\subsection{事件分布参数化与文件生成}
+用 $a_g$ 表示外层动作（即事件生成参数）。推荐一个最小但足够表达的动作空间：
+\begin{equation}
+\label{eq:ag}
+ a_g=(\mu_1,\mu_2,p,\text{pattern},\sigma,\text{seed}).
+\end{equation}
+其中：
+\begin{itemize}
+\item $\mu_1,\mu_2\in\{10,30,60,90\}$（或你们已有候选集）；
+\item $p\in[0,1]$ 表示前 $p$ 比例使用均值 $\mu_1$、后 $1-p$ 使用 $\mu_2$；
+\item $\text{pattern}\in\{ab,aba,abba,\text{random\_mix}\}$ 与你们 key 体系对齐；
+\item $\sigma$ 控制波动强度（可先固定）；
+\item seed 仅为可复现。
+\end{itemize}
+
+定义事件文件生成器 $G$：
+\begin{equation}
+ E=G(a_g),
+\end{equation}
+其中 $E$ 是磁盘文件（或其内存表示），包含每个时间步/任务点的不确定性事件参数。
+
+\subsection{内层与外层目标：双层优化视角}
+内层主策略参数为 $\theta$，外层生成策略参数为 $\psi$。
+
+\paragraph{内层目标（主策略）}
+在给定事件文件 $E$ 下，主策略的回报为
+\begin{equation}
+ J(\theta;E)=\mathbb{E}\Big[\sum_{t=0}^{T-1}\gamma^t r_t\;\big|\;E,\pi_\theta\Big].
+\end{equation}
+内层训练用 PPO（式\eqref{eq:ppo}）更新 $\theta$。
+
+\paragraph{外层目标（生成策略）}
+外层的目标不是单纯``让内层更差''（那会生成不可学噪声），也不是单纯``让内层更好''（那会回到最易分布）。推荐采用\textbf{难但可学（hard-but-learnable）}奖励：
+\begin{equation}
+\label{eq:rg}
+ r_g(a_g)=\underbrace{-J(\bar\theta;G(a_g))}_{\text{难度}}+\lambda\underbrace{\Delta J(\bar\theta;G(a_g))}_{\text{可学习性}}+\eta\underbrace{B(G(a_g))}_{\text{反塌缩}}-\gamma\underbrace{D(a_g)}_{\text{可行域约束}}.
+\end{equation}
+其中 $\bar\theta$ 是冻结的主策略（Phase2），\;$\Delta J$ 定义为在同一 $E$ 上进行少量内层更新后的提升幅度：
+\begin{equation}
+\Delta J(\bar\theta;E)=J(\theta^+;E)-J(\bar\theta;E),
+\end{equation}
+$\theta^+$ 是从 $\bar\theta$ 复制出来、在 $E$ 上做 $K$ 次 PPO 更新得到的临时参数。
+
+\paragraph{反塌缩项 $B(E)$}
+令在事件文件 $E$ 下采样得到的 action1 比例为 $\hat\rho_1(E)$。可用一个温和的 ``贴近目标采样率'' 形式：
+\begin{equation}
+ B(E)=-\big|\hat\rho_1(E)-\rho^*\big|,
+\end{equation}
+其中 $\rho^*$ 推荐设为 $5\%\sim 15\%$（视任务而定）。也可替换为策略熵 $\mathcal{H}$ 的下界惩罚。
+
+\paragraph{约束项 $D(a_g)$}
+用于限制外层生成的参数不越界，防止奖励黑客（例如极端参数导致文件异常）。最简单做法是把硬约束转为罚项：
+\begin{equation}
+ D(a_g)=\mathbb{I}[a_g\notin\mathcal{A}_{\mathrm{valid}}]\cdot M + \text{soft\_penalty}(a_g),
+\end{equation}
+$M$ 为大常数。
+
+\subsection{外层算法选择}
+外层动作空间可离散（枚举 key）或连续（$p$ 连续）。两种推荐：
+\begin{itemize}
+\item \textbf{离散版（最稳，优先建议）}：外层直接输出 distribution key（如从 $\{O\_*,G\_*,F\_*,R\_*\}$ 选一个），这等价于在 key 空间做 bandit/PPO。
+\item \textbf{参数版（更灵活）}：外层输出 $(\mu_1,\mu_2,p,\text{pattern})$，其中 $p$ 连续可用 Beta 分布参数化或直接输出 $p\in(0,1)$。
+\end{itemize}
+
+\section{训练分期（Phase1--Phase4）}
+
+\subsection{Phase1：V3 主策略基线训练}
+按现有流程，在训练分布（如均值 10 或你们既定的训练 key 集）上训练 V3，得到基线参数 $\theta_0$，并保存所有可复现配置（包括事件文件种子、分布 key、模型结构、PPO 超参）。
+
+\subsection{Phase2：训练外层生成策略（冻结内层）}
+冻结内层为 $\bar\theta\leftarrow\theta_0$。每次外层提出 $a_g$，生成事件文件 $E$，评估 $J(\bar\theta;E)$，再用临时复制参数 $\theta^+$ 估计 $\Delta J$，从而得到外层奖励 $r_g$（式\eqref{eq:rg}）。外层用 PPO/REINFORCE 更新 $\psi$。
+
+\subsection{Phase3：联合课程训练（外层生成 + 内层可更新）}
+用外层策略生成事件文件驱动内层训练，但为避免内层被带偏，建议混合数据源：
+\begin{equation}
+ E \sim \alpha\,G(\pi_\psi) + (1-\alpha)\,\mathcal{D}_{\mathrm{base}},
+\end{equation}
+其中 $\alpha$ 采用课程式递增（如 $0.2\to 0.5\to 0.8$）。同时维护一个``难例池''（外层历史上高 $r_g$ 的若干 $a_g$）进行 replay。
+
+\subsection{Phase4：测试（与现有口径一致）}
+冻结内层参数，按你们既定的 O/G/F key 集进行评估：
+\begin{itemize}
+\item OOD：$O\_{10,60}$、$O\_{10,90}$ 等；
+\item 泛化：$G\_{10,90,60}$ 等；
+\item 遗忘：$F1/F2$；
+\item 关键诊断指标：avg\_reward、action1\_rate、p\_action1、奖励方差、熵等。
+\end{itemize}
+
+\section{算法伪代码（可直接交给 Codex 实施）}
+
+\begin{algorithm}[H]
+\caption{V3+EDRL（概念版伪代码）}
+\begin{algorithmic}[1]
+\State \textbf{Input:} 基础训练分布集合 $\mathcal{D}_{\mathrm{base}}$，事件生成器 $G(\cdot)$，测试 key 集 $\mathcal{K}_{\mathrm{test}}$
+\State \textbf{Phase1:} 训练内层 V3（PPO）得到 $\theta_0$
+\State \textbf{Phase2:} 冻结 $\bar\theta\leftarrow\theta_0$；初始化外层参数 $\psi$
+\For{$i=1$ to $N_{\mathrm{outer}}$}
+  \State 采样外层动作 $a_g\sim\pi_\psi(\cdot\mid s_g)$
+  \State 生成事件文件 $E\leftarrow G(a_g)$；若非法则给惩罚并 continue
+  \State 用冻结内层评估 $J\leftarrow J(\bar\theta;E)$
+  \State 复制临时参数 $\theta\_\mathrm{tmp}\leftarrow\bar\theta$；在 $E$ 上做 $K$ 次 PPO 更新得到 $\theta^+$
+  \State 评估 $J^+\leftarrow J(\theta^+;E)$；计算 $\Delta J\leftarrow J^+-J$
+  \State 计算 $\hat\rho\_1(E)$；得到外层奖励 $r_g$（式\eqref{eq:rg}）
+  \State 用 $r_g$ 更新外层策略参数 $\psi$
+\EndFor
+\State \textbf{Phase3:} 联合训练：每轮按混合比例 $\alpha$ 从 $G(\pi_\psi)$ 与 $\mathcal{D}_{\mathrm{base}}$ 取事件文件，更新内层 $\theta$
+\State \textbf{Phase4:} 冻结内层，在 $\mathcal{K}_{\mathrm{test}}$ 上评估并输出对比报告
+\end{algorithmic}
+\end{algorithm}
+
+\section{参数设置建议（可复现口径）}
+
+\subsection{内层 V3（PPO）推荐超参}
+下表给出在你们二值动作/奖励、易塌缩场景下更稳的默认值（起点）。具体仍需按 R、batch size、episode 长度微调。
+
+\begin{table}[H]
+\centering
+\caption{内层 PPO 建议超参（起点）}
+\begin{tabular}{llp{7.5cm}}
+\toprule
+参数 & 建议值 & 说明\\
+\midrule
+学习率 $\eta$ & $3\times 10^{-4}$ & 若塌缩严重，可降至 $1\times 10^{-4}$；或用线性退火。\\
+clip $\epsilon$ & 0.2 & 二值动作场景通常足够。\\
+GAE $\lambda$ & 0.95 & 标准设置。\\
+折扣 $\gamma$ & 0.99 & 视 episode 长度调整。\\
+value coef $c_v$ & 0.5 & 标准设置。\\
+entropy coef $c_e$ & 0.01（可退火） & \textbf{反塌缩关键}：前期可提高到 0.02--0.05，后期退火到 0.005。\\
+min action1 rate & 5\%（训练期） & 工程上可用采样/约束实现，避免 action1 饿死（只在训练期用）。\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{外层生成策略（EDRL）推荐超参}
+\begin{table}[H]
+\centering
+\caption{外层 EDRL 建议超参（起点）}
+\begin{tabular}{llp{7.5cm}}
+\toprule
+参数 & 建议值 & 说明\\
+\midrule
+外层算法 & PPO（离散 key 优先） & 离散 key 版本最稳；若用连续 $p$，可用 Beta 参数化。\\
+外层 rollout & 1 个 $a_g$ 对应 1 个短评估 & 外层 step 很贵，建议用短评估代理。\\
+$K$（可学习性步数） & 1--3 次内层更新 & 只为估计 $\Delta J$ 的方向性，避免 Phase2 过慢。\\
+$\lambda$ & 1.0 & 可学习性权重；若外层偏向纯对抗可增大。\\
+$\eta$ & 0.2--0.5 & 反塌缩权重；过大可能迫使外层生成``硬塞 action1''的分布。\\
+$\rho^*$ & 5\%--15\% & action1 目标采样率（训练期）。\\
+$\gamma$（罚项） & 10--100 & 非法参数的惩罚强度。\\
+动作空间 & $(\mu_1,\mu_2,p,\text{pattern})$ & 先固定 $\sigma$，减少自由度。\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Phase3 混合比例（课程）}
+建议 $\alpha$ 三阶段递增：
+\begin{equation}
+\alpha \in \{0.2,0.5,0.8\},
+\end{equation}
+每个阶段持续若干 epoch（例如按你们现有训练轮数均分）。若观察到内层在 base 分布上明显退化，则降低 $\alpha$ 或增大 replay（难例池 + base 池）。
+
+\section{机理分析：为什么 V3+EDRL 有望打破 OOD 上限}
+
+\subsection{从``模型改进''转为``训练分布设计''}
+V3 已经给了强归纳偏置；若 OOD 失败主要来自训练分布覆盖不足与样本结构偏置（action1 饿死），继续堆网络改动往往收益有限。EDRL 把优化重点移到 ``训练数据是从哪里来、难度如何自适应升级''。
+
+\subsection{难但可学：避免对抗退化到不可辨识噪声}
+纯对抗会选择最坏分布，但最坏分布可能是不可学习的（近似随机）。引入 $\Delta J$ 明确鼓励 ``在该分布上做少量训练能变好''，使外层倾向生成具有训练价值的挑战分布。
+
+\subsection{反塌缩：打断动作自锁死循环}
+显式约束 action1 采样率或熵下界，使内层在训练阶段持续看到 action1 的正/负样本，从而让优势估计对 action1 不至于完全失真，梯度不会永久把 action1 压到 0。
+
+\subsection{课程与 replay：稳定双层非平稳性}
+外层与内层同时学习本质是非平稳博弈。通过 Phase2 冻结内层先学习 ``会打中弱点'' 的分布，再在 Phase3 用混合比例与 replay 逐步引入，可显著提高稳定性与可复现性。
+
+\section{工程落地要点：事件文件系统兼容与可复现}
+
+\subsection{接口建议（不破坏现有流程）}
+保留 ``生成事件文件 $\to$ 读取文件 $\to$ 训练/交互'' 的主流程，只新增：
+\begin{itemize}
+\item 一个外层策略输出 $a_g$；
+\item 一个包装器把 $a_g$ 写成事件生成器可读的配置（YAML/JSON）；
+\item 事件文件缓存（同一 $a_g$ 重复命中则复用文件路径）；
+\item meta.json 里记录 $a_g$、hash、生成器版本号。
+\end{itemize}
+
+\subsection{合法性校验（必须做）}
+生成事件文件后至少校验：
+\begin{itemize}
+\item 事件数量、时间长度与主程序预期一致；
+\item 均值/方差/占比符合 $\mathcal{A}_{\mathrm{valid}}$；
+\item 切换点存在且在范围内；
+\item 文件解析无异常；
+\item 统计摘要（均值、分位数、段内均值）与 $a_g$ 一致。
+\end{itemize}
+非法直接大惩罚并丢弃，避免外层通过异常文件 ``黑客'' 奖励。
+
+\section{实现说明（结合当前项目代码结构）}
+
+\subsection{代码级插入点（已与现有工程对齐）}
+基于当前仓库，V3+EDRL 不需要推翻主干训练链路，而是复用已有入口与日志体系。关键事实如下：
+\begin{itemize}
+\item 统一入口在 \texttt{codes/Dynamic\_master34959.py}：\texttt{run\_generator()} 负责生成事件文件，\texttt{run\_single()} 负责设置 \texttt{RL\_ALGO\_VERSION}、\texttt{RL\_STAGE\_MODE}、\texttt{DYNAMIC\_DATA\_ROOT} 并启动 RL+ALNS。
+\item 事件生成器在 \texttt{codes/generation/generate\_mixed\_parallel.py}，并且当前有 \texttt{EXPECTED\_TOTAL\_FILES=1000} 的硬覆盖逻辑，这与 ``外层小批量（3--50）'' 目标冲突。
+\item 读取链路在 \texttt{codes/core/dynamic\_RL34959.py} 与 \texttt{codes/core/Intermodal\_ALNS34959.py} 的 \texttt{resolve\_dynamic\_data\_path()}，两者都优先读取环境变量 \texttt{DYNAMIC\_DATA\_ROOT}。
+\item 元信息注入点在 \texttt{dynamic\_RL34959.py:get\_state()}：每次决策读取 Excel 的 \texttt{\_\_meta\_\_} sheet，提取 \texttt{gt\_mean} 与 \texttt{phase\_label}，并写入 trace/decision 日志。
+\item V3 表征提取器为 \texttt{algorithms/ppo\_new/nn/context\_extractor.py:StackedContextExtractor}，输出维度 \texttt{out\_dim=64}；当前 \texttt{dynamic\_RL34959.py} 已通过 \texttt{\_decision\_extract\_h64()} 进行导出。
+\item 决策级日志已存在：\texttt{rl\_decision.csv} + \texttt{h\_dump.npz}，字段由 \texttt{DECISION\_FIELDS} 定义，主键是 \texttt{decision\_id = run\_id|phase|decision\_seq}。
+\end{itemize}
+
+\subsection{为什么建议 ``新建生成器'' 而非直接改旧生成器}
+旧生成器 \texttt{generate\_mixed\_parallel.py} 的设计目标是一次性物理隔离生成 1000 个文件，并服务原始表号区间（训练 0--799，测试 999--800 的倒序读表）。外层 EDRL 需要的是：
+\begin{equation}
+a_g=(\mu_A,\mu_B,p,n,s),\quad \mu_A,\mu_B\in\{10,30,60,90\},\;p\in(0,1),\;n\in[3,50],
+\end{equation}
+其中 $n$ 很小且每轮可变。为避免破坏旧实验可复现性，建议保留旧生成器不动，新增一个专用小批量生成器。
+
+\subsection{建议新增模块与职责}
+\begin{table}[H]
+\centering
+\caption{V3+EDRL 的最小新增模块（建议）}
+\begin{tabular}{p{4.2cm}p{3.2cm}p{7.4cm}}
+\toprule
+模块路径（建议） & 类型 & 职责 \\
+\midrule
+\texttt{codes/generation/generate\_outer\_small\_batch.py} & 新增脚本 & 接收外层动作参数 $(\mu_A,\mu_B,p,n,s)$，生成每轮小批量事件文件；写入 \texttt{\_\_meta\_\_}（\texttt{gt\_mean}、\texttt{phase\_label}）与清单文件。\\
+\texttt{codes/generation/outer\_batch\_schema.py} & 新增模块（可选） & 统一参数校验、分段规则、随机种子策略，避免训练期和复现实验口径漂移。\\
+\texttt{codes/outer\_rl/run\_edrl\_phase2.py} & 新增脚本（调度层） & 管理 ``外层动作 $\to$ 生成数据 $\to$ 内层 train\_only 训练'' 闭环，落盘每轮 manifest 与指标。\\
+\texttt{codes/analysis/validate\_outer\_batch.py} & 新增脚本 & 校验小批量文件完整性、分布占比误差、meta 一致性。\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{小批量生成器的核心实现点（必须落地）}
+\paragraph{1) 动作到文件段的映射}
+外层动作为 $(\mu_A,\mu_B,p,n,s)$，建议映射为
+\begin{equation}
+n_A=\mathrm{clip}\!\left(\left\lfloor p n + 0.5\right\rfloor,\,1,\,n-1\right),\qquad n_B=n-n_A,
+\end{equation}
+并按 ``前 $n_A$ 个文件为 A、后 $n_B$ 个文件为 B'' 写入，保证与用户指定的 ``前后占比'' 一致。
+
+\paragraph{2) 输出目录结构（每轮独立）}
+建议落盘到
+\begin{equation}
+\texttt{run\_dir/post\_stage/outer\_batches/iter\_k/Rr/Intermodal\_EGS\_data\_dynamic\_congestion\{i\}.xlsx},
+\end{equation}
+并附带 \texttt{manifest.json}（记录 $a_g$、seed、文件数、均值统计、生成时间、hash）。
+
+\paragraph{3) 与现有读取器的契约保持不变}
+每个 Excel 仍保持原 sheet 命名与字段；特别是必须写入 \texttt{\_\_meta\_\_}：
+\begin{itemize}
+\item \texttt{Property=gt\_mean, Value=\{mu\_A or mu\_B\}}
+\item \texttt{Property=phase\_label, Value=\{A or B\}}
+\end{itemize}
+这样 \texttt{dynamic\_RL34959.py:get\_state()} 可零改动读取并写入 RL trace/decision 统计。
+
+\subsection{小批量文件与 ``大表号'' 的兼容映射（关键难点）}
+当前 ALNS 主循环使用固定表号制度（训练上限 799，测试区间 999$\rightarrow$800）。若 Phase2 只生成 $n\ll1000$ 文件，读取层必须加入表号映射：
+\begin{equation}
+i(t)=\big(t-t_0\big)\bmod n,\qquad i(t)\in\{0,\dots,n-1\},
+\end{equation}
+其中 $t$ 为当前 \texttt{table\_number}，$t_0$ 为该阶段起点。实现上建议仅在 \texttt{resolve\_dynamic\_data\_path()} 增加 ``映射模式''，不改 ALNS 其余逻辑。
+
+这一步是 V3+EDRL 能否工程可用的分水岭：若不加映射，系统会尝试访问不存在的 \texttt{congestion800+} 文件并触发空读/异常。
+
+\subsection{Phase 调度与协议约束（不改 PPO 主损失）}
+结合现有 \texttt{stage\_mode} 机制（\texttt{train\_eval/train\_only/eval\_only}），建议执行顺序：
+\begin{enumerate}
+\item Phase1：\texttt{train\_only} 在训练分布完成 V3 基线训练，保存 \texttt{policy\_theta0}。
+\item Phase2：仍用 \texttt{train\_only}，但把 \texttt{DYNAMIC\_DATA\_ROOT} 指向外层生成的小批量目录，进行后训练/微调；此阶段不访问最终测试分布 B 的 reward。
+\item Phase3：\texttt{eval\_only} 在最终测试分布执行只预测评测，不做参数更新。
+\end{enumerate}
+该方案与项目现有 ``implement 阶段禁止更新'' 约束一致。
+
+\subsection{可直接复用的日志与验收链路}
+当前项目已具备决策级与表征导出能力，可直接作为 Phase2 数据质量控制：
+\begin{itemize}
+\item \texttt{rl\_decision.csv}：每条决策含 \texttt{decision\_id}、\texttt{phase}、\texttt{action}、\texttt{reward}、\texttt{phase\_label}、\texttt{h\_index}。
+\item \texttt{h\_dump.npz}：\texttt{decision\_id[N]} 与 \texttt{h[N,64]}。
+\item \texttt{codes/analysis/validate\_decision\_artifacts.py}：已有 \texttt{pairing\_rate}、\texttt{h\_align\_rate}、按组统计 (\texttt{action1\_rate}, $E[r|a]$) 的验收框架。
+\end{itemize}
+建议在论文与工程验收中固定阈值（例如 pairing/h\_align 的下限）并将失败 run 标记为无效样本，避免把数据对齐问题误判为算法问题。
+
+\subsection{实施优先级（建议顺序）}
+\begin{enumerate}
+\item 先实现并验证 ``小批量生成器 + 表号映射 + manifest''（纯数据层改动）。
+\item 再接入外层策略（先离散 key，后连续参数 $p$）。
+\item 最后开展完整 V3+EDRL 双层训练实验与消融。
+\end{enumerate}
+该顺序可最大化复用当前代码并最小化一次性改动风险。
+
+\section{日志与可复现规范执行计划（外层 EDRL 重点）}
+
+\subsection{设计目标与约束}
+围绕你提出的核心风险（``外层文件生成了，但主程序读错路径''），日志与目录规范必须满足以下约束：
+\begin{itemize}
+\item \textbf{单轮可回放}：任意一轮 outer iter 都能通过 manifest 复原 ``动作参数 $\to$ 文件集合 $\to$ 内层训练输入''。
+\item \textbf{路径强一致}：生成路径、运行时读取路径、日志记录路径三者必须同源并可交叉校验。
+\item \textbf{失败可定位}：任何读文件失败都能定位到 ``哪一轮、哪一个表号、映射到哪一个文件、为何失败''。
+\item \textbf{兼容现有主干}：不破坏现有 \texttt{run\_single()}、\texttt{DYNAMIC\_DATA\_ROOT}、\texttt{rl\_trace.csv}、\texttt{rl\_decision.csv} 体系。
+\end{itemize}
+
+\subsection{建议目录规范（每个 run 内）}
+现有系统已把 run 根目录统一到 \texttt{codes/logs/<run\_id>/}。建议在其下新增固定结构：
+\begin{equation}
+\texttt{post\_stage/outer\_batches/iter\_k/Rr/...xlsx}
+\end{equation}
+并配套如下文件：
+\begin{table}[H]
+\centering
+\caption{外层阶段建议产物（最小闭环）}
+\begin{tabular}{p{5.4cm}p{10.0cm}}
+\toprule
+文件路径 & 用途 \\
+\midrule
+\texttt{post\_stage/manifest.json} & 记录总配置：base run、算法版本、阶段开关、路径模式、索引模式、随机种子。 \\
+\texttt{post\_stage/outer\_actions.csv} & 每轮一行：\texttt{iter\_id, mu\_a, mu\_b, p, n\_files, seed, pattern, objective\_score}。 \\
+\texttt{post\_stage/outer\_generation.csv} & 每轮每文件一行：\texttt{iter\_id, logical\_idx, file\_path, gt\_mean, phase\_label, hash, ok}。 \\
+\texttt{post\_stage/outer\_train\_round.csv} & 每轮训练摘要：\texttt{iter\_id, ckpt\_in, ckpt\_out, learn\_steps, avg\_reward, action1\_rate, elapsed\_s}。 \\
+\texttt{post\_stage/outer\_path\_map.csv} & 路径映射审计：\texttt{iter\_id, table\_number, mapped\_idx, mapped\_file, exists, read\_ok}。 \\
+\texttt{post\_stage/outer\_console.log} & 控制台详细文本输出（建议和屏幕一致）。 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{读取路径改造计划（避免主程序读取错误）}
+当前读取函数在两个模块各有一份（\texttt{dynamic\_RL34959.py} 和 \texttt{Intermodal\_ALNS34959.py}）。执行计划是：
+\begin{enumerate}
+\item 统一抽象一个 ``表号到文件号'' 映射规则（直接模式 / 取模模式）。
+\item 两个 \texttt{resolve\_dynamic\_data\_path()} 同步使用该规则，避免 RL 与 ALNS 视图不一致。
+\item 增加严格模式：若映射后文件不存在，立刻报错并输出映射上下文，不允许静默 fallback。
+\end{enumerate}
+
+建议配置变量（计划）：
+\begin{itemize}
+\item \texttt{RL\_DYNAMIC\_INDEX\_MODE=direct|mod}
+\item \texttt{RL\_DYNAMIC\_FILE\_COUNT=<n>}
+\item \texttt{RL\_DYNAMIC\_TABLE\_BASE=<t0>}
+\item \texttt{RL\_DYNAMIC\_STRICT\_PATH=1}
+\item \texttt{RL\_DYNAMIC\_MANIFEST=<abs\_path>}
+\end{itemize}
+
+映射规则建议固定为：
+\begin{equation}
+i(t)=
+\begin{cases}
+t, & \text{direct}\\
+\big(t-t_0\big)\bmod n, & \text{mod}
+\end{cases}
+\end{equation}
+并将 $(t,i(t),\text{file\_path})$ 写入 \texttt{outer\_path\_map.csv}，用于复核。
+
+\subsection{控制台超级详细输出规范（运行时一眼看懂）}
+建议全程使用统一前缀标签，且每一步均打印关键参数、路径与统计。推荐标签：
+\texttt{[OUTER][INIT]}, \texttt{[OUTER][ITER]}, \texttt{[OUTER][GEN]}, \texttt{[OUTER][PATH]},
+\texttt{[OUTER][TRAIN]}, \texttt{[OUTER][CHECK]}, \texttt{[OUTER][DONE]}, \texttt{[OUTER][ERROR]}。
+
+建议输出模板（示例）：
+\begin{verbatim}
+[OUTER][INIT] run_id=v3_edrl_O10_90_s42 base_ckpt=... stage_mode=train_only
+[OUTER][INIT] data_root=.../post_stage/outer_batches index_mode=mod strict=1
+[OUTER][INIT] action_space=mu in {10,30,60,90}, p in (0,1), n in [3,50]
+
+[OUTER][ITER] iter=03/20 action=(muA=10,muB=90,p=0.30,n=12,seed=42003)
+[OUTER][GEN]  iter=03 start target_dir=.../iter_003/R30
+[OUTER][GEN]  iter=03 done files=12 ok=12 fail=0 hash_mismatch=0 elapsed=2.41s
+[OUTER][GEN]  iter=03 stats gt_mean_A=10.3 gt_mean_B=89.7 ratio_A=0.33 ratio_B=0.67
+
+[OUTER][PATH] iter=03 t0=400 n=12 sample_map: t=400->0 t=401->1 ... t=411->11 t=412->0
+[OUTER][PATH] iter=03 strict_check missing=0 unreadable=0
+
+[OUTER][TRAIN] iter=03 ckpt_in=...theta_iter002.zip ckpt_out=...theta_iter003.zip
+[OUTER][TRAIN] iter=03 learn_steps=200 avg_reward=0.512 action1_rate=0.074 elapsed=18.6s
+[OUTER][TRAIN] iter=03 rl_decision_rows=446 pairing=0.993 h_align=0.993
+
+[OUTER][CHECK] iter=03 objective=-J+lambda*dJ+eta*B-gamma*D = 0.183 (J=0.488,dJ=0.022,B=0.061,D=0)
+[OUTER][DONE]  iter=03 status=PASS cumulative_best=0.201 best_iter=2
+\end{verbatim}
+
+异常模板（必须包含定位字段）：
+\begin{verbatim}
+[OUTER][ERROR] iter=03 stage=PATH_CHECK table=417 mapped_idx=5
+[OUTER][ERROR] expected_file=.../iter_003/R30/Intermodal_EGS_data_dynamic_congestion5.xlsx
+[OUTER][ERROR] reason=FileNotFound strict=1 action=ABORT_ITER
+\end{verbatim}
+
+\subsection{执行计划（只规划，不改代码）}
+\paragraph{里程碑 M0：规范冻结（0.5 天）}
+\begin{itemize}
+\item 冻结目录结构、文件命名、CSV schema、console 标签词典。
+\item 冻结路径变量命名：\texttt{RL\_DYNAMIC\_*} 与 \texttt{post\_stage/*}。
+\end{itemize}
+
+\paragraph{里程碑 M1：生成层（1 天）}
+\begin{itemize}
+\item 新建小批量生成器（保留旧生成器不动）。
+\item 每轮输出 \texttt{outer\_generation.csv} + \texttt{manifest.json} + 文件 hash。
+\item 控制台实现 \texttt{[OUTER][GEN]} 全量输出。
+\end{itemize}
+
+\paragraph{里程碑 M2：路径层（1 天）}
+\begin{itemize}
+\item 双模块同步接入映射逻辑（RL/ALNS 各一处）。
+\item 加入严格模式与失败即停。
+\item 写 \texttt{outer\_path\_map.csv} 并打印 \texttt{[OUTER][PATH]}。
+\end{itemize}
+
+\paragraph{里程碑 M3：调度层（1--2 天）}
+\begin{itemize}
+\item 新建外层主控：outer action $\to$ 生成 $\to$ 内层 train\_only 短训 $\to$ 记录。
+\item 每轮保存 \texttt{ckpt\_in/ckpt\_out} 与 \texttt{outer\_train\_round.csv}。
+\item 控制台打印 \texttt{[OUTER][ITER]/[OUTER][TRAIN]/[OUTER][CHECK]}。
+\end{itemize}
+
+\paragraph{里程碑 M4：验收层（0.5--1 天）}
+\begin{itemize}
+\item 复用 \texttt{validate\_decision\_artifacts.py} 做决策对齐验收。
+\item 新增 outer 验收脚本检查：文件完整率、路径映射正确率、manifest 一致率。
+\item 失败时输出可直接复盘的 \texttt{iter\_id} 与文件清单。
+\end{itemize}
+
+\subsection{命令行执行蓝图（Windows，含可视化核查点）}
+以下为\textbf{规划层面的命令模板}，用于后续实现时的统一运行口径。核心思想是：每条命令都能在控制台打印出 ``当前轮、当前路径、当前映射、当前训练摘要''，便于人工快速判断是否跑偏。
+
+\paragraph{步骤 1：设置运行环境变量（一次性）}
+\begin{verbatim}
+# PowerShell
+$env:RUN_ID="v3_edrl_o10_90_s42"
+$env:RUN_ROOT="A:\MYpython\34959_RL\codes\logs\$env:RUN_ID"
+$env:DYNAMIC_DATA_ROOT="$env:RUN_ROOT\post_stage\outer_batches\iter_001\R30"
+$env:RL_DYNAMIC_INDEX_MODE="mod"
+$env:RL_DYNAMIC_FILE_COUNT="12"
+$env:RL_DYNAMIC_TABLE_BASE="400"
+$env:RL_DYNAMIC_STRICT_PATH="1"
+\end{verbatim}
+预期控制台关键输出：
+\begin{verbatim}
+[OUTER][INIT] run_id=v3_edrl_o10_90_s42 ...
+[OUTER][INIT] index_mode=mod file_count=12 table_base=400 strict=1
+\end{verbatim}
+
+\paragraph{步骤 2：执行单轮小批量生成（外层动作落地为文件）}
+\begin{verbatim}
+python codes\generation\generate_outer_small_batch.py `
+  --run-id $env:RUN_ID `
+  --iter-id 1 `
+  --request-number 30 `
+  --mu-a 10 --mu-b 90 --ratio-a 0.30 `
+  --num-files 12 --seed 42001 `
+  --out-root "$env:RUN_ROOT\post_stage\outer_batches"
+\end{verbatim}
+预期控制台关键输出：
+\begin{verbatim}
+[OUTER][GEN] iter=001 start ...
+[OUTER][GEN] iter=001 done files=12 ok=12 fail=0
+[OUTER][GEN] iter=001 stats ratio_A~0.30 ratio_B~0.70
+\end{verbatim}
+并且应生成：
+\begin{verbatim}
+post_stage/outer_batches/iter_001/R30/*.xlsx
+post_stage/outer_generation.csv
+post_stage/manifest.json
+\end{verbatim}
+
+\paragraph{步骤 3：执行内层短训（train\_only）并记录路径映射}
+\begin{verbatim}
+python codes\Dynamic_master34959.py `
+  --dist_name O_10_90 `
+  --request_number 30 `
+  --algorithm PPO_NEW `
+  --algo_version v3 `
+  --stage-mode train_only `
+  --seed 42 `
+  --run-name $env:RUN_ID
+\end{verbatim}
+预期控制台关键输出：
+\begin{verbatim}
+[OUTER][PATH] iter=001 sample_map: t=400->0 ... t=411->11 t=412->0
+[OUTER][PATH] iter=001 strict_check missing=0 unreadable=0
+[OUTER][TRAIN] iter=001 learn_steps=... avg_reward=... action1_rate=...
+\end{verbatim}
+
+\paragraph{步骤 4：执行日志验收（决策对齐 + 表征对齐）}
+\begin{verbatim}
+python codes\analysis\validate_decision_artifacts.py `
+  --run-dir "$env:RUN_ROOT" `
+  --key-groups A B `
+  --min-pairing-rate 0.98 `
+  --min-h-align-rate 0.90 `
+  --min-group-samples 30
+\end{verbatim}
+预期输出包含：
+\begin{verbatim}
+pairing_rate_matched >= 0.98
+h_align_rate >= 0.90
+[PASS] decision artifacts validated.
+\end{verbatim}
+
+\paragraph{步骤 5：多轮迭代时的最小巡检口径}
+每轮迭代至少人工核查以下四行是否出现且数值合理：
+\begin{itemize}
+\item \texttt{[OUTER][ITER]}：动作参数是否变化（防止外层策略退化为常量）。
+\item \texttt{[OUTER][GEN]}：文件数是否等于目标 \texttt{num\_files}，失败是否为 0。
+\item \texttt{[OUTER][PATH]}：映射是否覆盖 ``跨界回绕''（如 11$\to$0）。
+\item \texttt{[OUTER][TRAIN]}：\texttt{avg\_reward/action1\_rate} 是否可计算且非 NaN。
+\end{itemize}
+
+\subsection{最小验收阈值（建议）}
+\begin{itemize}
+\item 生成文件完整率：$=100\%$（严格模式下任何缺失直接失败）。
+\item 路径映射读通率：$\ge 99\%$（建议目标 $100\%$）。
+\item 决策日志配对率（pairing）：$\ge 98\%$。
+\item h 对齐率（h\_align）：$\ge 90\%$。
+\item 每轮 outer 产物完整性：\texttt{manifest + actions + generation + train\_round + path\_map} 五件套齐全。
+\end{itemize}
+
+\section{建议的对比实验与消融}
+为使论文更有说服力，建议至少包含：
+\begin{itemize}
+\item 对比：V3（基线） vs V3+EDRL（完整）
+\item 消融 A：去掉 $\Delta J$（纯对抗）\;vs\; 完整（验证``可学习性''必要性）
+\item 消融 B：去掉反塌缩项 $B(E)$（验证动作塌缩机理）
+\item 消融 C：Phase3 不混合 base 分布（验证课程混合/稳定性）
+\item 诊断：solve-all/solve-none 类似指标（训练中 ``无信息'' 情形占比）与 action1\_rate 轨迹
+\end{itemize}
+
+\section{结论与下一步}
+V3+EDRL 的价值在于：在不大改 V3 模型结构的情况下，把 OOD 攻坚点从``更强网络''转为``更有效的训练分布与样本结构''。外层策略通过事件文件参数化，完全兼容你们已有工程体系；通过 ``难但可学'' 奖励与反塌缩约束，避免对抗退化与样本饥饿。下一步最关键的工程验证是：外层是否能稳定学到一组 $a_g$ 使 O\_* 的 avg\_reward 与 action1\_rate 同时抬升，并且不显著牺牲 base 分布与 F\_*。
+
+\appendix
+\section{外层动作空间的两个实用版本}
+\subsection{版本 A：离散 key（推荐先做）}
+外层动作直接从你们现有 distribution\_config 的 key 集采样，$a_g\equiv k$。优点：实现最省事、可复现、审稿友好；缺点：探索粒度受限。
+
+\subsection{版本 B：参数版（更灵活）}
+按式\eqref{eq:ag} 输出参数，再映射为事件文件。建议先只放开 $(\mu_1,\mu_2,p,\text{pattern})$，其余固定。
+
+\section{可直接复用的记录字段（meta.json）}
+建议每次 run 记录：
+\begin{itemize}
+\item algo\_version: v3+edrl
+\item phase: 1/2/3/4
+\item generator\_action: $(\mu_1,\mu_2,p,\text{pattern},\sigma,\text{seed})$
+\item events\_file\_path / hash
+\item ppo\_hyperparams / generator\_hyperparams
+\item summary: avg\_reward, action1\_rate, p\_action1, entropy, reward\_var
+\end{itemize}
+
+\end{document}

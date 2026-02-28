@@ -1,0 +1,1436 @@
+﻿\documentclass[11pt,a4paper]{ctexart}
+\usepackage{amsmath,amssymb,amsfonts,booktabs,geometry,longtable,array,multirow,graphicx,float}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{enumitem}
+\geometry{margin=1in}
+
+\title{非稳态不确定事件下 ALNS--RL 系统的机理分析、\\PPO\_NEW 系列演化与 OOD 失效诊断（扩展完整版）}
+\author{项目技术总结（论文草稿）}
+\date{2026-02-19}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文对项目 \texttt{a:\\MYpython\\34959\_RL} 中的 ALNS--RL 联动系统进行系统性研究，目标是解释以下关键现象：
+\textbf{为什么强化学习算法在 ID 分布可取得较高奖励，而在 OOD 分布（尤其 \texttt{O\_10\_60}, \texttt{O\_10\_90}）长期停留在接近随机水平。}
+
+我们从理论与工程两条线并行展开：理论上给出非平稳 MDP/POMDP 下 Bellman 目标失配、策略梯度分布偏移、阈值失配与动作塌缩机制；工程上完整解析项目调用链、状态与奖励生成、日志数据结构、分布配置与实验流水。随后基于三类实证数据源（\texttt{A:\\MYdata\\logs}、\texttt{codes/nexus/ppo\_batch\_20260214}、\texttt{codes/nexus/ppo\_compare\_v123\_report}）进行横向对比，证明 PPO\_NEW v1/v2/v3 在部分场景有突破，但 OOD 仍是系统性瓶颈。
+
+进一步，我们把监督探针（LogReg/MLP）作为“信息上限体检”工具，逐项定义 Accuracy、Balanced Accuracy、ROC-AUC、PR-AUC 与 optimistic proxy，并通过 mode A/mode B 对比给出关键结论：\textbf{在 OOD 下，当前观测特征对即时奖励的可分性本身不足，叠加动作极端不平衡，导致策略学习与部署表现共同塌缩。}
+
+最后，结合 v4.2（Oracle Context Injection）和 v4.3（探索/阈值诊断）的负结果，本文给出面向论文后续工作的路线：优先补充决策相关信号与样本结构，而非继续单纯堆叠模型复杂度。
+\end{abstract}
+
+\tableofcontents
+
+\section{引言：问题、现象与研究价值}
+\subsection{研究动机}
+在动态联运调度场景中，异常事件（拥堵、延误、插入请求）会持续改变系统状态与可行性边界。传统 OR 视角倾向于每次重算最优，而 RL 视角希望学习“事件触发时是否重规划”的策略。然而，工业式联动系统与标准 Gym benchmark 有本质差异：
+\begin{itemize}
+  \item 环境并非同步仿真器，而是 ALNS 与 RL 通过共享表异步交互；
+  \item reward 不是密集且平滑的代价函数，而是由可行性/动作匹配规则给出的近二值信号；
+  \item 训练到部署存在显著分布切换（\texttt{O\_*} 场景），导致策略迁移困难。
+\end{itemize}
+
+因此，本研究关注的不仅是“哪个算法分数更高”，更是“\textbf{为什么}会高或会失败”。
+
+\subsection{核心研究问题}
+本文聚焦四个问题：
+\begin{enumerate}[label=Q\arabic*.,leftmargin=*]
+  \item 非稳态与分布切换如何破坏 RL 的基本假设与优化目标？
+  \item 本项目中 ALNS 与 RL 的耦合机制是否天然放大了学习难度？
+  \item PPO\_NEW(v1/v2/v3) 分别解决了什么，未解决什么？
+  \item OOD 失败更像“信息瓶颈”还是“优化瓶颈”？
+\end{enumerate}
+
+\subsection{本文贡献}
+\begin{enumerate}[leftmargin=*]
+  \item 给出面向本项目的非稳态 RL 机理推导，并逐式解释其工程意义；
+  \item 用可复现数据证明：PPO 在历史基线中最稳，但所有算法在 OOD 均显著退化；
+  \item 详细对比 PPO\_NEW v1/v2/v3 的输入结构改造与分布级收益差异；
+  \item 通过监督探针和 Oracle 注入实验，定位 OOD 失败根因并提出后续路径。
+\end{enumerate}
+
+\section{理论基础：为何 RL 在非稳态与 OOD 下容易失效}
+\subsection{从平稳 MDP 到上下文驱动的非平稳过程}
+标准平稳 MDP 写作：
+\begin{equation}
+\mathcal{M}=(\mathcal{S},\mathcal{A},P,R,\gamma),
+\end{equation}
+其中 $P(s'|s,a)$ 与 $R(s,a)$ 与时间无关。此时策略价值可稳定定义：
+\begin{equation}
+V^{\pi}(s)=\mathbb{E}_{\pi,P}\left[\sum_{t=0}^{\infty}\gamma^t r_t\middle|s_0=s\right].
+\end{equation}
+
+在本项目中，事件阶段（begin/finish、removal/insertion）和分布上下文（phase A/B/C, gt\_mean）是时变潜变量 $z_t$。因此系统更接近：
+\begin{equation}
+P_t(s'|s,a)=\sum_z P(s'|s,a,z)\,p_t(z|h_t),\qquad
+R_t(s,a)=\sum_z R(s,a,z)\,p_t(z|h_t),
+\end{equation}
+其中 $h_t$ 是历史轨迹。若 agent 只观察到压缩观测 $o_t=\psi(s_t,z_t)$，则实际是 POMDP。
+
+\paragraph{解释}
+该式含义是：同一 $(s,a)$ 在不同上下文下会有不同后果。若上下文未被充分编码进观测，策略将把本质不同的决策情形混为一谈。
+
+\subsection{Bellman 目标失配与 bootstrap 方差放大}
+平稳情形下 Bellman 方程：
+\begin{equation}
+Q^{\pi}(s,a)=\mathbb{E}\left[r_t+\gamma\,\mathbb{E}_{a'\sim\pi}Q^{\pi}(s_{t+1},a')\middle|s_t=s,a_t=a\right].
+\end{equation}
+非平稳时应写为时变版本：
+\begin{equation}
+Q_t^{\pi}(s,a)=\mathbb{E}\left[r_t+\gamma\,\mathbb{E}_{a'\sim\pi}Q_{t+1}^{\pi}(s_{t+1},a')\right].
+\end{equation}
+
+同一网络参数在训练中却被迫拟合一族随 $t$ 漂移的目标，这会直接放大 bootstrapped target 的方差：
+\begin{equation}
+\mathrm{Var}[y_t]
+=\mathrm{Var}[r_t]+
+\gamma^2\mathrm{Var}[V(s_{t+1})]
++2\gamma\mathrm{Cov}(r_t,V(s_{t+1})).
+\end{equation}
+
+\paragraph{解释}
+当事件导致 $r_t$ 和下一个状态价值都抖动时，目标噪声会叠加而非抵消。值函数训练会更慢、更不稳定，策略更新也会因此受噪声牵引。
+
+\subsection{策略梯度在分布切换下的方向失配}
+策略梯度法在训练分布 $d^{\pi}_{\text{train}}$ 上优化：
+\begin{equation}
+\nabla_\theta J_{\text{train}}(\pi_\theta)
+=\mathbb{E}_{(s,a)\sim d^{\pi}_{\text{train}}}
+\left[\nabla_\theta\log\pi_\theta(a|s)\,\hat A_{\text{train}}(s,a)\right].
+\end{equation}
+部署时目标却由 $d^{\pi}_{\text{test}}$ 决定。若两者偏差大，训练梯度不再是测试目标的有效上升方向。
+
+常见误差上界：
+\begin{equation}
+|J_{\text{test}}(\pi)-J_{\text{train}}(\pi)|
+\le
+\frac{2R_{\max}}{(1-\gamma)^2}
+\,\mathrm{TV}(d_{\text{test}}^{\pi},d_{\text{train}}^{\pi}),
+\end{equation}
+其中 $\mathrm{TV}$ 为总变差距离。
+
+\paragraph{解释}
+此不等式表明：即便训练阶段“看起来学得很好”，只要部署分布偏离足够大（典型 OOD），理论上回报仍可能大幅下滑。
+
+\subsection{PPO clip 在 OOD 下的局限}
+PPO 目标：
+\begin{equation}
+\mathcal{L}_{\text{PPO}}(\theta)=
+\mathbb{E}_t\left[
+\min\left(r_t(\theta)\hat A_t,
+\mathrm{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat A_t\right)
+\right]
+-c_v\mathcal{L}_V+c_e\mathcal{H}(\pi_\theta),
+\end{equation}
+\begin{equation}
+r_t(\theta)=\frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}.
+\end{equation}
+
+clip 的本意是限制一次更新幅度，减少策略崩溃。但该机制默认“旧数据仍代表目标分布”。在 OOD 下，此前 rollout 产生的数据本身已偏离部署目标，clip 仅能限制更新幅度，不能修复分布失配。
+
+\subsection{部分可观测下的信息瓶颈与 Bayes 误差}
+若观测特征为 $z_t$，最优分类器对即时奖励的 Bayes 误差为：
+\begin{equation}
+\varepsilon^*(z)=
+\mathbb{E}_{z}\left[
+\min\left(p(r=1|z),p(r=0|z)\right)
+\right].
+\end{equation}
+当 $\varepsilon^*(z)$ 本身较大时，再复杂的策略网络也无法把错误率降到很低。这正是我们引入监督探针的理论动机：先测“特征可分上限”，再判断 RL 是否还有优化空间。
+
+\subsection{动作塌缩的梯度机制}
+对二动作策略 $\pi_\theta(a=1|s)=\sigma(u_\theta(s))$，其对 logit 的梯度项可写为
+\begin{equation}
+\frac{\partial J}{\partial u}
+\propto
+\mathbb{E}\big[\hat A(s,1)(1-\pi)-\hat A(s,0)\pi\big].
+\end{equation}
+若在大量状态上 $\hat A(s,1)$ 持续偏低，更新会把 $u$ 压向负无穷，导致
+\begin{equation}
+\pi(a=1|s)\to 0.
+\end{equation}
+
+\paragraph{解释}
+一旦进入该区间，action=1 的采样概率进一步下降，优势估计样本更稀缺，形成“自我强化的塌缩环”。
+
+\subsection{阈值失配：为什么 AUC 还行但 BACC 不涨}
+模型排序能力由 AUC 反映，但最终决策取决于阈值 $\tau$：
+\begin{equation}
+\hat y=\mathbf{1}[\hat p\ge \tau].
+\end{equation}
+在类别极不平衡时，固定阈值往往使正类召回严重下降，Balanced Accuracy 近似随机。
+
+\paragraph{解释}
+这解释了我们在 OOD 场景观察到的现象：有时 ROC-AUC 不算低，但 BACC 与真实回报提升都很有限。
+
+\section{项目系统详解：让外部审稿人也能看懂}
+\subsection{系统目标与角色分工}
+项目目标不是“从零学习路径规划”，而是\textbf{在 ALNS 已有求解框架上学习事件应对动作}。两类模块分工如下：
+\begin{itemize}
+  \item ALNS（\texttt{Intermodal\_ALNS34959.py}）：维护解结构、执行移除/插入、检查可行性并计算反馈；
+  \item RL（\texttt{dynamic\_RL34959.py}）：在事件触发时输出离散动作，驱动 ALNS 后续行为。
+\end{itemize}
+
+\subsection{与普通 RL benchmark 的本质差异}
+\begin{table}[H]
+\centering
+\caption{本项目与标准 Gym 单体环境的差异}
+\begin{tabular}{p{4.2cm}p{5.2cm}p{5.2cm}}
+\toprule
+维度 & 标准 RL benchmark & 本项目 ALNS--RL \\
+\midrule
+环境执行方式 & 同步 step/reset & ALNS 与 RL 共享 \texttt{state\_reward\_pairs} 异步交互 \\
+动作语义 & 固定（如左右/上下） & 随阶段变化（removal 与 insertion 语义不同） \\
+奖励来源 & 仿真器直接返回 & 由可行性与动作匹配规则延迟回传 \\
+观测构成 & 通常完整状态或低噪传感 & 强压缩观测（2/3维）+ 事件上下文缺失 \\
+分布稳定性 & 常为单一固定分布 & 显式 phase 切换，存在 OOD/forgetting/generalization \\
+训练--部署差异 & 通常较小 & 训练段与 implement 段存在结构性偏移 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{交互数据结构：\texttt{state\_reward\_pairs}}
+ALNS 与 RL 通过共享表沟通（列包含 uncertainty\_index, uncertainty\_type, request, vehicle, delay\_tolerance, passed\_terminals, current\_time, action, reward 等）。
+
+关键约定：
+\begin{itemize}
+  \item \texttt{action=-10000000} 表示“动作槽未填写”；
+  \item \texttt{reward=-10000000} 表示“奖励尚未回传”；
+  \item RL 先写动作，ALNS 处理后再写 reward，形成异步闭环。
+\end{itemize}
+
+这一机制意味着：策略并不是在“即时可见真奖励”的理想环境中学习，而是在异步消息队列上工作。
+
+\subsection{状态与观测流水}
+\subsubsection{原始状态构造}
+在 \texttt{get\_state(chosen\_pair)} 中，RL 可访问的基础状态由如下字段拼接：
+\begin{equation}
+s_t^{\text{raw}}=[\text{delay\_tolerance},\text{passed\_terminals}_{1:10},\text{current\_time},\text{severity/event}].
+\end{equation}
+但后续环境将其压缩为前 $D$ 维观测（$D=2$ 或 $3$）。
+
+\subsubsection{基础观测}
+\begin{equation}
+o_t\in\mathbb{R}^D,\qquad D\in\{2,3\}.
+\end{equation}
+这一步是信息损失最严重的位置：路网结构与组合可行性的大量细节被压缩掉。
+
+\subsubsection{PPO\_NEW v1 增强观测}
+\begin{equation}
+x_t=[o_t,b_t,a_{t-1},r_{t-1},\Delta o_t],\qquad \Delta o_t=o_t-o_{t-1}.
+\end{equation}
+维度为
+\begin{equation}
+\dim(x_t)=2D+3=
+\begin{cases}
+7,&D=2\\
+9,&D=3
+\end{cases}
+\end{equation}
+其中 $b_t$ 为阶段位（0=removal, 1=insertion）。
+
+\subsubsection{PPO\_NEW v2 窗口堆叠}
+\begin{equation}
+X_t=[x_t,x_{t-1},\ldots,x_{t-k+1}],\quad k=4\ \text{(default)}.
+\end{equation}
+堆叠顺序为 newest $\rightarrow$ oldest，对应代码中 \texttt{deque.appendleft} 的维护方式。
+
+\subsubsection{reset/step 的时序一致性（关键）}
+\paragraph{reset}
+\begin{equation}
+\_prev\_o=o_0,\ \_prev\_action=0,\ \_prev\_reward=0,
+\end{equation}
+并令
+\begin{equation}
+\Delta o_0=0,
+\end{equation}
+得到初始 $x_0$，若使用堆叠则复制填满窗口。
+
+\paragraph{step}
+对执行后观测 $o_t$，先用“上一时刻缓存”构造当前输入：
+\begin{equation}
+x_t=\mathrm{concat}(o_t,b_t,\_prev\_action,\_prev\_reward,o_t-\_prev\_o),
+\end{equation}
+再更新缓存
+\begin{equation}
+\_prev\_o\leftarrow o_t,\ \_prev\_action\leftarrow a_t,\ \_prev\_reward\leftarrow r_t.
+\end{equation}
+这个顺序确保“prev\_action/prev\_reward”语义严格正确。
+
+\subsection{动作语义与阶段依赖}
+同一动作 ID 在不同阶段语义不同：
+\begin{equation}
+\text{meaning}(a_t)=
+\begin{cases}
+\text{等待/保持}, & a_t=0,\ \text{removal stage}\\
+\text{重新规划}, & a_t=1,\ \text{removal stage}\\
+\text{接受插入}, & a_t=0,\ \text{insertion stage}\\
+\text{拒绝插入}, & a_t=1,\ \text{insertion stage}
+\end{cases}
+\end{equation}
+因此，若不编码阶段信息，策略会把“语义不同的同号动作”混淆，直接增大学习难度。
+
+\subsection{奖励生成的工程机制与难点}
+在 \texttt{get\_reward} 的默认分支下，奖励可写为：
+\begin{equation}
+r_t=\mathbf{1}\big[(a_t=1\land eg\mathcal{F}_t)\ \lor\ (a_t=0\land \mathcal{F}_t)\big],
+\end{equation}
+其中 $\mathcal{F}_t$ 表示“当前无需重规划即可保持可行”。
+
+\paragraph{解释}
+奖励本质是在判断“动作是否匹配可行性状态”，它不是平滑成本函数。这会带来两个后果：
+\begin{enumerate}[leftmargin=*]
+  \item 监督信号近二值，梯度稀疏；
+  \item 一旦某类动作样本少（例如 action=1），优势估计会非常不稳。
+\end{enumerate}
+
+\subsection{训练与 implement 双阶段}
+项目存在 train/implement 双阶段（日志字段 \texttt{phase} 标记），并且 implement 阶段常使用
+\begin{equation}
+a_t=\arg\max_a\pi_\theta(a|o_t)
+\end{equation}
+（即 deterministic 预测）。
+
+这会进一步放大动作塌缩：当 policy 在训练末期已偏向 action=0，implement 中 deterministic 推理会把该偏好锁死。
+
+\subsection{日志与指标流水}
+核心文件：
+\begin{itemize}
+  \item \texttt{rl\_trace.csv}：逐事件、逐动作、逐奖励记录；
+  \item \texttt{rl\_training.csv}：训练/实现阶段统计；
+  \item \texttt{rl\_summary.csv}：每个 run 的核心汇总（含 average\_reward）；
+  \item \texttt{metrics.json}：补充指标（部分 run 存在缺失或回退）。
+\end{itemize}
+
+\subsection{不确定事件的定义、类型与生命周期（代码级）}
+本项目中的“不确定事件”不是抽象概念，而是由数据生成器显式写入动态 Excel 的结构化记录。在
+\texttt{codes/generation/generate\_mixed\_parallel.py} 中，每个事件会生成两条记录：
+\begin{itemize}
+  \item \texttt{type=congestion}（事件开始）；
+  \item \texttt{type=congestion\_finish}（事件结束）。
+\end{itemize}
+两条记录共享同一个 \texttt{uncertainty\_index}，并携带同一段 \texttt{duration} 区间
+\(
+[t_{\text{begin}},t_{\text{end}}]
+\)、同一
+\texttt{location} 与 \texttt{mode}（1/2/3 分别对应不同运输模式）。
+
+因此，单个事件可形式化为：
+\begin{equation}
+e_j=\big(u_j,\ell_j,m_j,[t_j^{b},t_j^{e}],\text{type}_j\big),\quad
+\text{type}_j\in\{\text{begin},\text{finish}\}.
+\end{equation}
+在 ALNS 执行过程中，\texttt{congestion} 触发“事件开始态”，\texttt{congestion\_finish} 触发“事件结束态”，两者共同构成
+RL 决策的完整闭环。
+
+\subsection{ALNS+RL 异步握手协议（逐步展开）}
+从 \texttt{Intermodal\_ALNS34959.py} 与 \texttt{dynamic\_RL34959.py} 的交互可还原出以下异步协议：
+\begin{enumerate}[leftmargin=*]
+  \item ALNS 发现事件后，构造一行 \texttt{state\_reward\_pairs}，初始化
+  \texttt{action=-10000000}, \texttt{reward=-10000000}。
+  \item 若是移除阶段，记录为 \texttt{begin\_removal}；若是插入阶段，记录为 \texttt{begin\_insertion}。
+  \item RL 在 \texttt{env.reset/step} 轮询共享表，筛选与当前 \((\text{uncertainty\_index},\text{request},\text{vehicle})\)
+  匹配且动作槽为空的行。
+  \item RL 调用 \texttt{model.predict} 产出动作并写回 \texttt{action} 字段，日志写入 \texttt{send\_action}。
+  \item ALNS 读取动作后执行 removal/insertion 运算，更新路径、可行性与相关约束。
+  \item ALNS 基于动作与可行性匹配关系计算即时奖励，写回 \texttt{reward} 字段，日志写入
+  \texttt{finish\_removal}/\texttt{finish\_insertion}。
+  \item RL 在 step 循环中等待 \texttt{reward != -10000000}，读取后写入训练日志，并构造下一时刻输入。
+  \item 若进入 implementation 阶段，流程仍相同，但决策通常更偏 deterministic，动作分布更容易塌缩。
+\end{enumerate}
+
+该协议与标准 Gym 的关键差别是：动作与奖励之间存在显式等待与共享表同步，导致 credit assignment 具有“异步消息”属性而非“同步仿真步”属性。
+
+\subsection{基础状态字段与物理语义的精确映射}
+在 \texttt{get\_state(chosen\_pair)} 中，\texttt{chosen\_pair} 来源于
+\texttt{state\_reward\_pairs} 的一行，列语义固定为：
+\begin{equation}
+[\text{uncertainty\_index},\text{uncertainty\_type},\text{request},\text{vehicle},
+\text{delay\_tolerance},\text{passed\_terminals},\text{current\_time},\text{action},\text{reward}].
+\end{equation}
+其中真正进入基础状态构造的是：
+\begin{equation}
+\text{delay\_tolerance}=x_4,\quad
+\text{passed\_terminals}=x_5,\quad
+\text{current\_time}=x_6.
+\end{equation}
+
+\paragraph{字段级解释}
+\begin{itemize}
+  \item \texttt{delay\_tolerance}：当前受影响请求在时间维度上的可容忍松弛量；
+  \item \texttt{passed\_terminals}：事件影响路径上的关键终端序列（不足 10 用 \texttt{-1} 填充）；
+  \item \texttt{current\_time}：事件触发时刻或当前决策时刻；
+  \item \texttt{severity\_level}：由事件持续时长分段离散化得到。
+\end{itemize}
+
+\paragraph{严重度离散化（代码同构）}
+令事件持续时长为
+\(
+L=t^{e}-t^{b}
+\),
+则严重度由如下分段函数给出：
+\begin{equation}
+\text{severity}(L)=
+\begin{cases}
+1,&L\le 20,\\
+2,&20<L\le 40,\\
+3,&40<L\le 60,\\
+4,&60<L\le 80,\\
+5,&80<L\le 100,\\
+6,&L>100.
+\end{cases}
+\end{equation}
+默认配置下（\texttt{add\_event\_types=0}）基础观测仅保留
+\(
+o_t=[\text{delay\_tolerance},\text{severity}]
+\),
+这解释了为何原始输入维度长期停留在 $D=2$。
+
+\subsection{状态压缩为何带来信息瓶颈}
+从数据可得的原始变量远多于最终观测，但基础观测只保留两维（或三维），这相当于应用了一个强压缩映射：
+\begin{equation}
+o_t=\psi(s_t),\qquad \dim(o_t)\ll \dim(s_t).
+\end{equation}
+在 OOD 场景中，若不同真实状态在压缩后映射到相近的 $o_t$，则即时奖励条件分布会重叠：
+\begin{equation}
+p(r_t=1\mid o_t,\text{OOD}) \approx p(r_t=1\mid o'_t,\text{OOD}),\quad o_t\neq o'_t,
+\end{equation}
+从而直接抬高 Bayes 误差并限制可学习上限。
+
+\subsection{奖励生成规则与“弱监督标签”本质}
+在 \texttt{get\_reward} 默认分支，奖励判定本质是“动作是否匹配可行性状态”。可写成真值表：
+\begin{table}[H]
+\centering
+\caption{动作-可行性匹配与即时奖励}
+\begin{tabular}{ccc}
+\toprule
+可行性状态 & 动作 & 奖励 \\
+\midrule
+可行（无需重规划） & $a=0$（保持） & 1 \\
+可行（无需重规划） & $a=1$（触发重规划） & 0 \\
+不可行（需处理） & $a=0$（保持） & 0 \\
+不可行（需处理） & $a=1$（触发重规划/拒绝） & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+因此它更接近“匹配标签”而非“平滑成本回报”。这会产生三个训练后果：
+\begin{enumerate}[leftmargin=*]
+  \item 回报二值化，优势信号离散且高方差；
+  \item 正负样本比例易受场景与阶段影响，类别不平衡显著；
+  \item 对阈值与动作先验极其敏感，易诱发 action=0 吸附态。
+\end{enumerate}
+
+\subsection{阶段依赖动作语义的进一步说明}
+动作编码虽然只有 \(\{0,1\}\)，但语义是阶段条件化的：
+\begin{equation}
+\text{meaning}(a_t\mid b_t)=
+\begin{cases}
+\text{等待/保持},&a_t=0,b_t=0\\
+\text{重规划/移除},&a_t=1,b_t=0\\
+\text{接受插入},&a_t=0,b_t=1\\
+\text{拒绝插入},&a_t=1,b_t=1
+\end{cases}
+\end{equation}
+其中 $b_t$ 为阶段位。若模型看不到 $b_t$，则同一动作编号在训练分布中会对应互斥语义，导致策略梯度方向混叠。这也是 PPO\_NEW v1 必须显式引入 \texttt{stage\_bit} 的核心原因。
+
+\subsection{从代码到分布：为什么是 800/200 切分}
+分布生成脚本与运行主链共同规定了“前 800 表训练、后 200 表实现/测试”的协议：
+\begin{itemize}
+  \item 生成器默认 \texttt{total\_files=1000}；
+  \item \texttt{train\_files=int(0.8*total\_files)=800}；
+  \item 剩余 \texttt{200} 文件作为实现/测试段；
+  \item ALNS 主链里也显式设置 \texttt{number\_of\_training=800},
+  \texttt{number\_of\_implementation=200}。
+\end{itemize}
+这使得 phase 与 table 索引可作为严格切分依据，也为探针避免泄漏提供了稳定协议基础。
+
+\section{分布设计、实验协议与数据来源}
+\subsection{分布配置}
+由 \texttt{distribution\_config.json} 定义：
+\begin{itemize}
+  \item \texttt{O\_a\_b}（pattern=ab）：训练 A，测试 B（典型 OOD）；
+  \item \texttt{F1\_a\_b}（pattern=aba）：遗忘与回访；
+  \item \texttt{F2\_a\_b}（pattern=abba）：更复杂切换；
+  \item \texttt{G\_a\_b\_c}（pattern=abc）：A/B 训练，C 泛化。
+\end{itemize}
+
+\subsection{分布机制的代码化定义（phase 序列如何落地）}
+生成器中的 \texttt{build\_phase\_labels(pattern,total\_files)} 把抽象 pattern 具体化为长度 1000 的 phase 序列。设
+\begin{equation}
+N=1000,\quad N_{\text{train}}=800,\quad N_{\text{test}}=200,\quad h=\frac{N_{\text{train}}}{2}=400.
+\end{equation}
+则典型模式可写为：
+\begin{align}
+\texttt{ab}:&\quad \underbrace{A,\ldots,A}_{0\sim799},\underbrace{B,\ldots,B}_{800\sim999},\\
+\texttt{aba}:&\quad \underbrace{A}_{0\sim399},\underbrace{B}_{400\sim799},\underbrace{A}_{800\sim999},\\
+\texttt{abba}:&\quad \underbrace{A}_{0\sim399},\underbrace{B}_{400\sim799},\underbrace{B}_{800\sim899},\underbrace{A}_{900\sim999},\\
+\texttt{abc}:&\quad \underbrace{A}_{0\sim399},\underbrace{B}_{400\sim799},\underbrace{C}_{800\sim999}.
+\end{align}
+这一定义非常关键：它保证“训练段与实现段不仅时间上分离，而且 phase 统计属性可控”，从而把分布问题从“隐含扰动”变成“可重复实验变量”。
+
+\subsection{均值与方差如何进入事件强度}
+每个 phase 对应一个事件持续时长分布参数（例如 \(A=10\), \(B=60\), \(C=90\)），生成器按相应均值采样事件时长：
+\begin{equation}
+L_{i,j}\sim \mathcal{N}(\mu_{\phi_i},\sigma_{\phi_i}^2)\ \text{或 LogNormal},
+\end{equation}
+并截断到正整数后写入动态事件表。这里 \(\phi_i\in\{A,B,C\}\) 是第 \(i\) 个文件的 phase 标签，\(j\) 是该文件内第 \(j\) 个事件。
+
+对应地，每个动态实例文件还会写入
+\texttt{\_\_meta\_\_} sheet，记录：
+\begin{equation}
+\texttt{gt\_mean}=\mu_{\phi_i},\qquad \texttt{phase\_label}=\phi_i.
+\end{equation}
+这也是后续 v4.2 Oracle 与 probe 脚本读取上下文的统一来源。
+
+\subsection{分布差异在决策层的体现路径}
+从“配置”到“策略输入”的影响路径可概括为：
+\begin{equation}
+(\text{pattern},\mu_A,\mu_B,\mu_C)\to
+\text{duration samples}\to
+\text{severity}\to
+o_t\to
+x_t/X_t\to
+\pi_\theta(a_t|x_t).
+\end{equation}
+其中最关键的瓶颈在于：虽然上游分布变化很大，但下游基础观测只保留了 \([delay\_tolerance,severity]\) 等极少变量，导致大量上下文差异在进入策略前已被压缩。
+
+\subsection{为什么 OOD 在本项目里不是“轻微偏移”}
+对于 \texttt{O\_10\_90} 这类场景，训练段主要看到 \(A(10)\) 分布，而实现段切换到 \(B(90)\)。
+该变化不是单纯噪声增大，而是事件时长均值级别的结构性漂移。结果是：
+\begin{enumerate}[leftmargin=*]
+  \item 同样观测值在训练和实现阶段对应的后续可行性不同；
+  \item 训练期学到的动作阈值在实现期系统失配；
+  \item 在二值奖励机制下，这种失配会更快演化为单动作策略。
+\end{enumerate}
+这也是为什么我们在论文里将 OOD 失败归因为“信息压缩 + 分布切换 + 行为塌缩”的耦合问题，而非某个单一算法结构失败。
+
+\subsection{本文使用的数据源}
+\begin{enumerate}[leftmargin=*]
+  \item 历史服务器日志：\url{A:/MYdata/logs}
+  \item PPO 批量基线：\url{codes/nexus/ppo_batch_20260214}
+  \item PPO vs PPO\_NEW 汇总：\url{codes/nexus/ppo_compare_v123_report/compare_summary.csv}
+  \item 诊断与阶段报告：\url{codes/nexus/phase0_report}, \url{codes/nexus/phase1_report}, \url{codes/nexus/phase1_1_report}
+\end{enumerate}
+
+\subsection{实验维度}
+常见运行维度为
+\begin{equation}
+(\text{distribution},R,\text{algorithm},\text{seed}),
+\end{equation}
+其中大量对比采用 $R=30,\ \text{seed}=42$ 的 smoke 配置，便于跨版本快速比对。
+
+\section{历史基线结果：PPO/A2C/DQN 的全局图景}
+\subsection{新数据源与样本覆盖（\texttt{thesis\_gapfill\_patch}）}
+本节不再使用早期零散日志，而统一采用新一轮批量实验数据
+\texttt{codes/nexus/thesis\_gapfill\_patch}，并按
+\((\text{algo},\text{dist},\text{seed},\text{algo\_version})\) 取最新 completed run。
+覆盖情况如下：
+\begin{equation}
+\text{A2C}:6\ \text{dist}\times 3\ \text{seed}=18,\qquad
+\text{PPO}:6\ \text{dist}\times 3\ \text{seed}=18.
+\end{equation}
+
+DQN 仅获得 8 条未完成 run（无 \texttt{rl\_summary.csv}），其阶段性快照显示：
+\begin{equation}
+\overline{t}_{\text{train}}\approx 135849\ \text{s}\approx 37.74\ \text{h},
+\qquad
+\overline{\text{rolling\_avg}}\approx 0.5625,
+\end{equation}
+且单次 run 仅推进到约 \(4.34\text{k}\sim 4.38\text{k}\) step。考虑到训练成本远高于其他算法且阶段性表现一般，\textbf{DQN 在本文主对比中不作为结论依据}，仅作工程备注。
+
+\subsection{PPO 与 A2C 的全局图景（新数据）}
+\begin{table}[H]
+\centering
+\caption{新数据下 PPO/A2C 分布级结果（average\_reward，mean$\pm$std，$n=3$）}
+\begin{tabular}{lccc}
+\toprule
+Distribution & PPO & A2C & $\Delta$ (PPO-A2C) \\
+\midrule
+F1\_10\_90   & 0.913$\pm$0.094 & 0.795$\pm$0.163 & +0.118 \\
+G\_10\_90\_60 & 0.768$\pm$0.061 & 0.713$\pm$0.059 & +0.055 \\
+G\_10\_30\_60 & 0.722$\pm$0.026 & 0.718$\pm$0.024 & +0.003 \\
+O\_10\_30    & 0.890$\pm$0.010 & 0.893$\pm$0.006 & -0.003 \\
+O\_10\_60    & 0.715$\pm$0.026 & 0.715$\pm$0.026 & +0.000 \\
+O\_10\_90    & 0.510$\pm$0.018 & 0.503$\pm$0.028 & +0.007 \\
+\midrule
+Global mean  & 0.753$\pm$0.143 & 0.723$\pm$0.135 & +0.030 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+从“全局均值”看，PPO 相比 A2C 仅有温和优势（+0.03）；但分布分解后可见更关键的结构信息：
+\begin{itemize}
+  \item 在难度较高的 \texttt{F1\_10\_90} 与 \texttt{G\_10\_90\_60}，PPO 优势更明显；
+  \item 在 \texttt{O\_10\_60} 两者几乎持平（均值同为 0.715）；
+  \item 在最难 OOD（\texttt{O\_10\_90}）两者都接近 0.5，说明“仅换主干算法”无法跨越该边界。
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{ALNS_Research_Documentation/latex/reports/rl_nonstationary_ood_study/assets/fig_baseline_global_landscape.pdf}
+\caption{新数据下 PPO/A2C 全局图景（柱=均值与95\%CI，点=各 seed 实测）。灰色背景为 OOD 分布。}
+\end{figure}
+
+\paragraph{结论（历史基线章节）}
+基于统一新数据，PPO 仍是更可靠主基线；但其收益集中在“中等难度分布”，并未解决最关键的 OOD 崩塌。该观察直接驱动后续的 PPO\_NEW 输入/表征改造与信息上限诊断。
+
+\section{PPO 基线在新分布下的边界：\texttt{thesis\_gapfill\_patch}}
+\subsection{分布级结果}
+\begin{table}[H]
+\centering
+\caption{PPO 在新分布上的边界（mean$\pm$std, $n=3$）}
+\begin{tabular}{lcc}
+\toprule
+分布 & average\_reward & action1\_rate \\
+\midrule
+F1\_10\_90   & 0.913$\pm$0.094 & 0.112 \\
+G\_10\_90\_60 & 0.768$\pm$0.061 & 0.200 \\
+G\_10\_30\_60 & 0.722$\pm$0.026 & 0.027 \\
+O\_10\_30    & 0.890$\pm$0.010 & 0.023 \\
+O\_10\_60    & 0.715$\pm$0.026 & 0.025 \\
+O\_10\_90    & 0.510$\pm$0.018 & 0.022 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+把 OOD 与非 OOD 分组：
+\begin{equation}
+\overline{R}_{\text{OOD}}=0.705,\qquad
+\overline{R}_{\text{non-OOD}}=0.801,\qquad
+\Delta_{\text{gap}}=0.096.
+\end{equation}
+
+\paragraph{解释}
+PPO 在新分布下的“边界”具有两层含义：
+\begin{itemize}
+  \item \textbf{均值层面}：OOD 组均值显著低于非 OOD 组；
+  \item \textbf{行为层面}：在最难分布 \texttt{O\_10\_90} 中，action1\_rate 仅约 2.2\%，平均奖励约 0.51，接近“几乎全选 action=0”的保守策略极限。
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{ALNS_Research_Documentation/latex/reports/rl_nonstationary_ood_study/assets/fig_ppo_boundary_heatmap.pdf}
+\includegraphics[width=0.48\textwidth]{ALNS_Research_Documentation/latex/reports/rl_nonstationary_ood_study/assets/fig_ppo_generalization_gap.pdf}
+\caption{左：PPO 在各分布$\times$seed 的 reward 热力图（新数据）；右：同 seed 下 Non-OOD$\rightarrow$OOD 的性能落差折线图。}
+\end{figure}
+
+\paragraph{边界结论}
+新数据表明，PPO 的可迁移能力在 \texttt{O\_10\_90} 附近形成稳定“低平台”（约 0.5），这正是后续 PPO\_NEW 与探针分析的出发点：问题不是单次随机波动，而是结构性上限。
+
+\section{PPO\_NEW 系列：v1/v2/v3 的设计与收益}
+\subsection{设计目标}
+PPO\_NEW 不更改主优化器（仍为 PPO 框架），而是沿“输入与表征”渐进改造：
+\begin{itemize}
+  \item v1：增强单步信息（阶段位 + 上一步动作/奖励 + 变化量）；
+  \item v2：显式时间窗口（堆叠短历史）；
+  \item v3：结构化分支编码 + 时间卷积聚合。
+\end{itemize}
+
+\subsection{v1 机理：把“上一拍”显式喂给策略}
+\begin{equation}
+x_t=[o_t,b_t,a_{t-1},r_{t-1},\Delta o_t].
+\end{equation}
+
+\paragraph{逐项解释}
+\begin{itemize}
+  \item $o_t$：当前局部状态；
+  \item $b_t$：阶段位，解决“动作语义随阶段变化”问题；
+  \item $a_{t-1},r_{t-1}$：提供最短行为反馈闭环；
+  \item $\Delta o_t$：提供局部动态趋势，而非只看静态快照。
+\end{itemize}
+
+\subsection{v2 机理：把“短时上下文”变为显式输入}
+\begin{equation}
+X_t=[x_t,x_{t-1},\ldots,x_{t-k+1}],\quad k=4.
+\end{equation}
+
+\paragraph{解释}
+v2 的核心是把 RNN 需要“隐式记忆”的内容转成显式窗口，降低记忆学习难度。但直接拼接也会带来维度膨胀与噪声累积风险。
+
+\subsection{v3 机理：结构化编码抑制噪声}
+把每个 $x_t$ 划分为
+\begin{equation}
+x_t=[o_t, m_t, \Delta o_t],\quad m_t=[b_t,a_{t-1},r_{t-1}],
+\end{equation}
+分别编码后聚合：
+\begin{align}
+e_t^{(o)}&=f_o(o_t),\
+e_t^{(m)}&=f_m(m_t),\
+e_t^{(\Delta)}&=f_{\Delta}(\Delta o_t),\\
+\tilde e_t&=W[e_t^{(o)};e_t^{(m)};e_t^{(\Delta)}],\\
+H&=\mathrm{Conv1D}_2\big(\sigma(\mathrm{Conv1D}_1([\tilde e_t]_{t-k+1}^{t}))\big),\\
+h_t&=\mathrm{MeanPool}(H)\in\mathbb{R}^{64}.
+\end{align}
+
+\paragraph{解释}
+与 v2 的“生拼接”相比，v3 对不同语义分量做了归纳偏置（inductive bias）：
+\begin{itemize}
+  \item 先在 token 内部解耦语义；
+  \item 再在时间维上建模局部模式；
+  \item 输出定长特征，避免维度直接爆炸。
+\end{itemize}
+
+\subsection{核心对比结果（四个关键分布）}
+\begin{table}[H]
+\centering
+\caption{PPO 与 PPO\_NEW(v1/v2/v3) 在关键分布上的 average\_reward}
+\begin{tabular}{lcccc}
+\toprule
+分布 & PPO & v1 & v2 & v3 \\
+\midrule
+F1\_10\_90 & 0.810 & 0.840 & 0.995 & 0.960 \\
+G\_10\_90\_60 & 0.755 & 0.795 & 0.695 & 0.885 \\
+O\_10\_60 & 0.695 & 0.695 & 0.690 & 0.695 \\
+O\_10\_90 & 0.505 & 0.495 & 0.500 & 0.505 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+增量（相对 PPO）：
+\begin{itemize}
+  \item F1\_10\_90：v2 +0.185（最强），v3 +0.150；
+  \item G\_10\_90\_60：v3 +0.130（最强），v2 -0.060；
+  \item O\_10\_60：三版本几乎持平（0 或 -0.005）；
+  \item O\_10\_90：三版本几乎持平（0 到 -0.01）。
+\end{itemize}
+
+\paragraph{解释}
+v2 在部分场景极强，但在 G 场景可能塌缩；v3 在 G 场景恢复并超越。说明“历史信息有用”，但“怎么编码历史”同样关键。
+
+\subsection{行为层分析：动作塌缩证据}
+从 \texttt{compare\_summary.csv} 可见，在 OOD 场景中：
+\begin{equation}
+\text{wait\_share}\approx 0.98\sim0.995,\qquad
+\text{action1\_rate}\approx 0.5\%\sim2\%.
+\end{equation}
+即策略几乎恒选 action=0。这与前文动作塌缩理论一致。
+
+\section{我们尝试过的算法族：为什么仍未攻克 OOD}
+\subsection{代码中实际尝试过的算法家族（按机制分组）}
+依据 \texttt{codes/core/dynamic\_RL34959.py} 的主分支，项目中不仅跑过 PPO/A2C/DQN，还尝试过一批“风险敏感、记忆增强、上下文自适应”的扩展算法。为避免“只罗列名字”，本节按\textbf{机制}拆分。
+
+\begin{table}[H]
+\centering
+\caption{已尝试算法族、核心机制与文献映射（仅列可确认来源）}
+\begin{tabular}{p{3.1cm}p{3.9cm}p{4.6cm}p{3.3cm}}
+\toprule
+算法族 & 代码入口（示例） & 核心机制（简述） & 相关论文 \\
+\midrule
+值函数族 & DQN, QRDQN\_CVAR, BE\_CVAR\_DQN & TD/Bellman 更新；分布式分位数价值；CVaR 下尾风险决策 & DQN (Mnih et al., 2015); QR-DQN (Dabney et al., 2018); CVaR-RL (Tamar et al., 2015/2017) \\
+策略梯度族 & A2C, PPO & On-policy actor-critic，优势函数降低方差，PPO-clip 稳定更新 & A3C/A2C (Mnih et al., 2016); PPO (Schulman et al., 2017) \\
+递归记忆族 & PPO\_LSTM / REC\_PPO & 用 LSTM 隐状态近似历史摘要，缓解部分可观测 & DRQN (Hausknecht \& Stone, 2015); Recurrent PPO (工程实现, sb3-contrib) \\
+注意力/上下文族 & PPO\_HAT\_PDI, HAT+MoE & 历史注意力编码 + 分阶段头部/混合专家门控 & Transformer (Vaswani et al., 2017); MoE (Shazeer et al., 2017) \\
+原型记忆族 & PPO\_PROTOMEM & 原型记忆路由 + 稳定性正则 + 分阶段回放 & （项目内实现，无直接同名标准基线） \\
+其他稳健族 & LBKLAC, DRCB & 信念表示 + KL/信任域约束；漂移感知 bandit/UCB 策略 & Contextual bandit/UCB 经典脉络 (Li et al., 2010 等) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{代表性算法机制（含公式）}
+\paragraph{1) PPO / A2C（策略梯度主线）}
+PPO 目标（前文已给）：
+\begin{equation}
+\mathcal{L}_{\text{PPO}}=
+\mathbb{E}\left[
+\min(r_t\hat A_t,\operatorname{clip}(r_t,1-\epsilon,1+\epsilon)\hat A_t)
+\right].
+\end{equation}
+A2C 与 PPO 同属 actor-critic，但更新更“直接”，在非稳态 noisy reward 下更容易被高方差梯度扰动。
+
+\paragraph{2) PPO\_LSTM（递归历史建模）}
+其核心不是改损失，而是把历史压入隐状态：
+\begin{equation}
+h_t=\operatorname{LSTM}(x_t,h_{t-1}),\qquad
+\pi(a_t|x_{\le t})=\pi(a_t|h_t).
+\end{equation}
+对标准 POMDP 通常有效，但在本项目里，\textbf{阶段语义切换+异步奖励回写}会导致隐状态承载“混杂因果”，LSTM 不一定能自动学到正确对齐。
+
+\paragraph{3) QRDQN\_CVAR / BE\_CVAR\_DQN（风险敏感值函数）}
+分位数分布学习估计 \(Z(s,a)\)，再用下尾风险做决策：
+\begin{equation}
+\operatorname{CVaR}_{\alpha}(Z)=\frac{1}{\alpha}\int_0^\alpha F^{-1}_Z(u)\,du.
+\end{equation}
+理论上更保守，但在本任务 reward 近二值且动作不平衡时，风险项可能进一步压低 action=1 采样，反而加重“保守塌缩”。
+
+\paragraph{4) HAT/PDI 与 ProtoMem（结构增强）}
+HAT 通过注意力聚合历史 token：
+\begin{equation}
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\end{equation}
+ProtoMem 通过原型路由记忆历史模式，目标是跨 phase 重用经验。两者都提高了表达能力，但也提高了学习难度与调参敏感性；在当前“信息稀薄+标签噪声+动作极不平衡”条件下，复杂结构并未稳定转化为 OOD 收益。
+
+\subsection{为什么这些方法在我们场景里普遍失效}
+综合代码机制与实验现象，失败并非“某个算法写错”，而是\textbf{任务结构对算法假设不友好}：
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{异步交互破坏即时监督}：RL 先写 action，ALNS 后写 reward，造成 credit 对齐噪声；
+  \item \textbf{动作语义阶段依赖}：同一 0/1 在 removal 与 insertion 阶段含义不同，增大学习难度；
+  \item \textbf{观测压缩严重}：基础观测常为 \(D=2/3\)，大量可行性关键信息不可见；
+  \item \textbf{分布切换强}：800/200 的 phase 机制使 train/test 真实上下文分布显著变化；
+  \item \textbf{类别与动作不平衡}：OOD 下 action=1 稀少，导致梯度饿死与阈值失配并存。
+\end{enumerate}
+
+\subsection{PPO\_NEW 的优越性与适配性（基于新数据）}
+\paragraph{核心思想：少改优化器，多改可学习信息结构}
+PPO\_NEW 系列并未大改 PPO 主训练流程，而是遵循“低风险、可回滚、逐版验证”的工程路线：
+\begin{itemize}
+  \item v1：补上上一拍信息 \(x_t=[o_t,b_t,a_{t-1},r_{t-1},\Delta o_t]\)；
+  \item v2：短窗口堆叠 \(X_t=[x_t,\ldots,x_{t-k+1}]\)；
+  \item v3：结构化分支编码（\(o\)/meta/\(\Delta o\)）+ TemporalConv 聚合。
+\end{itemize}
+
+\paragraph{与“重模型路线”的关键差异}
+\begin{itemize}
+  \item 不引入额外奖励塑形和大规模辅助目标，训练稳定性更可控；
+  \item 保持 SB3 PPO 主优化逻辑，便于与历史基线公平比较；
+  \item 改造点紧贴本任务痛点（阶段位、上一动作/奖励、短时变化量），解释性强。
+\end{itemize}
+
+\paragraph{新数据定量结论（\texttt{thesis\_gapfill\_patch}）}
+在四个关键分布 \(\{F1\_10\_90,\ G\_10\_90\_60,\ O\_10\_60,\ O\_10\_90\}\) 上（3 seeds）：
+\begin{equation}
+\overline{R}_{\text{PPO}}=0.7267,\quad
+\overline{R}_{\text{PPO\_NEW-v3}}=0.7679\ (\Delta=+0.0412).
+\end{equation}
+且在非 OOD 子集，v3 优势更明显：
+\begin{equation}
+\overline{R}^{\text{Non-OOD}}_{\text{PPO}}=0.8408,\quad
+\overline{R}^{\text{Non-OOD}}_{\text{v3}}=0.9250\ (\Delta=+0.0842).
+\end{equation}
+分布级上，v3 在
+\texttt{F1\_10\_90}（0.972 vs 0.913）与
+\texttt{G\_10\_90\_60}（0.878 vs 0.768）均明显领先。
+
+\paragraph{但为什么仍未攻克 OOD}
+在 OOD 子集（\texttt{O\_10\_60}, \texttt{O\_10\_90}），PPO 与 v2/v3/v3.1 均值几乎重合：
+\begin{equation}
+\overline{R}^{\text{OOD}}_{\text{PPO}}\approx 0.6125,\quad
+\overline{R}^{\text{OOD}}_{\text{v2/v3/v3.1}}\approx 0.611.
+\end{equation}
+这说明 PPO\_NEW 已经显著改善“可学习信息组织”和“中等难度分布适配”，但 \textbf{最难 OOD 的上限仍由信息可分性与分布切换强度主导}。因此后续必须引入探针与信息上限分析，而不仅是继续堆叠模型复杂度。
+
+\section{监督探针：信息上限诊断（重点）}
+\subsection{为什么要做探针}
+当 RL 表现差时，存在两种可能：
+\begin{enumerate}[leftmargin=*]
+  \item 当前特征本身信息不足（再优化也难提升）；
+  \item 特征足够，但 RL 没学到（优化/训练策略问题）。
+\end{enumerate}
+探针的作用是先估计“仅凭当前特征最多能学到什么”。
+
+\subsection{数据构造}
+样本来自 \texttt{rl\_trace.csv}，标签为即时奖励 $r_t\in\{0,1\}$。采用两种模式：
+\begin{itemize}
+  \item \textbf{Mode A}：严格对齐 PPO\_NEW 输入（最保守，最公平）；
+  \item \textbf{Mode B}：跨样本滚动构造（更乐观的潜在上限参考）。
+\end{itemize}
+
+切分优先遵循 table/phase 约束，避免同一 table 泄漏到 train/test 两端。
+
+\subsection{Mode A / Mode B 的重构细节（与代码逐项对齐）}
+探针脚本 \texttt{codes/analysis/probe\_upper\_bound.py} 的核心目标不是“造一个新特征”，而是把训练时真实可见信息尽可能同构地搬到监督学习框架。关键步骤如下。
+
+\subsubsection*{1) 可观测基元提取}
+脚本从 \texttt{rl\_trace.csv} 提取
+\(
+[\text{delay\_tolerance},\text{severity}]
+\)
+作为基础观测：
+\begin{equation}
+o_t=[d_t,s_t]\in\mathbb{R}^2.
+\end{equation}
+这与当前主链常用的 $D=2$ 观测设置一致。
+
+\subsubsection*{2) 阶段位恢复（stage\_bit）}
+脚本并非直接读取一个现成 stage\_bit 列，而是根据轨迹事件恢复：
+\begin{equation}
+b_t=
+\begin{cases}
+0,&\text{stage}=\texttt{begin\_removal},\\
+1,&\text{stage}=\texttt{begin\_insertion}.
+\end{cases}
+\end{equation}
+恢复键采用
+\(
+(\text{request},\text{vehicle})
+\)
+对，保证“同一请求在同一车辆轨迹上的 begin 事件”可正确 forward-fill 到后续 \texttt{receive\_reward} 样本。
+
+\subsubsection*{3) 单步增强特征构造}
+统一按
+\begin{equation}
+x_t=[o_t,b_t,a_{t-1},r_{t-1},\Delta o_t],\qquad \Delta o_t=o_t-o_{t-1}
+\end{equation}
+构造，其中差异只在于“上一拍”如何定义。
+
+\paragraph{Mode A（严格同构）}
+Mode A 对齐当前 PPO\_NEW v2 训练链路：在每次短 episode（常见 \texttt{episode\_length=1}）下，
+\(
+a_{t-1},r_{t-1}
+\)
+退化为 0，\(
+o_{t-1}
+\)
+由同一轨迹 begin 状态给定。该模式的意义是：\textbf{严格回答“按当前 RL 输入，信息上限是多少”}。
+
+\paragraph{Mode B（滚动上限参考）}
+Mode B 对每个 \((\text{request},\text{vehicle})\) 维护滚动状态：
+\begin{equation}
+\big(o_{t-1},a_{t-1},r_{t-1}\big)\leftarrow \big(o_t,a_t,r_t\big),
+\end{equation}
+并维护历史队列。其意义是：\textbf{回答“如果历史利用更充分，潜在上限能否显著提高”}。因此 Mode B 不是主结论，而是上限参照系。
+
+\subsubsection*{4) 窗口堆叠}
+当使用 \(X_t\)（即 \texttt{feature-kind=Xt}）时：
+\begin{equation}
+X_t=[x_t,x_{t-1},\ldots,x_{t-k+1}],\quad k=\texttt{n\_stack}.
+\end{equation}
+实现顺序为 newest $\rightarrow$ oldest，并在历史不足时用当前帧补齐。这一点与 PPO\_NEW v2 的窗口顺序保持一致，避免“同名特征不同语义”。
+
+\subsection{切分策略与防泄漏检查（为什么可信）}
+探针默认采用 \texttt{split\_mode=phase\_table}，规则为：
+\begin{align}
+\mathcal{D}_{\text{train}}&=\{(\text{phase=train})\land(0\le \text{table}\le 799)\},\\
+\mathcal{D}_{\text{test}}&=\{(\text{phase=implement})\land(800\le \text{table}\le 999)\}.
+\end{align}
+脚本还会显式输出：
+\begin{itemize}
+  \item train/test 的 table 范围；
+  \item table overlap 数量（泄漏检测）；
+  \item train/test 正类比例与动作计数。
+\end{itemize}
+因此，报告中的“可分性”是在严格 OOD 切分下得到的，而非随机切分下的乐观估计。
+
+\subsection{模型、基线与分层评估为何必须同时报告}
+仅报告一个模型分数会导致误判。探针在实现上固定输出三类对照：
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Majority baseline}：永远预测训练集多数类；
+  \item \textbf{Action-rate baseline}：按训练集经验概率
+  \(
+  \hat p(r=1\mid a)
+  \)
+  预测；
+  \item \textbf{学习模型}：LogReg 与 MLP（含类不平衡处理）。
+\end{enumerate}
+Action-rate baseline 很关键，因为它直接回答：
+\begin{equation}
+\hat p_0=\hat p(r=1\mid a=0),\qquad
+\hat p_1=\hat p(r=1\mid a=1)
+\end{equation}
+若 \(\hat p_1\) 长期低于 \(\hat p_0\)，策略塌缩到 action=0 在短期上就具有“统计合理性”，但这也可能掩盖长期可行性风险。
+
+此外，脚本强制输出按动作分层指标（by-action）：
+\begin{equation}
+\text{Metrics}_{a=0},\quad \text{Metrics}_{a=1}.
+\end{equation}
+这一步避免了“总体准确率被多数动作主导”的问题，是识别 action=1 学习失败的必要条件。
+
+\subsection{模型定义}
+\paragraph{统一输入定义（与脚本实现一致）}
+探针脚本并非只学习 \(r(s)\)，而是学习 \(r(s,a)\)：
+\begin{equation}
+\tilde z_t=[z_t,\ a_t],
+\end{equation}
+其中 \(z_t\) 是 mode A/B 重构后的状态特征（可附加 scenario one-hot），\(a_t\in\{0,1\}\) 为当前动作标量。标签是即时奖励
+\(y_t=r_t\in\{0,1\}\)。
+
+训练前做标准化（\texttt{StandardScaler}）：
+\begin{equation}
+\hat z_{t,j}=\frac{\tilde z_{t,j}-\mu_j}{\sigma_j+\epsilon},
+\end{equation}
+其中 \(\mu_j,\sigma_j\) 仅由训练集估计，避免测试泄漏。
+
+\paragraph{Logistic Regression（线性可分上限）}
+\begin{equation}
+\hat p_t=\sigma\left(w^\top \hat z_t+b\right),\qquad \sigma(u)=\frac{1}{1+e^{-u}}.
+\end{equation}
+使用带类别平衡权重的 BCE（对应 \texttt{class\_weight="balanced"}）：
+\begin{equation}
+\mathcal{L}_{\text{W-BCE}}
+=-\frac{1}{N}\sum_{t=1}^N
+\left[
+\omega_1 y_t\log \hat p_t
++\omega_0(1-y_t)\log(1-\hat p_t)
+\right],
+\end{equation}
+\begin{equation}
+\omega_c=\frac{N}{2N_c},\ c\in\{0,1\}.
+\end{equation}
+该模型用于回答“在当前特征上，线性决策边界能到什么水平”。
+
+\paragraph{MLP（非线性可分上限）}
+脚本默认两层感知机（\texttt{64,32}，ReLU，\texttt{alpha=1e-4}，\texttt{early\_stopping=True}）：
+\begin{align}
+h_1&=\mathrm{ReLU}(W_1\hat z_t+b_1),\\
+h_2&=\mathrm{ReLU}(W_2 h_1+b_2),\\
+\hat p_t&=\sigma(w_o^\top h_2+b_o).
+\end{align}
+与 LogReg 互补：若 LogReg 低、MLP 明显高，说明信息在当前特征中存在但呈非线性结构；若两者都低，则更可能是特征信息本身不足。
+
+\paragraph{决策阈值与概率输出}
+分类阈值默认固定为 \(\tau=0.5\)：
+\begin{equation}
+\hat y_t=\mathbf{1}[\hat p_t\ge 0.5].
+\end{equation}
+同时保留 \(\hat p_t\) 供 ROC-AUC/PR-AUC 与 optimistic proxy 计算。这个“分离使用”很关键：排序指标看的是概率排序，部署行为看的是阈值后的动作。
+
+\subsection{指标定义与解释（逐项）}
+给定混淆矩阵 \(TP,TN,FP,FN\)：
+\begin{align}
+\text{Accuracy}&=\frac{TP+TN}{TP+TN+FP+FN},\\
+\text{TPR/Recall}&=\frac{TP}{TP+FN},\\
+\text{TNR/Specificity}&=\frac{TN}{TN+FP},\\
+\text{Balanced Accuracy}&=\frac{\text{TPR}+\text{TNR}}{2},\\
+\text{Precision}&=\frac{TP}{TP+FP},\\
+\text{F1}&=\frac{2\cdot\text{Precision}\cdot\text{Recall}}{\text{Precision}+\text{Recall}}.
+\end{align}
+
+排序能力：
+\begin{equation}
+\mathrm{ROC\text{-}AUC}=\mathbb{P}(s^+>s^-).
+\end{equation}
+不平衡敏感能力：
+\begin{equation}
+\mathrm{PR\text{-}AUC}=\int_0^1 \mathrm{Precision}(\mathrm{Recall})\,d\mathrm{Recall}.
+\end{equation}
+
+\paragraph{每个指标在本项目中的判读语义}
+\begin{itemize}
+  \item \textbf{Accuracy}：受类别先验强烈影响。在 \(\pi_+=P(y=1)\) 很低时，恒负预测可得高 Accuracy；
+  \item \textbf{Balanced Accuracy}：等权看正负类召回，能揭示“动作塌缩导致的正类漏检”；
+  \item \textbf{ROC-AUC}：衡量排序能力，与阈值无关；若 ROC-AUC 尚可而 BACC 低，通常是阈值失配或类别极不平衡；
+  \item \textbf{PR-AUC}：对稀有正类更敏感，其随机基线约为 \(\pi_+\)；在 OOD 低正率场景中更有解释力。
+\end{itemize}
+
+\paragraph{动作分层指标（为什么必须报）}
+本项目奖励与动作高度耦合，故报告
+\(\text{Metrics}_{a=0}\) 与 \(\text{Metrics}_{a=1}\)：
+\begin{equation}
+\text{BACC}_{a=k}
+=\frac{1}{2}
+\left(
+\frac{TP_k}{TP_k+FN_k}
++
+\frac{TN_k}{TN_k+FP_k}
+\right),\quad k\in\{0,1\}.
+\end{equation}
+若总体指标稳定但 \(a=1\) 分层指标崩塌，说明模型/策略对“少数高价值动作”缺乏可用判别能力。
+
+\paragraph{平凡基线（trivial baselines）}
+探针脚本同时输出两类平凡基线，防止“看起来有提升，实际只是先验驱动”：
+\begin{align}
+\text{Majority baseline:}\quad
+\hat y_t &= \arg\max_{c\in\{0,1\}} P_{\text{train}}(y=c),\\
+\text{Action-rate baseline:}\quad
+\hat p_t &= P_{\text{train}}(y=1\mid a=a_t).
+\end{align}
+据此定义增益量：
+\begin{equation}
+\Delta\text{BACC}_{\text{model}}
+=\text{BACC}_{\text{model}}
+-\text{BACC}_{\text{trivial}}.
+\end{equation}
+只有 \(\Delta\text{BACC}\) 显著为正时，才可说“模型学到了超越先验/动作频率的结构信息”。
+
+\paragraph{为什么本节要写得这么细}
+论文审稿里最常见质疑是“指标不一致、拆分不严、基线不充分”。本项目在 OOD 下又存在严重不平衡和动作塌缩，如果不同时报告总体指标、分层指标、排序指标与平凡基线，几乎无法把“信息瓶颈”与“优化瓶颈”区分开。
+
+\subsection{optimistic proxy（乐观上限代理）}
+定义：
+\begin{equation}
+\hat U=\frac{1}{N}\sum_{t=1}^N \max_{a\in\{0,1\}}\hat r_\phi(s_t,a).
+\end{equation}
+它不是可证上界，而是“若有理想动作选择器且模型概率可置信”时的乐观参考。
+
+\paragraph{适用前提}
+若测试集中某动作样本严重不足，则 $\hat U$ 只能视为外推，不宜做强结论。
+
+\subsection{optimistic proxy 的可用性边界（避免误用）}
+在工程实现中，proxy 不是无条件输出。脚本设定 \texttt{min\_action\_samples}（默认 20）作为可用性门槛：
+\begin{equation}
+n_{\text{train}}(a=0)\ge m,\quad n_{\text{train}}(a=1)\ge m.
+\end{equation}
+若任一动作在训练集中样本不足，报告会标注
+\texttt{insufficient\_train\_action\_samples} 并禁用 proxy。
+
+\paragraph{原因}
+proxy 需要对同一状态分别评估 \(a=0,1\) 的奖励概率：
+\begin{equation}
+\hat r_\phi(s_t,0),\ \hat r_\phi(s_t,1).
+\end{equation}
+当某动作几乎无样本时，这两个估计中的一个会严重外推，\(\max\) 操作反而会系统性夸大上限。
+
+\paragraph{结论判读准则}
+建议在论文中按以下规则解释：
+\begin{enumerate}[leftmargin=*]
+  \item 若 Mode A/B 均低、proxy 不可用或很低：优先判定为信息瓶颈；
+  \item 若 Mode B 明显高于 Mode A：说明“历史可挖”，应优先改时序建模或特征；
+  \item 若 Mode A 已高但 RL 低：优先判定为优化瓶颈（训练协议、阈值、探索不足）；
+  \item 若 action 分层显示 \(a=1\) 子集指标崩塌：优先处理动作不平衡与阈值校准。
+\end{enumerate}
+
+\subsection{探针结果：四个关键分布的诊断}
+\begin{table}[H]
+\centering
+\caption{PPO\_NEW v1/v2/v3 在关键分布的探针增益摘要}
+\begin{tabular}{lcccc}
+\toprule
+分布 & 版本 & A-$\Delta$BACC & B-$\Delta$BACC & 行为特征 \\
+\midrule
+F1\_10\_90 & v1 & 0.4969 & 0.4107 & action1\_rate=0.1852 \\
+F1\_10\_90 & v2 & 0.4975 & 0.4873 & action1\_rate=0.0000 \\
+F1\_10\_90 & v3 & 0.4974 & 0.3099 & action1\_rate=0.0585 \\
+\midrule
+G\_10\_90\_60 & v1 & 0.2779 & 0.3126 & action1\_rate=0.6211 \\
+G\_10\_90\_60 & v2 & 0.3962 & 0.3833 & action1\_rate=0.0100 \\
+G\_10\_90\_60 & v3 & 0.2244 & 0.1167 & action1\_rate=0.3796 \\
+\midrule
+O\_10\_60 & v1 & 0.0000 & 0.0192 & wait\_share=0.9800 \\
+O\_10\_60 & v2 & 0.0009 & 0.0611 & wait\_share=0.9850 \\
+O\_10\_60 & v3 & 0.0130 & 0.0000 & wait\_share=0.9851 \\
+\midrule
+O\_10\_90 & v1 & 0.0050 & 0.0297 & wait\_share=0.9901 \\
+O\_10\_90 & v2 & 0.0000 & 0.0600 & wait\_share=0.9950 \\
+O\_10\_90 & v3 & 0.0154 & 0.0227 & wait\_share=0.9900 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{诊断解读}
+\begin{itemize}
+  \item F1: 探针增益接近 0.5，说明可分性极高，RL 高分合理；
+  \item G: v2 探针增益高但 RL 结果曾差，属于“信息在但优化掉队”；
+  \item O: 增益长期贴近 0，说明当前特征对 OOD 即时奖励几乎不可分。
+\end{itemize}
+
+\section{v4 系列补充：负结果同样有价值}
+\subsection{v4.1（Adapter）}
+v4.1 在 v3 输出后加门控残差：
+\begin{equation}
+h'=h+\alpha\,A(\mathrm{LN}(h)),\quad \alpha_0=0.
+\end{equation}
+其价值在于“安全可回滚”，初始化严格退化为 v3。当前实验中整体与 v3 接近，未在 OOD 打开新局面。
+
+\subsection{v4.2（Oracle Context Injection）}
+模式：
+\begin{itemize}
+  \item v4.2\_phase：obs + stage + phase one-hot；
+  \item v4.2\_mean：obs + stage + gt\_mean\_norm。
+\end{itemize}
+结果（\texttt{O\_10\_90}）：两者均 0.495，低于 v3/v4.1 的 0.505。
+
+trace 证据：
+\begin{itemize}
+  \item v4.2\_phase：implement \texttt{oracle\_ctx\_mode=phase} 共 201 条；
+  \item v4.2\_mean：implement \texttt{oracle\_ctx\_mode=mean} 共 203 条；
+  \item 但两者 implement 中 \texttt{phase\_label} 几乎全是 B，\texttt{gt\_mean} 几乎全是 90。
+\end{itemize}
+
+\paragraph{解释}
+Oracle 并非未接入，而是上下文在决策期几乎常量，无法提供额外可分性。
+
+\subsection{v4.3（探索/阈值诊断）}
+\begin{itemize}
+  \item v4.3\_ent：提高 entropy coefficient；
+  \item v4.3\_logit\_bias：给 action1 logit 加固定偏置。
+\end{itemize}
+
+在 \texttt{O\_10\_90} 上两者仍为 0.505，action1\_rate 约 1\%，仅 $p(a=1)$ 均值略有差异（0.00769 vs 0.00797）。
+
+\paragraph{解释}
+这说明“仅靠小幅探索或阈值偏置”不足以穿透 OOD 信息瓶颈。
+
+\section{综合机理：把失败路径串成因果链}
+\subsection{性能分解观点}
+可将性能写为
+\begin{equation}
+\mathcal{P}_{\text{OOD}}
+\approx
+f(\underbrace{\mathcal{I}}_{\text{信息可分性}},
+\underbrace{\mathcal{O}}_{\text{优化效率}},
+\underbrace{\mathcal{B}}_{\text{行为平衡/阈值}}),
+\end{equation}
+并满足
+\begin{equation}
+\mathcal{I}\text{过低}\Rightarrow
+\mathcal{P}_{\text{OOD}}\text{上限受限};
+\qquad
+\mathcal{I}\text{中高但}\mathcal{O}\text{低}\Rightarrow\text{可通过训练改进};
+\qquad
+\mathcal{B}\text{失衡}\Rightarrow\text{部署退化}.
+\end{equation}
+
+\subsection{对应到本项目证据}
+\begin{itemize}
+  \item \textbf{信息层（I）}：OOD 探针 $\Delta$BACC 基本在 $0\sim0.06$，说明可分上限低；
+  \item \textbf{优化层（O）}：G 场景 v2 探针高但 RL 低，证明存在优化问题；v3 已部分修复；
+  \item \textbf{行为层（B）}：OOD 中 wait\_share 接近 1，action1\_rate 接近 0，部署行为近单动作。
+\end{itemize}
+
+\paragraph{一句话总结}
+当前 OOD 失败是“\textbf{信息不够} + \textbf{分布偏移} + \textbf{动作塌缩}”三者叠加，不是单点缺陷。
+
+\section{给论文审稿人的项目说明模板（可直接复用）}
+\subsection{问题定义模板}
+“我们研究的是一个\textbf{事件驱动的在线策略选择问题}：当 ALNS 在动态运输网络中遇到不确定事件时，RL 决定是否重规划/是否接受插入，从而在可行性与效率之间做实时权衡。”
+
+\subsection{方法定位模板}
+“与端到端 RL 不同，我们并不替代 ALNS 求解器，而是把 RL 用作‘高层决策器’，通过共享事件表与 ALNS 异步耦合。该设计使工程可落地，但也引入了非同步、弱监督、部分可观测等难点。”
+
+\subsection{贡献定位模板}
+“贡献不在于提出一个全新 RL 理论，而在于在真实联动系统中构建了可复现的版本化算法入口（PPO\_NEW）、系统比较了多类改造路径，并用监督探针明确了 OOD 的结构性瓶颈。”
+
+\clearpage
+% Structured experiment chapter template (filled incrementally as new runs complete)
+\input{ALNS_Research_Documentation/latex/reports/rl_nonstationary_ood_study/experiment_chapter_template.tex}
+
+\section{后续研究路线（面向毕业论文）}
+\subsection{路线 A：先补信息，再谈大模型}
+\begin{enumerate}[leftmargin=*]
+  \item 补充与可行性强相关的上下文特征（局部冲突强度、未来短时风险、可行性松弛量）；
+  \item 保持 v3 主干不变，仅做输入增量 ablation，先看 probe 上限是否上升；
+  \item 若 probe 不升，则说明特征仍不足，不应盲目增大网络。
+\end{enumerate}
+
+\subsection{路线 B：抑制动作塌缩}
+\begin{enumerate}[leftmargin=*]
+  \item 在训练采样或损失上对 action=1 做再平衡；
+  \item 实施阈值校准（基于验证集优化 BACC/F1）；
+  \item 记录并约束 implement 阶段 action1\_rate，防止极端策略上线。
+\end{enumerate}
+
+\subsection{路线 C：分布鲁棒训练协议}
+\begin{enumerate}[leftmargin=*]
+  \item 把 phase 切换显式纳入训练课程（curriculum over distributions）；
+  \item 使用多 seed（至少 5）报告均值、标准差与置信区间；
+  \item 固化“先 probe 后 RL”的实验门禁，减少无效训练。
+\end{enumerate}
+
+\section{结论}
+本文从理论、系统、实验三层面回答了“为何 OOD 难”这一核心问题：
+\begin{enumerate}[leftmargin=*]
+  \item 非平稳与分布偏移破坏了 RL 的平稳优化假设；
+  \item ALNS--RL 异步耦合与二值奖励使训练信号脆弱；
+  \item PPO\_NEW v1/v2/v3 在部分分布实现突破，但 OOD 仍受信息上限限制；
+  \item 探针与 Oracle 结果共同证明：当前优先级应是\textbf{增强可观测信息与样本结构}，而非继续堆叠复杂网络。
+\end{enumerate}
+
+从论文角度看，这组结果的价值并不在“追求单次最高分”，而在于给出了一条可证据化、可复现、可迭代的诊断路径：
+\begin{center}
+\textbf{先问“看不看得见”，再问“学不学得会”，最后问“能不能泛化”。}
+\end{center}
+
+\section*{附录 A：关键文件定位}
+\begin{itemize}
+  \item 主环境与训练主链：\url{codes/core/dynamic_RL34959.py}
+  \item ALNS 核心与奖励：\url{codes/core/Intermodal_ALNS34959.py}
+  \item PPO\_NEW 路由：\url{codes/robust_rl/ppo_new/common.py}
+  \item v1 观测增强：\url{codes/robust_rl/ppo_new/v1_augobs.py}
+  \item v2 堆叠输入：\url{codes/robust_rl/ppo_new/v2_stackedobs.py}
+  \item v3/v4 构建：\url{codes/robust_rl/ppo_new/v3_context.py}
+  \item v3 特征提取器：\url{codes/algorithms/ppo_new/nn/context_extractor.py}
+  \item 探针脚本：\url{codes/analysis/probe_upper_bound.py}
+\end{itemize}
+
+\section*{附录 B：主要数据文件}
+\begin{itemize}
+  \item \url{A:/MYdata/logs/run_*/rl_summary.csv}
+  \item \url{codes/nexus/ppo_batch_20260214/run_*/rl_summary.csv}
+  \item \url{codes/nexus/ppo_compare_v123_report/compare_summary.csv}
+  \item \url{codes/nexus/phase0_report/phase0_summary.csv}
+  \item \url{codes/nexus/v42_oracle_probe/run_20260217_195353_848608_R30_O_10_90_PPO_NEW_S42/rl_summary.csv}
+  \item \url{codes/nexus/v42_oracle_probe_mean/run_20260217_221052_651870_R30_O_10_90_PPO_NEW_S42/rl_summary.csv}
+\end{itemize}
+
+\section*{附录 C：建议引用文献（写正式论文时可替换为 bib）}
+\begin{enumerate}[leftmargin=*]
+  \item Schulman et al., Proximal Policy Optimization Algorithms, 2017.
+  \item Sutton and Barto, Reinforcement Learning: An Introduction, 2nd ed.
+  \item Kaelbling et al., Planning and acting in partially observable stochastic domains, 1998.
+  \item Cobbe et al., Leveraging Procedural Generation to Benchmark RL, ICML 2020.
+\end{enumerate}
+
+\section*{附录 D：逐公式推导细节（答辩可直接引用）}
+\subsection*{D.1 从性能差分引理到分布偏移上界}
+令训练目标为 $J_{\text{train}}(\pi)$，测试目标为 $J_{\text{test}}(\pi)$。写出性能差分引理：
+\begin{equation}
+J(\pi)-J(\pi_0)=\frac{1}{1-\gamma}\mathbb{E}_{s\sim d^{\pi}}\mathbb{E}_{a\sim\pi}[A^{\pi_0}(s,a)].
+\end{equation}
+把同一策略在两种状态分布下的目标相减：
+\begin{align}
+J_{\text{test}}(\pi)-J_{\text{train}}(\pi)
+&=\frac{1}{1-\gamma}\Big(
+\mathbb{E}_{s\sim d^{\pi}_{\text{test}}}g(s)
+-\mathbb{E}_{s\sim d^{\pi}_{\text{train}}}g(s)
+\Big),\\
+g(s)&:=\mathbb{E}_{a\sim\pi}[A^{\pi_0}(s,a)].
+\end{align}
+利用测度差分不等式
+\(
+|\mathbb{E}_p[f]-\mathbb{E}_q[f]|
+\le 2\|f\|_\infty\mathrm{TV}(p,q)
+\)
+并记
+\(
+\|g\|_\infty\le \frac{R_{\max}}{1-\gamma}
+\)
+可得
+\begin{equation}
+|J_{\text{test}}(\pi)-J_{\text{train}}(\pi)|
+\le
+\frac{2R_{\max}}{(1-\gamma)^2}
+\mathrm{TV}(d^{\pi}_{\text{test}},d^{\pi}_{\text{train}}).
+\end{equation}
+
+\paragraph{推导意义}
+这个推导把“泛化差”显式绑定到状态访问分布距离上。对本项目而言，\texttt{O\_*} 场景就是主动构造较大 TV 距离，因此只靠同分布训练很难保证部署回报。
+
+\subsection*{D.2 Bellman 算子漂移界}
+定义时变 Bellman 算子
+\begin{equation}
+(\mathcal{T}^{\pi}_tQ)(s,a)=R_t(s,a)+\gamma\mathbb{E}_{s'\sim P_t(\cdot|s,a),a'\sim\pi}[Q(s',a')].
+\end{equation}
+对任意 $t,t'$：
+\begin{align}
+\|\mathcal{T}^{\pi}_tQ-\mathcal{T}^{\pi}_{t'}Q\|_\infty
+&\le
+\|R_t-R_{t'}\|_\infty
++\gamma\sup_{s,a}\left|
+\mathbb{E}_{P_t}[V_Q]-\mathbb{E}_{P_{t'}}[V_Q]
+\right|\\
+&\le
+\Delta_R(t,t')
++\gamma\|V_Q\|_\infty
+\sup_{s,a}\|P_t(\cdot|s,a)-P_{t'}(\cdot|s,a)\|_1,
+\end{align}
+其中 $V_Q(s)=\mathbb{E}_{a\sim\pi}Q(s,a)$。
+
+\paragraph{推导意义}
+当事件强度变化导致转移核漂移，Bellman 算子本身就会变。固定步长和固定网络容量下，值函数难以稳定跟踪这个动态目标。
+
+\subsection*{D.3 二动作策略塌缩的梯度细化}
+令
+\(
+\pi_\theta(1|s)=\sigma(u_\theta(s))
+\),
+则
+\begin{equation}
+\nabla_\theta \log\pi_\theta(1|s)
+=(1-\pi_\theta(1|s))\nabla_\theta u_\theta(s),
+\end{equation}
+\begin{equation}
+\nabla_\theta \log\pi_\theta(0|s)
+=-\pi_\theta(1|s)\nabla_\theta u_\theta(s).
+\end{equation}
+代入策略梯度期望：
+\begin{align}
+\nabla_\theta J
+&\propto
+\mathbb{E}\Big[
+\hat A(s,1)(1-\pi)
+-\hat A(s,0)\pi
+\Big]\nabla_\theta u_\theta(s).
+\end{align}
+若在大部分状态上
+\(
+\hat A(s,1)\ll 0
+\)
+且
+\(
+\hat A(s,0)\approx 0
+\),
+则更新方向持续压低 $u_\theta$，使
+\(
+\pi(1|s)\to 0
+\)。
+
+\paragraph{推导意义}
+这解释了为什么“仅加一点 ent\_coef”常常不够：当优势符号长期偏向单侧，熵项会被主梯度淹没。
+
+\subsection*{D.4 BACC 与阈值失配的关系}
+记正类先验为 $\rho=P(y=1)$，若模型采用阈值 $\tau$，则
+\begin{equation}
+\text{BACC}(\tau)
+=\frac{1}{2}\big(\mathrm{TPR}(\tau)+\mathrm{TNR}(\tau)\big).
+\end{equation}
+Accuracy 则为
+\begin{equation}
+\text{ACC}(\tau)=\rho\,\mathrm{TPR}(\tau)+(1-\rho)\,\mathrm{TNR}(\tau).
+\end{equation}
+当 $\rho\ll 1$ 时，ACC 对 TNR 更敏感，模型可通过“几乎全判负”获得不低 ACC；但 BACC 会明显下降。
+
+\paragraph{推导意义}
+在 OOD 场景，若 action=1 成功样本稀缺，单看 ACC 会产生“模型还行”的错觉，必须联合 BACC/F1/PR-AUC 才能识别真实可用性。
+
+\section*{附录 E：项目级运行时序案例（从事件到奖励）}
+\subsection*{E.1 单事件闭环时序}
+下表给出一次典型事件从 ALNS 触发到 RL 获得奖励的全过程：
+\begin{table}[H]
+\centering
+\caption{一次 begin\_removal 事件的异步时序}
+\begin{tabular}{clp{8.7cm}}
+\toprule
+时刻 & 模块 & 关键动作 \\
+\midrule
+$t_0$ & ALNS & 生成 \texttt{state\_reward\_pairs} 行，\texttt{action=-10000000}, \texttt{reward=-10000000} \\
+$t_1$ & RL reset/step & 读取该行，构造 $o_t\to x_t/X_t$，调用 \texttt{model.predict} 输出动作 \\
+$t_2$ & RL & 将动作写回同一行，日志记 \texttt{stage=send\_action} \\
+$t_3$ & ALNS & 根据动作执行 removal/insertion 逻辑，更新可行性与路径 \\
+$t_4$ & ALNS & 计算 reward（动作与可行性匹配判定），写回同一行 \\
+$t_5$ & RL & 在 step 循环中等待 reward 就绪后读取，记 \texttt{receive\_reward}，并更新缓存 \\
+$t_6$ & RL & 进入下一个事件；若 implement 阶段，通常 deterministic 推理 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{与普通 RL 的差别}
+在标准 Gym 中，$a_t$ 与 $r_t$ 同步返回；而这里存在显式等待与消息同步，导致 credit assignment 更难、时序噪声更高。
+
+\subsection*{E.2 O\_10\_90 与 F1\_10\_90 的对照解读}
+\begin{table}[H]
+\centering
+\caption{两个代表性分布的机制差异（基于实际运行统计）}
+\begin{tabular}{p{3.2cm}p{5.2cm}p{5.2cm}}
+\toprule
+维度 & F1\_10\_90 & O\_10\_90 \\
+\midrule
+avg\_reward & v2=0.995, v3=0.960 & PPO/v3/v4.1/4.3 约 0.505 \\
+探针增益 & A/B 均接近 0.5（可分性强） & A/B 多在 0.0--0.06（可分性弱） \\
+行为分布 & action1 比例可达 5\%--18\% & action1 常低于 1\%--2\% \\
+结论 & 信息可学，优化可兑现 & 信息不足且动作塌缩并发 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection*{E.3 为什么 Oracle 注入没有改善 O\_10\_90}
+v4.2 中已注入 \texttt{phase/mean}，但 implement 期统计显示：
+\begin{equation}
+\text{phase\_label}=\text{B}\ \text{几乎恒定},\qquad
+\text{gt\_mean}=90\ \text{几乎恒定}.
+\end{equation}
+因此新增上下文并未提供可变判别信号，策略仍停留在“几乎总选 action=0”的局部稳态。
+
+\section*{附录 F：审稿人高频问题与回答草案}
+\subsection*{F.1 ``为什么不用更大的模型（Transformer/Memory）？''}
+回答要点：我们确实尝试过多类复杂结构（见主入口算法分支），但关键 OOD 仍接近随机。先证伪“信息足够”再上更大模型，才符合科学实验顺序。
+
+\subsection*{F.2 ``你们的 reward 是否过于粗糙？''}
+回答要点：是。当前 reward 更接近可行性匹配标签，属于弱监督。这既解释了训练噪声，也解释了动作塌缩。后续方向是引入更平滑、与成本差更一致的中间奖励。
+
+\subsection*{F.3 ``为什么 probe 结论可信？''}
+回答要点：probe 不是替代 RL，而是估计特征可分上限。我们同时使用 mode A（严格同构输入）和 mode B（乐观参考），并报告 baseline 对照与 action 分层指标，避免单指标误判。
+
+\subsection*{F.4 ``你们如何保证不是单 seed 偶然？''}
+回答要点：当前文档已明确 smoke 性质。正式论文阶段应至少 5 seeds，并报告均值、标准差、置信区间以及显著性检验。
+
+\subsection*{F.5 ``这项工作的可迁移价值在哪里？''}
+回答要点：价值不只在某个分数，而在于提出了“联动系统中的 RL 诊断范式”：
+\begin{center}
+\textbf{先做信息上限诊断（probe），再做策略优化（RL），最后做分布鲁棒验证（OOD）。}
+\end{center}
+这套范式可迁移到其他 OR+RL 工业场景（库存、调度、维修等）。
+
+\end{document}

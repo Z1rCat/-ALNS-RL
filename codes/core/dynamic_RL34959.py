@@ -6,12 +6,14 @@ import numpy as np
 import copy
 import random
 import os
+import json
+import atexit
 import matplotlib.pyplot as plt
 try:
     from stable_baselines3 import DQN, PPO, A2C, DDPG, HER, SAC, TD3
     from stable_baselines3.common.evaluation import evaluate_policy as sb3_evaluate_policy
     from stable_baselines3.common.vec_env import VecFrameStack
-    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.callbacks import BaseCallback, CallbackList
     from stable_baselines3.common.utils import explained_variance
     _SB3_AVAILABLE = True
 except Exception:
@@ -19,6 +21,7 @@ except Exception:
     VecFrameStack = None
     sb3_evaluate_policy = None
     BaseCallback = None
+    CallbackList = None
     explained_variance = None
     _SB3_AVAILABLE = False
 try:
@@ -130,9 +133,80 @@ LSTM_CHAIN_LEN = 1
 LSTM_CHAIN_STEP = 0
 USE_LSTM = False
 STAGE_IN_OBS = False
+USE_AUGMENTED_OBS = False
+ALGO_VERSION = (os.environ.get("RL_ALGO_VERSION", "v1") or "v1").strip().lower()
+PPO_NEW_WINDOW_K = 1
+STAGE_MODE = (os.environ.get("RL_STAGE_MODE", "train_eval") or "train_eval").strip().lower()
+INIT_MODEL_PATH = (os.environ.get("RL_INIT_MODEL_PATH", "") or "").strip()
+SAVE_MODEL_PATH = (os.environ.get("RL_SAVE_MODEL_PATH", "") or "").strip()
+ORACLE_CTX_MODE = (os.environ.get("RL_ORACLE_CTX_MODE", "none") or "none").strip().lower()
+try:
+    ORACLE_GT_MEAN_NORM = float(os.environ.get("RL_ORACLE_GT_MEAN_NORM", "100.0"))
+except Exception:
+    ORACLE_GT_MEAN_NORM = 100.0
+try:
+    ORACLE_PHASE_CLASSES = int(os.environ.get("RL_ORACLE_PHASE_CLASSES", "0") or 0)
+except Exception:
+    ORACLE_PHASE_CLASSES = 0
 PDI_GT_MEAN_LIST = []
 PDI_PHASE_LIST = []
 PDI_REWARD_LIST = []
+
+
+def _normalize_stage_mode(value):
+    mode = str(value or "train_eval").strip().lower()
+    if mode not in {"train_eval", "train_only", "eval_only"}:
+        mode = "train_eval"
+    return mode
+
+
+def _maybe_load_model_checkpoint(model_obj):
+    path = str(globals().get("INIT_MODEL_PATH", "") or "").strip()
+    if not path:
+        return
+    if not os.path.exists(path):
+        print(f"[RL] init model checkpoint not found: {path}")
+        return
+    loaded = False
+    if hasattr(model_obj, "set_parameters"):
+        try:
+            model_obj.set_parameters(path, exact_match=False, device="cpu")
+            loaded = True
+        except Exception:
+            loaded = False
+    if not loaded and hasattr(model_obj, "load"):
+        try:
+            cls = model_obj.__class__
+            new_model = cls.load(path, env=model_obj.get_env(), device="cpu")
+            if hasattr(new_model, "set_env"):
+                new_model.set_env(model_obj.get_env())
+            return new_model
+        except Exception:
+            pass
+    if loaded:
+        print(f"[RL] loaded model parameters from: {path}")
+    else:
+        print(f"[RL] failed to load checkpoint from: {path}")
+    return model_obj
+
+
+def _maybe_save_model_checkpoint(model_obj):
+    path = str(globals().get("SAVE_MODEL_PATH", "") or "").strip()
+    if not path:
+        return
+    try:
+        out_dir = os.path.dirname(path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        model_obj.save(path)
+        print(f"[RL] saved model checkpoint to: {path}")
+    except Exception as exc:
+        print(f"[RL] failed to save checkpoint to {path}: {exc}")
+
+
+def _normalize_oracle_ctx_mode(mode_val):
+    mode = str(mode_val or "none").strip().lower()
+    return mode if mode in {"none", "phase", "mean"} else "none"
 
 
 def _ema_update(prev, value, alpha):
@@ -199,6 +273,19 @@ def _hat_predict_probs(model, obs):
         return None
 
 
+def _predict_action1_prob(model, obs):
+    probs = _hat_predict_probs(model, obs)
+    try:
+        if probs is None:
+            return None
+        probs_arr = np.asarray(probs, dtype=float).reshape(-1)
+        if probs_arr.shape[0] < 2:
+            return None
+        return float(probs_arr[1])
+    except Exception:
+        return None
+
+
 def _hat_select_action(model, obs):
     probs = _hat_predict_probs(model, obs)
     if probs is None or len(probs) < 2:
@@ -252,6 +339,18 @@ def _flush_impl_reward_lists(env):
             state_row = {}
         action_val = removal_actions[_IMPL_REMOVAL_IDX] if _IMPL_REMOVAL_IDX < len(removal_actions) else state_row.get("action", "")
         state_row["action"] = action_val
+        try:
+            _decision_finalize(
+                row=state_row,
+                reward=reward,
+                action=action_val,
+                stage="receive_reward",
+                source="RL",
+                impl_stream="removal",
+                impl_list_idx=int(_IMPL_REMOVAL_IDX),
+            )
+        except Exception:
+            pass
         try:
             log_trace_from_row(state_row, "receive_reward", action=action_val, reward=reward, source="RL")
         except Exception:
@@ -307,6 +406,18 @@ def _flush_impl_reward_lists(env):
             state_row = {}
         action_val = insertion_actions[_IMPL_INSERTION_IDX] if _IMPL_INSERTION_IDX < len(insertion_actions) else state_row.get("action", "")
         state_row["action"] = action_val
+        try:
+            _decision_finalize(
+                row=state_row,
+                reward=reward,
+                action=action_val,
+                stage="receive_reward",
+                source="RL",
+                impl_stream="insertion",
+                impl_list_idx=int(_IMPL_INSERTION_IDX),
+            )
+        except Exception:
+            pass
         try:
             log_trace_from_row(state_row, "receive_reward", action=action_val, reward=reward, source="RL")
         except Exception:
@@ -406,7 +517,7 @@ MAX_STEPS = 20000
 SLIDING_WINDOW = 30
 TARGET_REWARD = 0.5
 recent_rewards = deque(maxlen=SLIDING_WINDOW)
-CURRICULUM_REWARD_THRESHOLD = 0.7
+CURRICULUM_REWARD_THRESHOLD = 0.85
 CURRICULUM_SUCCESS_REQUIRED = 3
 curriculum_converged = 0
 curriculum_last_avg_reward = ""
@@ -417,9 +528,9 @@ mode = (os.environ.get("RL_MODE", "barge") or "barge").strip().lower()
 
 TRACE_FIELDS = [
     "ts", "phase", "stage", "uncertainty_index", "request", "vehicle",
-    "table_number", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label",
+    "table_number", "table_id", "dynamic_t_begin", "duration_type", "gt_mean", "phase_label", "oracle_ctx_mode",
     "delay_tolerance", "severity", "passed_terminals", "current_time",
-    "action", "reward", "action_meaning", "feasible", "source",
+    "action", "reward", "action_meaning", "feasible", "source", "p_action1",
     # Drift/robustness interpretability fields (optional; safe to leave empty)
     "algo", "regime_id", "context_id", "drift_score",
     # LB-KLAC diagnostics
@@ -433,6 +544,10 @@ TRACE_FIELDS = [
     # PDI diagnostics
     "pdi_future_mean", "pdi_pref_mean", "pdi_hard_mean",
     "pdi_fail0_mean", "pdi_fail1_mean",
+    # ProtoMem diagnostics
+    "pm_route_entropy_mean", "pm_route_confidence_mean",
+    "pm_route_confidence_p25", "pm_route_confidence_p75",
+    "pm_proto_top1_entropy", "pm_param_norm_m",
 ]
 
 current_gt_mean = ""
@@ -454,9 +569,72 @@ TRAIN_FIELDS = [
     "value_pred_mean", "value_pred_std",
     "advantage_mean", "advantage_std",
     "explained_variance", "policy_entropy", "lstm_hidden_norm",
+    # Generic diagnostics for PPO_NEW v5+/v6+
+    "action1_rate", "p_action1", "reward_given_action0", "reward_given_action1",
+    # V5.1 AB-PPO diagnostics
+    "abppo_f0", "abppo_f1", "abppo_w0", "abppo_w1",
+    # V5.2 Q-critic diagnostics
+    "qcritic_q0", "qcritic_q1", "qcritic_q_taken",
+    "qcritic_adv_mean", "qcritic_adv_std",
+    "qcritic_adv0_mean", "qcritic_adv0_std",
+    "qcritic_adv1_mean", "qcritic_adv1_std",
+    # V5.3 Aux-Weak diagnostics
+    "aux_enabled", "aux_source", "aux_loss", "aux_y_mean", "aux_yhat_mean", "aux_acc", "aux_auc",
+    # V6 CVaR-tail diagnostics
+    "cvar_alpha", "cvar_beta", "cvar_quantile", "cvar_tail_frac",
+    "cvar_weight_mean", "cvar_tail_reward", "cvar_non_tail_reward",
+    # V7.3+/TCR diagnostics
+    "tcr_enabled", "tcr_rollout_groups", "tcr_trigger_events", "tcr_triggered_groups",
+    "tcr_trigger_group_ids", "tcr_new_samples", "tcr_buffer_size",
+    "tcr_action1_rate_trigger_mean", "tcr_reward_gap_trigger_mean",
+    "tcr_aux_loss", "tcr_aux_applied_batches", "tcr_teacher_mode",
+    # V8-A diagnostics
+    "v8_enabled", "v8_trigger_quality_mean", "v8_trigger_gap_score_mean",
+    "v8_selected_weight_mean", "v8_aux_boost_loss", "v8_aux_kl_guard_loss",
+    "v8_aux_weight_mean", "v8_aux_scale",
+    # V9-A diagnostics
+    "v9_enabled", "v9_gap_score_ema", "v9_kappa", "v9_kappa_mean", "v9_kappa_base",
+    # V8-A.2/V9-A.2 diagnostics
+    "v8a2_enabled", "v8a2_trigger_shortage_mean", "v8a2_trigger_low_ratio_mean",
+    "v8a2_generated_samples", "v8a2_target_action0_samples", "v8a2_target_action1_samples",
+    "v8a2_generated_target", "v8a2_generated_shortfall",
+    "v8a2_target_action_mode", "v8a2_aux_ce_loss", "v8a2_aux_kl_guard_loss",
+    "v8a2_aux_weight_mean", "v8a2_aux_scale",
+    "v9a2_enabled", "v9a2_shortage_ema", "v9a2_kappa", "v9a2_kappa_mean", "v9a2_kappa_base",
+    # Generic Phase2 visual markers
+    "phase2_active", "phase2_stage", "phase2_triggered_groups",
+    "phase2_new_samples", "phase2_generated_samples", "phase2_generated_target", "phase2_generated_shortfall", "phase2_target_action_mode",
+    "phase2_aux_applied_batches", "phase2_aux_ce_loss", "phase2_aux_kl_loss", "phase2_kappa",
     # PDI training diagnostics
     "pdi_future_loss", "pdi_teach_loss", "pdi_actfail_loss",
+    # ProtoMem training diagnostics
+    "pm_loss_sparse", "pm_loss_div", "pm_loss_stable", "pm_loss_aux",
+    "pm_grad_norm_m", "pm_route_entropy_mean", "pm_route_confidence_mean",
+    "pm_route_confidence_p25", "pm_route_confidence_p75",
+    "pm_proto_top1_entropy", "pm_proto_top1_entropy_over_phase", "pm_param_norm_m",
 ]
+
+DECISION_FIELDS = [
+    "ts_decision", "ts_reward",
+    "run_id", "decision_seq", "decision_id",
+    "phase", "stage_mode", "stage",
+    "uncertainty_index", "request", "vehicle", "pair_index",
+    "table_number", "dynamic_t_begin", "duration_type",
+    "gt_mean", "phase_label",
+    "action", "reward", "p_action1",
+    "matched", "impl_stream", "impl_list_idx",
+    "source", "h_index",
+]
+
+decision_seq = 0
+_decision_open_by_id = {}
+_decision_open_by_pair_key = {}
+_decision_open_queue_by_signature = {}
+_decision_open_order = deque()
+_decision_h_ids = []
+_decision_h_rows = []
+_decision_h_flush_interval = max(1, int(os.environ.get("RL_DECISION_H_FLUSH_INTERVAL", "200") or 200))
+_decision_h_last_flush_size = 0
 
 def _drift_snapshot():
     """
@@ -513,10 +691,12 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
             "request": row.get("request", ""),
             "vehicle": row.get("vehicle", ""),
             "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+            "table_id": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
             "dynamic_t_begin": getattr(Intermodal_ALNS34959, "dynamic_t_begin", ""),
             "duration_type": getattr(Intermodal_ALNS34959, "duration_type", ""),
             "gt_mean": current_gt_mean,
             "phase_label": current_phase_label,
+            "oracle_ctx_mode": _normalize_oracle_ctx_mode(globals().get("ORACLE_CTX_MODE", "none")),
             "delay_tolerance": row.get("delay_tolerance", ""),
             "severity": globals().get("severity_level", ""),
             "passed_terminals": row.get("passed_terminals", ""),
@@ -526,6 +706,7 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
             "action_meaning": action_meaning,
             "feasible": feasible,
             "source": source,
+            "p_action1": "",
         }
         payload.update(_drift_snapshot())
         # Best-effort MoE stats from policy (no impact on non-MoE runs).
@@ -538,6 +719,12 @@ def log_trace_from_row(row, stage, action=None, reward=None, feasible="", source
         try:
             if model is not None and hasattr(model, "policy") and hasattr(model.policy, "get_pdi_log"):
                 payload.update(model.policy.get_pdi_log())
+        except Exception:
+            pass
+        # Best-effort ProtoMem stats from policy
+        try:
+            if model is not None and hasattr(model, "policy") and hasattr(model.policy, "get_protomem_log"):
+                payload.update(model.policy.get_protomem_log())
         except Exception:
             pass
         if extra:
@@ -567,6 +754,426 @@ def log_training_row(phase, step_idx="", reward=None, avg_reward=None, std_rewar
         rl_logging.append_row("rl_training.csv", TRAIN_FIELDS, payload)
     except Exception as e:
         print("log_training_row error", e)
+
+
+def _maybe_console_phase2(extra, phase: str = "train"):
+    if not isinstance(extra, dict):
+        return
+    if str(os.environ.get("RL_PHASE2_CONSOLE", "1")).strip() != "1":
+        return
+    try:
+        active = int(float(extra.get("phase2_active", 0) or 0))
+    except Exception:
+        active = 0
+    if active <= 0:
+        return
+    stage = str(extra.get("phase2_stage", "") or "")
+    groups = int(float(extra.get("phase2_triggered_groups", 0) or 0))
+    new_samples = int(float(extra.get("phase2_new_samples", 0) or 0))
+    gen_samples = int(float(extra.get("phase2_generated_samples", 0) or 0))
+    gen_target = int(float(extra.get("phase2_generated_target", 0) or 0))
+    gen_shortfall = int(float(extra.get("phase2_generated_shortfall", 0) or 0))
+    aux_batches = int(float(extra.get("phase2_aux_applied_batches", 0) or 0))
+    kappa = extra.get("phase2_kappa", "")
+    target_mode = str(extra.get("phase2_target_action_mode", "") or "")
+    use_color = str(os.environ.get("RL_PHASE2_COLOR", "1")).strip() == "1"
+    prefix = f"[PHASE2][{str(phase or '').upper()}]"
+    if use_color:
+        prefix = f"\033[95m{prefix}\033[0m"
+    print(
+        f"{prefix} stage={stage} groups={groups} new={new_samples} "
+        f"generated={gen_samples}/{gen_target if gen_target > 0 else 'na'} "
+        f"shortfall={gen_shortfall} aux_batches={aux_batches} "
+        f"target_mode={target_mode if target_mode else 'na'} kappa={kappa if kappa != '' else 'na'}"
+    )
+
+
+def _decision_current_phase():
+    return "implement" if int(globals().get("implement", 0) or 0) == 1 else "train"
+
+
+def _decision_run_id():
+    try:
+        run_dir = rl_logging.get_run_dir()
+        if run_dir is not None:
+            return Path(run_dir).name
+    except Exception:
+        pass
+    return str(os.environ.get("RL_RUN_ID", "") or "")
+
+
+def _decision_to_dict(row):
+    if isinstance(row, dict):
+        return dict(row)
+    try:
+        if hasattr(row, "to_dict"):
+            data = row.to_dict()
+            if isinstance(data, dict):
+                return dict(data)
+    except Exception:
+        pass
+    return {}
+
+
+def _decision_to_action_value(value):
+    try:
+        arr = np.asarray(value).reshape(-1)
+        if arr.size == 0:
+            return ""
+        return int(arr[0])
+    except Exception:
+        return value if value is not None else ""
+
+
+def _decision_to_float_or_empty(value):
+    if value in ("", None):
+        return ""
+    try:
+        arr = np.asarray(value).reshape(-1)
+        if arr.size == 0:
+            return ""
+        return float(arr[0])
+    except Exception:
+        return ""
+
+
+def _decision_capture_obs(obs_snapshot):
+    if obs_snapshot is None:
+        return None
+    try:
+        arr = np.asarray(obs_snapshot, dtype=np.float32)
+        if arr.size == 0:
+            return None
+        return arr.reshape(-1).copy()
+    except Exception:
+        return None
+
+
+def _decision_get_p_action1(trace_extra):
+    if not isinstance(trace_extra, dict):
+        return ""
+    return _decision_to_float_or_empty(trace_extra.get("p_action1", ""))
+
+
+def _decision_signature(row_dict, phase):
+    return "|".join(
+        [
+            str(phase),
+            str(row_dict.get("uncertainty_index", "")),
+            str(row_dict.get("vehicle", "")),
+            str(row_dict.get("request", "")),
+            str(row_dict.get("uncertainty_type", "")),
+        ]
+    )
+
+
+def _decision_pair_key(row_dict, phase):
+    return _decision_signature(row_dict, phase) + "|pair=" + str(row_dict.get("pair_index", ""))
+
+
+def _decision_next_id(phase):
+    global decision_seq
+    decision_seq += 1
+    seq = int(decision_seq)
+    return seq, f"{_decision_run_id()}|{phase}|{seq}"
+
+
+def _decision_queue_append(signature, decision_id):
+    queue = _decision_open_queue_by_signature.get(signature)
+    if queue is None:
+        queue = deque()
+        _decision_open_queue_by_signature[signature] = queue
+    queue.append(decision_id)
+
+
+def _decision_remove_open(decision_id):
+    pending = _decision_open_by_id.pop(decision_id, None)
+    if not isinstance(pending, dict):
+        return
+    pair_key = str(pending.get("pair_key", ""))
+    if pair_key and _decision_open_by_pair_key.get(pair_key) == decision_id:
+        _decision_open_by_pair_key.pop(pair_key, None)
+    signature = str(pending.get("signature", ""))
+    if signature in _decision_open_queue_by_signature:
+        queue = _decision_open_queue_by_signature.get(signature)
+        if queue is not None:
+            new_queue = deque([item for item in queue if item != decision_id])
+            if len(new_queue) > 0:
+                _decision_open_queue_by_signature[signature] = new_queue
+            else:
+                _decision_open_queue_by_signature.pop(signature, None)
+    try:
+        _decision_open_order.remove(decision_id)
+    except Exception:
+        pass
+
+
+def _decision_note_send(row, action, obs_snapshot=None, trace_extra=None, source="RL"):
+    row_dict = _decision_to_dict(row)
+    phase = _decision_current_phase()
+    signature = _decision_signature(row_dict, phase)
+    pair_key = _decision_pair_key(row_dict, phase)
+    existing_id = _decision_open_by_pair_key.get(pair_key)
+    if existing_id in _decision_open_by_id:
+        pending = _decision_open_by_id.get(existing_id, {})
+        if pending.get("obs_snapshot") is None:
+            pending["obs_snapshot"] = _decision_capture_obs(obs_snapshot)
+        p_action1 = _decision_get_p_action1(trace_extra)
+        if p_action1 != "":
+            pending["p_action1"] = p_action1
+        _decision_open_by_id[existing_id] = pending
+        return existing_id
+    seq, decision_id = _decision_next_id(phase)
+    pending = {
+        "run_id": _decision_run_id(),
+        "decision_seq": seq,
+        "decision_id": decision_id,
+        "phase": phase,
+        "stage_mode": str(globals().get("STAGE_MODE", "")),
+        "ts_decision": rl_logging.now_ts(),
+        "action": _decision_to_action_value(action),
+        "p_action1": _decision_get_p_action1(trace_extra),
+        "row_dict": row_dict,
+        "signature": signature,
+        "pair_key": pair_key,
+        "source": source,
+        "obs_snapshot": _decision_capture_obs(obs_snapshot),
+    }
+    _decision_open_by_id[decision_id] = pending
+    _decision_open_by_pair_key[pair_key] = decision_id
+    _decision_queue_append(signature, decision_id)
+    _decision_open_order.append(decision_id)
+    return decision_id
+
+
+def _decision_pick_pending_id(row_dict, phase):
+    pair_key = _decision_pair_key(row_dict, phase)
+    decision_id = _decision_open_by_pair_key.get(pair_key, "")
+    if decision_id in _decision_open_by_id:
+        return decision_id
+    signature = _decision_signature(row_dict, phase)
+    queue = _decision_open_queue_by_signature.get(signature)
+    if queue is not None:
+        while len(queue) > 0:
+            candidate = queue[0]
+            if candidate in _decision_open_by_id:
+                return candidate
+            queue.popleft()
+        _decision_open_queue_by_signature.pop(signature, None)
+    for candidate in list(_decision_open_order):
+        pending = _decision_open_by_id.get(candidate)
+        if isinstance(pending, dict) and str(pending.get("phase", "")) == str(phase):
+            return candidate
+    return ""
+
+
+def _decision_extract_h64(obs_snapshot):
+    if obs_snapshot is None:
+        return None
+    policy = getattr(globals().get("model", None), "policy", None)
+    extractor = getattr(policy, "features_extractor", None)
+    if extractor is None:
+        return None
+    if extractor.__class__.__name__ != "StackedContextExtractor":
+        return None
+    try:
+        arr = np.asarray(obs_snapshot, dtype=np.float32).reshape(1, -1)
+    except Exception:
+        return None
+    try:
+        expected_dim = int(getattr(extractor, "obs_dim", 0) or 0)
+    except Exception:
+        expected_dim = 0
+    if expected_dim > 0 and int(arr.shape[1]) != expected_dim:
+        return None
+    try:
+        import torch
+    except Exception:
+        return None
+    param = None
+    try:
+        param = next(extractor.parameters())
+    except Exception:
+        param = None
+    device = param.device if param is not None else "cpu"
+    was_training = bool(getattr(extractor, "training", False))
+    try:
+        extractor.eval()
+        with torch.no_grad():
+            obs_tensor = torch.as_tensor(arr, dtype=torch.float32, device=device)
+            h = extractor(obs_tensor)
+            h_arr = np.asarray(h.detach().cpu().numpy(), dtype=np.float32).reshape(-1)
+    except Exception:
+        h_arr = None
+    finally:
+        try:
+            extractor.train(was_training)
+        except Exception:
+            pass
+    if h_arr is None or h_arr.size != 64:
+        return None
+    return h_arr
+
+
+def _decision_flush_h_dump():
+    global _decision_h_last_flush_size
+    try:
+        run_dir = rl_logging.get_run_dir()
+        if run_dir is None:
+            return
+        out_path = Path(run_dir) / "h_dump.npz"
+        decision_ids = np.asarray(_decision_h_ids, dtype=object)
+        if _decision_h_rows:
+            h_mat = np.vstack(_decision_h_rows).astype(np.float32, copy=False)
+        else:
+            h_mat = np.zeros((0, 64), dtype=np.float32)
+        np.savez(out_path, decision_id=decision_ids, h=h_mat)
+        _decision_h_last_flush_size = len(_decision_h_ids)
+    except Exception:
+        pass
+
+
+def _decision_append_h(decision_id, h_vec):
+    if h_vec is None:
+        return -1
+    try:
+        h_arr = np.asarray(h_vec, dtype=np.float32).reshape(-1)
+    except Exception:
+        return -1
+    if h_arr.size != 64:
+        return -1
+    h_index = len(_decision_h_ids)
+    _decision_h_ids.append(str(decision_id))
+    _decision_h_rows.append(h_arr)
+    if (len(_decision_h_ids) - int(_decision_h_last_flush_size)) >= int(_decision_h_flush_interval):
+        _decision_flush_h_dump()
+    return int(h_index)
+
+
+def _decision_finalize(row, reward, action=None, stage="receive_reward", source="RL", impl_stream="", impl_list_idx=""):
+    row_dict = _decision_to_dict(row)
+    phase = _decision_current_phase()
+    decision_id = _decision_pick_pending_id(row_dict, phase)
+    pending = _decision_open_by_id.get(decision_id) if decision_id else None
+    matched = 1 if isinstance(pending, dict) else 0
+
+    if matched == 0:
+        seq, decision_id = _decision_next_id(phase)
+        pending = {
+            "run_id": _decision_run_id(),
+            "decision_seq": seq,
+            "decision_id": decision_id,
+            "phase": phase,
+            "stage_mode": str(globals().get("STAGE_MODE", "")),
+            "ts_decision": rl_logging.now_ts(),
+            "action": _decision_to_action_value(action if action is not None else row_dict.get("action", "")),
+            "p_action1": "",
+            "row_dict": row_dict,
+            "signature": _decision_signature(row_dict, phase),
+            "pair_key": _decision_pair_key(row_dict, phase),
+            "source": source,
+            "obs_snapshot": None,
+        }
+
+    action_val = _decision_to_action_value(
+        action if action is not None else pending.get("action", row_dict.get("action", ""))
+    )
+    p_action1 = pending.get("p_action1", "")
+    reward_val = _decision_to_float_or_empty(reward)
+
+    h_index = -1
+    if matched == 1:
+        h_vec = _decision_extract_h64(pending.get("obs_snapshot"))
+        h_index = _decision_append_h(decision_id, h_vec)
+
+    payload = {
+        "ts_decision": pending.get("ts_decision", rl_logging.now_ts()),
+        "ts_reward": rl_logging.now_ts(),
+        "run_id": pending.get("run_id", _decision_run_id()),
+        "decision_seq": pending.get("decision_seq", ""),
+        "decision_id": decision_id,
+        "phase": phase,
+        "stage_mode": pending.get("stage_mode", str(globals().get("STAGE_MODE", ""))),
+        "stage": stage,
+        "uncertainty_index": row_dict.get("uncertainty_index", pending.get("row_dict", {}).get("uncertainty_index", "")),
+        "request": row_dict.get("request", pending.get("row_dict", {}).get("request", "")),
+        "vehicle": row_dict.get("vehicle", pending.get("row_dict", {}).get("vehicle", "")),
+        "pair_index": row_dict.get("pair_index", pending.get("row_dict", {}).get("pair_index", "")),
+        "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+        "dynamic_t_begin": getattr(Intermodal_ALNS34959, "dynamic_t_begin", ""),
+        "duration_type": getattr(Intermodal_ALNS34959, "duration_type", ""),
+        "gt_mean": current_gt_mean,
+        "phase_label": str(current_phase_label or ""),
+        "action": action_val,
+        "reward": reward_val,
+        "p_action1": p_action1,
+        "matched": int(matched),
+        "impl_stream": impl_stream if phase == "implement" else "",
+        "impl_list_idx": impl_list_idx if phase == "implement" else "",
+        "source": source,
+        "h_index": h_index,
+    }
+    try:
+        rl_logging.append_row("rl_decision.csv", DECISION_FIELDS, payload)
+    except Exception:
+        pass
+    if matched == 1:
+        _decision_remove_open(decision_id)
+
+
+def _decision_flush_unmatched_rows():
+    for decision_id in list(_decision_open_order):
+        pending = _decision_open_by_id.get(decision_id)
+        if not isinstance(pending, dict):
+            continue
+        row_dict = pending.get("row_dict", {}) if isinstance(pending.get("row_dict", {}), dict) else {}
+        phase = str(pending.get("phase", _decision_current_phase()))
+        payload = {
+            "ts_decision": pending.get("ts_decision", rl_logging.now_ts()),
+            "ts_reward": rl_logging.now_ts(),
+            "run_id": pending.get("run_id", _decision_run_id()),
+            "decision_seq": pending.get("decision_seq", ""),
+            "decision_id": decision_id,
+            "phase": phase,
+            "stage_mode": pending.get("stage_mode", str(globals().get("STAGE_MODE", ""))),
+            "stage": "unmatched",
+            "uncertainty_index": row_dict.get("uncertainty_index", ""),
+            "request": row_dict.get("request", ""),
+            "vehicle": row_dict.get("vehicle", ""),
+            "pair_index": row_dict.get("pair_index", ""),
+            "table_number": getattr(Dynamic_ALNS_RL34959, "table_number", ""),
+            "dynamic_t_begin": getattr(Intermodal_ALNS34959, "dynamic_t_begin", ""),
+            "duration_type": getattr(Intermodal_ALNS34959, "duration_type", ""),
+            "gt_mean": current_gt_mean,
+            "phase_label": str(current_phase_label or ""),
+            "action": pending.get("action", ""),
+            "reward": "",
+            "p_action1": pending.get("p_action1", ""),
+            "matched": 0,
+            "impl_stream": "",
+            "impl_list_idx": "",
+            "source": pending.get("source", "RL"),
+            "h_index": -1,
+        }
+        try:
+            rl_logging.append_row("rl_decision.csv", DECISION_FIELDS, payload)
+        except Exception:
+            pass
+        _decision_remove_open(decision_id)
+
+
+def _decision_finalize_on_exit():
+    try:
+        _decision_flush_unmatched_rows()
+    except Exception:
+        pass
+    try:
+        _decision_flush_h_dump()
+    except Exception:
+        pass
+
+
+atexit.register(_decision_finalize_on_exit)
 
 
 class LstmStatsCallback(BaseCallback):
@@ -634,6 +1241,121 @@ class LstmStatsCallback(BaseCallback):
             log_training_row("train", step_idx=next_step(), extra=extra)
         except Exception:
             return
+
+
+class TCRRolloutStatsCallback(BaseCallback):
+    """
+    Collect rollout step records (group/action/reward/obs) and pass to TCR-enabled PPO_NEW.
+    """
+
+    def __init__(self):
+        if BaseCallback is None:
+            raise ImportError("stable_baselines3 is required for TCRRolloutStatsCallback.")
+        super().__init__()
+        self._records = []
+
+    @staticmethod
+    def _to_item_list(value, expected_len):
+        if expected_len <= 0:
+            return []
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+            if len(items) >= expected_len:
+                return items[:expected_len]
+            if not items:
+                return [None] * expected_len
+            return items + [items[-1]] * (expected_len - len(items))
+        arr = np.asarray(value)
+        if expected_len == 1:
+            return [arr]
+        if arr.ndim >= 1 and arr.shape[0] == expected_len:
+            return [arr[i] for i in range(expected_len)]
+        return [arr for _ in range(expected_len)]
+
+    @staticmethod
+    def _to_scalar_int(value, default=0):
+        try:
+            arr = np.asarray(value).reshape(-1)
+            if arr.size == 0:
+                return int(default)
+            return int(arr[0])
+        except Exception:
+            return int(default)
+
+    @staticmethod
+    def _to_scalar_float(value, default=0.0):
+        try:
+            arr = np.asarray(value).reshape(-1)
+            if arr.size == 0:
+                return float(default)
+            return float(arr[0])
+        except Exception:
+            return float(default)
+
+    def _on_step(self) -> bool:
+        try:
+            infos = self.locals.get("infos", None)
+            if infos is None:
+                return True
+            if not isinstance(infos, (list, tuple)):
+                infos = [infos]
+            n_envs = len(infos)
+            if n_envs <= 0:
+                return True
+
+            actions = self._to_item_list(self.locals.get("actions", None), n_envs)
+            rewards = self._to_item_list(self.locals.get("rewards", None), n_envs)
+
+            obs_source = self.locals.get("new_obs", None)
+            if obs_source is None:
+                obs_source = getattr(self.model, "_last_obs", None)
+            obs_list = self._to_item_list(obs_source, n_envs)
+
+            for i in range(n_envs):
+                info_i = infos[i] if i < len(infos) and isinstance(infos[i], dict) else {}
+                row_dict = info_i.get("row_dict", {}) if isinstance(info_i, dict) else {}
+                try:
+                    if hasattr(row_dict, "to_dict"):
+                        row_dict = row_dict.to_dict()
+                except Exception:
+                    row_dict = {}
+
+                phase_label = ""
+                try:
+                    phase_label = str(info_i.get("phase_label", "") or row_dict.get("phase_label", "") or "")
+                except Exception:
+                    phase_label = ""
+                if phase_label == "":
+                    phase_label = str(globals().get("current_phase_label", "") or "")
+                if phase_label == "":
+                    phase_label = "unknown"
+
+                obs_i = obs_list[i] if i < len(obs_list) else None
+                if obs_i is None:
+                    continue
+                obs_arr = np.asarray(obs_i, dtype=np.float32)
+                if obs_arr.size == 0:
+                    continue
+
+                self._records.append(
+                    {
+                        "group": phase_label,
+                        "action": self._to_scalar_int(actions[i] if i < len(actions) else 0),
+                        "reward": self._to_scalar_float(rewards[i] if i < len(rewards) else 0.0),
+                        "obs": obs_arr.copy(),
+                    }
+                )
+        except Exception:
+            pass
+        return True
+
+    def _on_rollout_end(self) -> None:
+        try:
+            if hasattr(self.model, "tcr_consume_rollout"):
+                self.model.tcr_consume_rollout(self._records)
+        except Exception:
+            pass
+        self._records = []
 
 
 def evaluate_recurrent_policy(model, env, n_eval_episodes=1):
@@ -712,7 +1434,7 @@ def stop_wait():
             save_plot_reward_list()
             sys.exit(78)
 #@profile()
-def send_action(action):
+def send_action(action, trace_extra=None, obs_snapshot=None):
     # global only_stop_once_by_implementation
     if stop_everything_in_learning_and_go_to_implementation_phase == 1:
         return
@@ -768,7 +1490,18 @@ def send_action(action):
                             row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
                         except:
                             row_dict = {}
-                        log_trace_from_row(row_dict, "send_action", action=action, source="RL")
+                        row_dict["pair_index"] = pair_index
+                        try:
+                            _decision_note_send(
+                                row=row_dict,
+                                action=action,
+                                obs_snapshot=obs_snapshot,
+                                trace_extra=trace_extra,
+                                source="RL",
+                            )
+                        except Exception:
+                            pass
+                        log_trace_from_row(row_dict, "send_action", action=action, source="RL", extra=trace_extra)
                         break
                     except:
                         print("Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action")
@@ -932,19 +1665,221 @@ class coordinationEnv(Env):
         # Cost array
         # self.observation_space = Box(low=np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), high=np.array([24, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 24, 14]))
         if add_event_types == 1:
-            base_low = [0, 0, 0]
-            base_high = [200, 6, 6]
+            raw_low = [0, 0, 0]
+            raw_high = [200, 6, 6]
         else:
-            base_low = [0, 0]
-            base_high = [200, 6]
-        if STAGE_IN_OBS:
-            base_low = base_low + [0, 0]
-            base_high = base_high + [1, 1]
-        self.observation_space = Box(low=np.array(base_low), high=np.array(base_high))
+            raw_low = [0, 0]
+            raw_high = [200, 6]
+        self._raw_low = np.array(raw_low, dtype=np.float32)
+        self._raw_high = np.array(raw_high, dtype=np.float32)
+        self._raw_obs_dim = int(self._raw_low.shape[0])
+        self.use_augmented_obs = bool(globals().get("USE_AUGMENTED_OBS", False))
+        self.oracle_ctx_mode = _normalize_oracle_ctx_mode(globals().get("ORACLE_CTX_MODE", "none"))
+        try:
+            self._oracle_gt_mean_norm = float(globals().get("ORACLE_GT_MEAN_NORM", 100.0))
+        except Exception:
+            self._oracle_gt_mean_norm = 100.0
+        if self._oracle_gt_mean_norm <= 0:
+            self._oracle_gt_mean_norm = 100.0
+        self._oracle_phase_to_id = {}
+        self._oracle_mapping_path = None
+        self._oracle_phase_dim = 0
+        self._oracle_other_key = "__OTHER__"
+        self._oracle_other_id = 0
+        if self.use_augmented_obs and self.oracle_ctx_mode == "phase":
+            phase_classes = int(globals().get("ORACLE_PHASE_CLASSES", 0) or 0)
+            if phase_classes <= 0:
+                phase_classes = self._infer_default_phase_classes()
+            self._oracle_phase_dim = max(1, phase_classes)
+            self._oracle_other_id = max(0, self._oracle_phase_dim - 1)
+            self._oracle_phase_to_id = {self._oracle_other_key: self._oracle_other_id}
+            self._oracle_mapping_path = Path(rl_logging.get_run_dir()) / "oracle_phase_label_map.json"
+            self._save_phase_mapping(reason="init")
+        if self.use_augmented_obs and self.oracle_ctx_mode == "phase":
+            self._oracle_ctx_dim = 1 + self._oracle_phase_dim  # stage + onehot(phase)
+        elif self.use_augmented_obs and self.oracle_ctx_mode == "mean":
+            self._oracle_ctx_dim = 2  # stage + gt_mean_norm
+        else:
+            self._oracle_ctx_dim = 0
+        if self.use_augmented_obs:
+            self._aug_window_k = int(max(1, globals().get("PPO_NEW_WINDOW_K", 1)))
+            delta_low = self._raw_low - self._raw_high
+            delta_high = self._raw_high - self._raw_low
+            frame_low = np.concatenate(
+                [self._raw_low, np.array([0.0, 0.0, 0.0], dtype=np.float32), delta_low]
+            ).astype(np.float32)
+            frame_high = np.concatenate(
+                [self._raw_high, np.array([1.0, 1.0, 1.0], dtype=np.float32), delta_high]
+            ).astype(np.float32)
+            if self._oracle_ctx_dim > 0:
+                oracle_low, oracle_high = self._oracle_low_high()
+                frame_low = np.concatenate([frame_low, oracle_low]).astype(np.float32)
+                frame_high = np.concatenate([frame_high, oracle_high]).astype(np.float32)
+            self._aug_x_dim = int(frame_low.shape[0])
+            if self._aug_window_k > 1:
+                low = np.tile(frame_low, self._aug_window_k).astype(np.float32)
+                high = np.tile(frame_high, self._aug_window_k).astype(np.float32)
+            else:
+                low = frame_low
+                high = frame_high
+        else:
+            self._aug_window_k = 1
+            self._aug_x_dim = 0
+            base_low = list(raw_low)
+            base_high = list(raw_high)
+            if STAGE_IN_OBS:
+                base_low = base_low + [0, 0]
+                base_high = base_high + [1, 1]
+            low = np.array(base_low, dtype=np.float32)
+            high = np.array(base_high, dtype=np.float32)
+        self.observation_space = Box(low=low, high=high, dtype=np.float32)
+        self._prev_o = None
+        self._prev_action = 0.0
+        self._prev_reward = 0.0
+        self._stage_bit = 0.0
+        self._x_history = deque(maxlen=max(1, self._aug_window_k))
         # self.state = [random.choice(range(0,24)), random.choice(range(0,11))]
         # Set coordination length
         self.horizon_length = 0
         # self.dis = 0
+
+    def _infer_default_phase_classes(self):
+        # Reserve one fallback slot (__OTHER__) to avoid shape changes mid-run.
+        scenario = str(globals().get("SCENARIO_NAME", "") or "").upper()
+        base = 3 if scenario.startswith("G_") else 2
+        return int(base + 1)
+
+    def _save_phase_mapping(self, reason="update"):
+        if self._oracle_mapping_path is None:
+            return
+        try:
+            payload = {
+                "reason": str(reason),
+                "oracle_ctx_mode": self.oracle_ctx_mode,
+                "algo_version": str(globals().get("ALGO_VERSION", "")),
+                "scenario_name": str(globals().get("SCENARIO_NAME", "")),
+                "phase_dim": int(self._oracle_phase_dim),
+                "other_key": self._oracle_other_key,
+                "other_id": int(self._oracle_other_id),
+                "phase_to_id": dict(self._oracle_phase_to_id),
+                "gt_mean_norm_denom": float(self._oracle_gt_mean_norm),
+                "updated_at": float(time.time()),
+            }
+            self._oracle_mapping_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._oracle_mapping_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _oracle_low_high(self):
+        if self.oracle_ctx_mode == "phase":
+            low = np.concatenate(
+                [
+                    np.array([0.0], dtype=np.float32),
+                    np.zeros(int(self._oracle_phase_dim), dtype=np.float32),
+                ]
+            ).astype(np.float32)
+            high = np.concatenate(
+                [
+                    np.array([1.0], dtype=np.float32),
+                    np.ones(int(self._oracle_phase_dim), dtype=np.float32),
+                ]
+            ).astype(np.float32)
+            return low, high
+        if self.oracle_ctx_mode == "mean":
+            # stage in [0,1], normalized mean kept in a conservative bounded range.
+            return (
+                np.array([0.0, -10.0], dtype=np.float32),
+                np.array([1.0, 10.0], dtype=np.float32),
+            )
+        return (
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+        )
+
+    def _phase_to_id(self, phase_label):
+        label = str(phase_label or "").strip()
+        if not label:
+            label = "__EMPTY__"
+        if label in self._oracle_phase_to_id:
+            return int(self._oracle_phase_to_id[label])
+        used_ids = set(int(v) for v in self._oracle_phase_to_id.values())
+        assignable_ids = [
+            idx
+            for idx in range(int(self._oracle_phase_dim))
+            if idx != int(self._oracle_other_id) and idx not in used_ids
+        ]
+        if assignable_ids:
+            mapped = int(assignable_ids[0])
+        else:
+            mapped = int(self._oracle_other_id)
+        self._oracle_phase_to_id[label] = mapped
+        self._save_phase_mapping(reason="phase_label_seen")
+        return mapped
+
+    def _get_phase_onehot(self):
+        if int(self._oracle_phase_dim) <= 0:
+            return np.zeros(0, dtype=np.float32)
+        phase_vec = np.zeros(int(self._oracle_phase_dim), dtype=np.float32)
+        idx = self._phase_to_id(current_phase_label)
+        if 0 <= idx < int(self._oracle_phase_dim):
+            phase_vec[idx] = 1.0
+        return phase_vec
+
+    def _get_gt_mean_norm(self):
+        try:
+            gt = float(current_gt_mean)
+        except Exception:
+            gt = 0.0
+        return float(gt / float(self._oracle_gt_mean_norm))
+
+    def _compose_oracle_ctx(self, stage_bit):
+        mode = self.oracle_ctx_mode
+        if mode == "phase":
+            phase_vec = self._get_phase_onehot()
+            return np.concatenate(
+                [np.array([float(stage_bit)], dtype=np.float32), phase_vec.astype(np.float32)]
+            ).astype(np.float32)
+        if mode == "mean":
+            return np.array([float(stage_bit), float(self._get_gt_mean_norm())], dtype=np.float32)
+        return np.zeros(0, dtype=np.float32)
+
+    def _get_stage_bit(self):
+        label = str(current_stage_label or "").lower()
+        self._stage_bit = 1.0 if "insert" in label else 0.0
+        return self._stage_bit
+
+    def _extract_raw_obs(self, obs):
+        arr = np.asarray(obs, dtype=np.float32).reshape(-1)
+        return arr[: self._raw_obs_dim]
+
+    def _compose_augmented(self, obs_now, action_prev, reward_prev, prev_obs):
+        obs_vec = np.asarray(obs_now, dtype=np.float32).reshape(-1)
+        prev_vec = np.asarray(prev_obs, dtype=np.float32).reshape(-1)
+        delta_vec = obs_vec - prev_vec
+        stage_bit = float(self._get_stage_bit())
+        pieces = [
+            obs_vec,
+            np.array([stage_bit], dtype=np.float32),
+            np.array([float(action_prev)], dtype=np.float32),
+            np.array([float(reward_prev)], dtype=np.float32),
+            delta_vec.astype(np.float32),
+        ]
+        if self._oracle_ctx_dim > 0:
+            pieces.append(self._compose_oracle_ctx(stage_bit))
+        return np.concatenate(pieces).astype(np.float32)
+
+    def _stack_augmented(self, x_now, reset_fill=False):
+        x_vec = np.asarray(x_now, dtype=np.float32).reshape(-1)
+        if self._aug_window_k <= 1:
+            return x_vec
+        if reset_fill or len(self._x_history) == 0:
+            self._x_history.clear()
+            for _ in range(self._aug_window_k):
+                self._x_history.append(x_vec.copy())
+        else:
+            self._x_history.appendleft(x_vec.copy())
+        return np.concatenate(list(self._x_history), axis=0).astype(np.float32)
 
     #@profile()
     def step(self, action):
@@ -958,6 +1893,7 @@ class coordinationEnv(Env):
         except Exception:
             pass
         info = {}
+        next_state_raw = None
 
         # truck picks up containers at A, then go to B to transfer to barge, plan transshipment time is 30
         # between A and B, 300 km, truck speed 75 km/h, so 4 hour go to terminal B, truck on route 5/h
@@ -998,6 +1934,8 @@ class coordinationEnv(Env):
                     if _hat_is_active():
                         _hat_update_stats(reward, action)
                         _hat_update_train_params()
+                    if self.use_augmented_obs:
+                        next_state_raw = self._extract_raw_obs(self.state)
                     return self.state, reward, True, {}
                 state_key = random.choice(state_keys)
                 action_map = state_action_reward_collect_for_evaluate.get(state_key, {})
@@ -1011,10 +1949,12 @@ class coordinationEnv(Env):
                 if _hat_is_active():
                     _hat_update_stats(reward, action)
                     _hat_update_train_params()
+                if self.use_augmented_obs:
+                    next_state_raw = self._extract_raw_obs(self.state)
             else:
                 if stop_everything_in_learning_and_go_to_implementation_phase == 1:
                     return self.state, 0, True, {}
-                send_action(action)
+                send_action(action, obs_snapshot=self.state)
 
                 #get the reward from ALNS
                 wait_start = time.time()
@@ -1055,18 +1995,37 @@ class coordinationEnv(Env):
                                 _hat_update_stats(reward, action)
                                 _hat_update_train_params()
                             step_id = next_step()
+                            if self.use_augmented_obs:
+                                try:
+                                    next_state_raw = self._extract_raw_obs(
+                                        get_state(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
+                                    )
+                                except Exception:
+                                    next_state_raw = self._extract_raw_obs(self.state)
                             try:
                                 row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
                             except:
                                 row_dict = {}
+                            row_dict["pair_index"] = pair_index
                             uncertainty_type = Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index]
                             info = {
                                 "row_dict": row_dict,
                                 "uncertainty_type": uncertainty_type,
                                 "pair_index": pair_index,
+                                "phase_label": str(current_phase_label or ""),
                             }
                             if not LBKLAC_CUSTOM_LOGGING:
                                 log_training_row("implement" if implement == 1 else "train", step_idx=step_id, reward=reward)
+                                try:
+                                    _decision_finalize(
+                                        row=row_dict,
+                                        reward=reward,
+                                        action=row_dict.get("action", action),
+                                        stage="receive_reward",
+                                        source="RL",
+                                    )
+                                except Exception:
+                                    pass
                                 log_trace_from_row(row_dict, "receive_reward", action=row_dict.get('action', ''), reward=reward, source="RL")
                             # parallel_save_excel(path + 'state_reward_pairs.xlsx', state_reward_pairs, 'state_reward_pairs')
                             #drop the finish
@@ -1076,7 +2035,7 @@ class coordinationEnv(Env):
                             break_flag = 1
                             break
                         elif Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] == -10000000:
-                            send_action(action)
+                            send_action(action, obs_snapshot=self.state)
                         # except:
                         #     break
                     if break_flag == 1:
@@ -1260,6 +2219,23 @@ class coordinationEnv(Env):
         # Set placeholder for info (if not already populated)
         if not info:
             info = {}
+        if self.use_augmented_obs:
+            if next_state_raw is None:
+                next_state_raw = self._extract_raw_obs(self.state)
+            next_state_raw = np.asarray(next_state_raw, dtype=np.float32).reshape(-1)
+            prev_obs = self._prev_o
+            if prev_obs is None or np.asarray(prev_obs).shape != next_state_raw.shape:
+                prev_obs = next_state_raw
+            x_now = self._compose_augmented(
+                obs_now=next_state_raw,
+                action_prev=self._prev_action,
+                reward_prev=self._prev_reward,
+                prev_obs=prev_obs,
+            )
+            self.state = self._stack_augmented(x_now, reset_fill=False)
+            self._prev_o = next_state_raw.copy()
+            self._prev_action = float(action)
+            self._prev_reward = float(reward)
         print(time_s)
         # Return step information
         print(self.state, 'action', action,  reward)
@@ -1345,6 +2321,18 @@ class coordinationEnv(Env):
         # Reset coordination time
         self.horizon_length = 0
         # self.dis = 0
+        if self.use_augmented_obs:
+            raw_state = self._extract_raw_obs(self.state)
+            self._prev_o = raw_state.copy()
+            self._prev_action = 0.0
+            self._prev_reward = 0.0
+            x0 = self._compose_augmented(
+                obs_now=raw_state,
+                action_prev=self._prev_action,
+                reward_prev=self._prev_reward,
+                prev_obs=self._prev_o,
+            )
+            self.state = self._stack_augmented(x0, reset_fill=True)
         return self.state
 
 def get_new_seq():
@@ -1380,7 +2368,7 @@ def append_new_line(file_name, text_to_append):
         file_object.write(text_to_append)
 
 def main(algorithm2, mode2):
-    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward, LBKLAC_CUSTOM_LOGGING, USE_LSTM, STAGE_IN_OBS, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP, PDI_GT_MEAN_LIST, PDI_PHASE_LIST, PDI_REWARD_LIST
+    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward, LBKLAC_CUSTOM_LOGGING, USE_LSTM, STAGE_IN_OBS, USE_AUGMENTED_OBS, ALGO_VERSION, PPO_NEW_WINDOW_K, STAGE_MODE, INIT_MODEL_PATH, SAVE_MODEL_PATH, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP, ORACLE_CTX_MODE, ORACLE_GT_MEAN_NORM, ORACLE_PHASE_CLASSES, PDI_GT_MEAN_LIST, PDI_PHASE_LIST, PDI_REWARD_LIST
     add_event_types =0 
     stop_everything_in_learning_and_go_to_implementation_phase = 0
     clear_pairs_done = 0
@@ -1400,6 +2388,84 @@ def main(algorithm2, mode2):
     iteration_times = 0
     #actual
     algorithm, mode = algorithm2, mode2
+    ALGO_VERSION = (os.environ.get("RL_ALGO_VERSION", "v1") or "v1").strip().lower()
+    STAGE_MODE = _normalize_stage_mode(os.environ.get("RL_STAGE_MODE", "train_eval"))
+    INIT_MODEL_PATH = (os.environ.get("RL_INIT_MODEL_PATH", "") or "").strip()
+    SAVE_MODEL_PATH = (os.environ.get("RL_SAVE_MODEL_PATH", "") or "").strip()
+    ppo_new_plain_obs_versions = (
+        "v6.1_cvarppo", "v61_cvarppo", "v6_1_cvarppo",
+        "v7.1_poolppo", "v71_poolppo", "v7_1_poolppo",
+    )
+    ppo_new_use_aug_default = algorithm == "PPO_NEW" and ALGO_VERSION not in ppo_new_plain_obs_versions
+    USE_AUGMENTED_OBS = bool(
+        ppo_new_use_aug_default or os.environ.get("RL_USE_AUGMENTED_OBS", "0").strip() == "1"
+    )
+    phase_versions = ("v4.2_phase", "v42_phase", "v4_2_phase")
+    mean_versions = ("v4.2_mean", "v42_mean", "v4_2_mean")
+    env_oracle_mode_raw = os.environ.get("RL_ORACLE_CTX_MODE", "").strip()
+    if algorithm == "PPO_NEW" and ALGO_VERSION in phase_versions:
+        default_oracle_mode = "phase"
+    elif algorithm == "PPO_NEW" and ALGO_VERSION in mean_versions:
+        default_oracle_mode = "mean"
+    else:
+        default_oracle_mode = "none"
+    if env_oracle_mode_raw:
+        ORACLE_CTX_MODE = _normalize_oracle_ctx_mode(env_oracle_mode_raw)
+    else:
+        ORACLE_CTX_MODE = default_oracle_mode
+    try:
+        ORACLE_GT_MEAN_NORM = float(os.environ.get("RL_ORACLE_GT_MEAN_NORM", "100.0"))
+    except Exception:
+        ORACLE_GT_MEAN_NORM = 100.0
+    if ORACLE_GT_MEAN_NORM <= 0:
+        ORACLE_GT_MEAN_NORM = 100.0
+    try:
+        ORACLE_PHASE_CLASSES = int(os.environ.get("RL_ORACLE_PHASE_CLASSES", "0") or 0)
+    except Exception:
+        ORACLE_PHASE_CLASSES = 0
+    if algorithm == "PPO_NEW":
+        if ALGO_VERSION in ("v3.1", "v31", "v3_1"):
+            default_window = 8
+        elif ALGO_VERSION in (
+            "v2", "v3", "v3.2", "v32", "v3_2",
+            "v4", "v4.1", "v41", "v4_1",
+            "v4.2_phase", "v42_phase", "v4_2_phase",
+            "v4.2_mean", "v42_mean", "v4_2_mean",
+            "v4.3_ent", "v43_ent", "v4_3_ent",
+            "v4.3_logit_bias", "v43_logit_bias", "v4_3_logit_bias",
+            "v5.1_abppo", "v51_abppo", "v5_1_abppo",
+            "v5.2_qcritic", "v52_qcritic", "v5_2_qcritic",
+            "v5.3_auxweak", "v53_auxweak", "v5_3_auxweak",
+            "v6.2_v3cvar", "v62_v3cvar", "v6_2_v3cvar",
+            "v7.2_poolv3", "v72_poolv3", "v7_2_poolv3",
+            "v8_a", "v8-a", "v8a", "pponew_v8_a", "pponewv8_a",
+            "v9_a", "v9-a", "v9a", "pponew_v9_a", "pponewv9_a",
+            "v8_a2", "v8-a2", "v8a2", "pponew_v8_a2", "pponewv8_a2",
+            "v9_a2", "v9-a2", "v9a2", "pponew_v9_a2", "pponewv9_a2",
+            "v10_a", "v10-a", "v10a", "pponew_v10_a", "pponewv10_a",
+            "v10_b", "v10-b", "v10b", "pponew_v10_b", "pponewv10_b",
+            "v10_c", "v10-c", "v10c", "pponew_v10_c", "pponewv10_c",
+            "v10_d", "v10-d", "v10d", "pponew_v10_d", "pponewv10_d",
+            "v10_e", "v10-e", "v10e", "pponew_v10_e", "pponewv10_e",
+        ):
+            default_window = 4
+        else:
+            default_window = 1
+        try:
+            PPO_NEW_WINDOW_K = int(os.environ.get("RL_PPO_NEW_WINDOW", str(default_window)))
+        except Exception:
+            PPO_NEW_WINDOW_K = default_window
+        PPO_NEW_WINDOW_K = max(1, int(PPO_NEW_WINDOW_K))
+        if ALGO_VERSION == "v1":
+            PPO_NEW_WINDOW_K = 1
+    else:
+        PPO_NEW_WINDOW_K = 1
+    if STAGE_MODE == "eval_only":
+        implement = 1
+        evaluate = 0
+        stop_everything_in_learning_and_go_to_implementation_phase = 0
+    else:
+        implement = 0
     USE_LSTM = algorithm in ("PPO_LSTM", "REC_PPO", "RECURRENTPPO", "PPO_HAT_LSTM")
     if USE_LSTM:
         STAGE_IN_OBS = os.environ.get("RL_STAGE_IN_OBS", "1").strip() == "1"
@@ -1413,6 +2479,8 @@ def main(algorithm2, mode2):
         STAGE_IN_OBS = os.environ.get("RL_STAGE_IN_OBS", "0").strip() == "1"
         LSTM_CHAIN_LEN = 1
         LSTM_CHAIN_STEP = 0
+    if USE_AUGMENTED_OBS:
+        STAGE_IN_OBS = False
     # reset PDI buffers per run
     PDI_GT_MEAN_LIST = []
     PDI_PHASE_LIST = []
@@ -1468,6 +2536,69 @@ def main(algorithm2, mode2):
 
         env=coordinationEnv()
         hat_policy_kwargs = None
+        protomem_policy_kwargs = None
+        protomem_cfg = None
+        if algorithm == "PPO_PROTOMEM":
+            try:
+                from robust_rl.protomem_ppo import ProtoMemInputWrapper, ProtoMemConfig
+
+                pm_input_mode = os.environ.get("PM_INPUT_MODE", "full").strip().lower()
+                pm_include_stage = os.environ.get("PM_INCLUDE_STAGE", "1").strip() == "1"
+                pm_include_prev = os.environ.get("PM_INCLUDE_PREV", "1").strip() == "1"
+                if pm_input_mode == "obs":
+                    pm_include_stage = False
+                    pm_include_prev = False
+
+                protomem_cfg = ProtoMemConfig(
+                    input_mode=pm_input_mode,
+                    include_stage=pm_include_stage,
+                    include_prev_action_reward=pm_include_prev,
+                    stage_dim=int(os.environ.get("PM_STAGE_DIM", "2")),
+                    num_prototypes=int(os.environ.get("PM_NUM_PROTOTYPES", "32")),
+                    mem_dim=int(os.environ.get("PM_MEM_DIM", "64")),
+                    hidden_dim=int(os.environ.get("PM_HIDDEN_DIM", "64")),
+                    tau=float(os.environ.get("PM_TAU", "0.5")),
+                    lambda_sparse=float(os.environ.get("PM_LAMBDA_SPARSE", "0.001")),
+                    lambda_div=float(os.environ.get("PM_LAMBDA_DIV", "0.0003")),
+                    lambda_stable=float(os.environ.get("PM_LAMBDA_STABLE", "0.0")),
+                    lambda_aux=float(os.environ.get("PM_LAMBDA_AUX", "0.0")),
+                    stable_buffer_per_phase=int(os.environ.get("PM_STABLE_BUF_PER_PHASE", "300")),
+                    stable_batch_ratio=float(os.environ.get("PM_STABLE_BATCH_RATIO", "0.25")),
+                    stable_warmup_updates=int(os.environ.get("PM_STABLE_WARMUP_UPDATES", "0")),
+                    use_smooth=os.environ.get("PM_USE_SMOOTH", "0").strip() == "1",
+                    smooth_alpha=float(os.environ.get("PM_SMOOTH_ALPHA", "0.1")),
+                    smooth_train_test_consistent=os.environ.get("PM_SMOOTH_TRAIN_TEST_CONSISTENT", "1").strip() == "1",
+                    mem_lr_scale=float(os.environ.get("PM_MEM_LR_SCALE", "0.5")),
+                    eps=float(os.environ.get("PM_EPS", "1e-8")),
+                    keep_state_across_reset=os.environ.get("PM_KEEP_STATE", "1").strip() == "1",
+                    reset_prev_on_table_switch=os.environ.get("PM_RESET_PREV_ON_TABLE_SWITCH", "1").strip() == "1",
+                    reset_prev_on_phase_switch=os.environ.get("PM_RESET_PREV_ON_PHASE_SWITCH", "1").strip() == "1",
+                )
+
+                def _pm_stage_onehot():
+                    label = str(current_stage_label or "").lower()
+                    if "insert" in label:
+                        return [0.0, 1.0]
+                    if "remove" in label:
+                        return [1.0, 0.0]
+                    return [0.0, 0.0]
+
+                env = ProtoMemInputWrapper(
+                    env,
+                    include_stage=protomem_cfg.include_stage,
+                    include_prev_action_reward=protomem_cfg.include_prev_action_reward,
+                    stage_dim=protomem_cfg.stage_dim,
+                    keep_state=protomem_cfg.keep_state_across_reset,
+                    stage_getter=_pm_stage_onehot,
+                    table_getter=lambda: getattr(Dynamic_ALNS_RL34959, "table_number", None),
+                    phase_getter=lambda: str(current_phase_label or ""),
+                    reset_prev_on_table_switch=protomem_cfg.reset_prev_on_table_switch,
+                    reset_prev_on_phase_switch=protomem_cfg.reset_prev_on_phase_switch,
+                )
+                protomem_policy_kwargs = {"pm_config": protomem_cfg}
+                print("ProtoMem wrapper enabled:", "input_mode", protomem_cfg.input_mode, "N", protomem_cfg.num_prototypes)
+            except Exception as exc:
+                raise ImportError("ProtoMem-PPO wrapper init failed") from exc
         use_hat = os.environ.get("RL_HAT", "0").strip() == "1"
         if use_hat and algorithm in ("PPO", "A2C", "PPO_HAT_PDI", "PPO_HAT_LSTM"):
             try:
@@ -1795,6 +2926,153 @@ def main(algorithm2, mode2):
                 policy_kwargs=policy_kwargs,
                 pdi_config=pdi_cfg,
             )
+        elif algorithm == 'PPO_PROTOMEM':
+            if not _SB3_AVAILABLE or PPO is None:
+                raise ImportError("stable_baselines3 is required for PPO. Please install stable-baselines3 + torch.")
+            from robust_rl.protomem_ppo import ProtoMemPolicy, ProtoMemPPO, ProtoMemConfig
+
+            pm_cfg = protomem_cfg if isinstance(protomem_cfg, ProtoMemConfig) else ProtoMemConfig()
+            policy_kwargs = dict(protomem_policy_kwargs or {})
+            pm_n_steps = int(os.environ.get("PM_N_STEPS", "10"))
+            pm_batch_size = int(os.environ.get("PM_BATCH_SIZE", str(pm_n_steps)))
+            pm_n_epochs = int(os.environ.get("PM_N_EPOCHS", "5"))
+            pm_lr = float(os.environ.get("PM_LR", "0.0003"))
+            pm_gamma = float(os.environ.get("PM_GAMMA", "0.99"))
+            pm_gae = float(os.environ.get("PM_GAE_LAMBDA", "0.95"))
+            pm_clip = float(os.environ.get("PM_CLIP_RANGE", "0.2"))
+            pm_ent = float(os.environ.get("PM_ENT_COEF", "0.0"))
+            pm_vf = float(os.environ.get("PM_VF_COEF", "0.5"))
+            pm_device = os.environ.get("RL_DEVICE", "cpu")
+            model = ProtoMemPPO(
+                ProtoMemPolicy,
+                env,
+                n_steps=pm_n_steps,
+                batch_size=pm_batch_size,
+                n_epochs=pm_n_epochs,
+                learning_rate=pm_lr,
+                gamma=pm_gamma,
+                gae_lambda=pm_gae,
+                clip_range=pm_clip,
+                ent_coef=pm_ent,
+                vf_coef=pm_vf,
+                verbose=1,
+                device=pm_device,
+                seed=seed_val,
+                policy_kwargs=policy_kwargs,
+                pm_config=pm_cfg,
+            )
+            print("ProtoMem-PPO enabled:", "device", pm_device, "N", pm_cfg.num_prototypes, "d", pm_cfg.mem_dim)
+        elif algorithm == 'PPO_NEW':
+            if not _SB3_AVAILABLE or PPO is None:
+                raise ImportError("stable_baselines3 is required for PPO_NEW. Please install stable-baselines3 + torch.")
+            from robust_rl.ppo_new import build_model as build_ppo_new_model
+            tcr_kwargs = {}
+            tcr_family_versions = (
+                "v7.3_tcrppo", "v73_tcrppo", "v7_3_tcrppo",
+                "v7.4_tcrv3", "v74_tcrv3", "v7_4_tcrv3",
+                "v8_a", "v8-a", "v8a", "pponew_v8_a", "pponewv8_a",
+                "v9_a", "v9-a", "v9a", "pponew_v9_a", "pponewv9_a",
+                "v8_a2", "v8-a2", "v8a2", "pponew_v8_a2", "pponewv8_a2",
+                "v9_a2", "v9-a2", "v9a2", "pponew_v9_a2", "pponewv9_a2",
+                "v10_a", "v10-a", "v10a", "pponew_v10_a", "pponewv10_a",
+                "v10_b", "v10-b", "v10b", "pponew_v10_b", "pponewv10_b",
+                "v10_c", "v10-c", "v10c", "pponew_v10_c", "pponewv10_c",
+                "v10_d", "v10-d", "v10d", "pponew_v10_d", "pponewv10_d",
+                "v10_e", "v10-e", "v10e", "pponew_v10_e", "pponewv10_e",
+            )
+            v8_family_versions = (
+                "v8_a", "v8-a", "v8a", "pponew_v8_a", "pponewv8_a",
+                "v9_a", "v9-a", "v9a", "pponew_v9_a", "pponewv9_a",
+            )
+            v9_family_versions = ("v9_a", "v9-a", "v9a", "pponew_v9_a", "pponewv9_a")
+            v8a2_family_versions = (
+                "v8_a2", "v8-a2", "v8a2", "pponew_v8_a2", "pponewv8_a2",
+                "v9_a2", "v9-a2", "v9a2", "pponew_v9_a2", "pponewv9_a2",
+                "v10_a", "v10-a", "v10a", "pponew_v10_a", "pponewv10_a",
+                "v10_b", "v10-b", "v10b", "pponew_v10_b", "pponewv10_b",
+                "v10_c", "v10-c", "v10c", "pponew_v10_c", "pponewv10_c",
+                "v10_d", "v10-d", "v10d", "pponew_v10_d", "pponewv10_d",
+                "v10_e", "v10-e", "v10e", "pponew_v10_e", "pponewv10_e",
+            )
+            v9a2_family_versions = ("v9_a2", "v9-a2", "v9a2", "pponew_v9_a2", "pponewv9_a2")
+            if ALGO_VERSION in tcr_family_versions:
+                tcr_kwargs = {
+                    "tcr_enable": os.environ.get("RL_TCR_ENABLE", "1").strip() == "1",
+                    "tcr_action1_rate_threshold": float(os.environ.get("RL_TCR_TAU_RHO", "0.08")),
+                    "tcr_reward_gap_threshold": float(os.environ.get("RL_TCR_TAU_R", "0.05")),
+                    "tcr_min_action1_samples": int(os.environ.get("RL_TCR_MIN_A1", "12")),
+                    "tcr_min_action0_samples": int(os.environ.get("RL_TCR_MIN_A0", "12")),
+                    "tcr_min_group_steps": int(os.environ.get("RL_TCR_MIN_GROUP_STEPS", "32")),
+                    "tcr_trigger_window_steps": int(os.environ.get("RL_TCR_TRIGGER_WINDOW", "400")),
+                    "tcr_a1_reward_quantile": float(os.environ.get("RL_TCR_A1_QUANTILE", "0.70")),
+                    "tcr_reward_margin_over_a0": float(os.environ.get("RL_TCR_MARGIN_A0", "0.0")),
+                    "tcr_buffer_size_per_group": int(os.environ.get("RL_TCR_BUFFER_PER_GROUP", "512")),
+                    "tcr_aux_coef": float(os.environ.get("RL_TCR_BETA", "0.03")),
+                    "tcr_aux_batch_size": int(os.environ.get("RL_TCR_AUX_BATCH", "64")),
+                    "tcr_teacher_mode": os.environ.get("RL_TCR_TEACHER_MODE", "none").strip().lower(),
+                    "tcr_teacher_action1_logit_bias": float(os.environ.get("RL_TCR_TEACHER_LOGIT_BIAS", "0.35")),
+                }
+                if ALGO_VERSION in v8_family_versions:
+                    tcr_kwargs.update(
+                        {
+                            "v8_quality_temp": float(os.environ.get("RL_V8_QUALITY_TEMP", "0.15")),
+                            "v8_support_power": float(os.environ.get("RL_V8_SUPPORT_POWER", "0.50")),
+                            "v8_novelty_power": float(os.environ.get("RL_V8_NOVELTY_POWER", "1.00")),
+                            "v8_min_keep_weight": float(os.environ.get("RL_V8_MIN_KEEP_WEIGHT", "0.15")),
+                            "v8_max_keep_weight": float(os.environ.get("RL_V8_MAX_KEEP_WEIGHT", "4.00")),
+                            "v8_kl_guard_coef": float(os.environ.get("RL_V8_KL_GUARD_COEF", "0.02")),
+                            "v8_ref_mix": float(os.environ.get("RL_V8_REF_MIX", "0.50")),
+                        }
+                    )
+                if ALGO_VERSION in v9_family_versions:
+                    tcr_kwargs.update(
+                        {
+                            "v9_kappa_base": float(os.environ.get("RL_V9_KAPPA_BASE", "1.00")),
+                            "v9_kappa_slope": float(os.environ.get("RL_V9_KAPPA_SLOPE", "2.00")),
+                            "v9_kappa_min": float(os.environ.get("RL_V9_KAPPA_MIN", "0.50")),
+                            "v9_kappa_max": float(os.environ.get("RL_V9_KAPPA_MAX", "3.00")),
+                            "v9_gap_ema_decay": float(os.environ.get("RL_V9_GAP_EMA_DECAY", "0.80")),
+                        }
+                    )
+                if ALGO_VERSION in v8a2_family_versions:
+                    tcr_kwargs.update(
+                        {
+                            "v8a2_ratio_threshold": float(os.environ.get("RL_A2_TAU_RHO", os.environ.get("RL_TCR_TAU_RHO", "0.10"))),
+                            "v8a2_min_group_steps": int(os.environ.get("RL_A2_MIN_GROUP_STEPS", "1")),
+                            "v8a2_gen_budget_scale": float(os.environ.get("RL_A2_GEN_BUDGET_SCALE", "2.0")),
+                            "v8a2_gen_budget_max_per_group": int(os.environ.get("RL_A2_GEN_MAX_PER_GROUP", "128")),
+                            "v8a2_gen_min_total_per_rollout": int(os.environ.get("RL_A2_GEN_MIN_TOTAL", "50")),
+                            "v8a2_gen_min_per_group": int(os.environ.get("RL_A2_GEN_MIN_PER_GROUP", "0")),
+                            "v8a2_gen_mix_alpha": float(os.environ.get("RL_A2_GEN_MIX_ALPHA", "2.0")),
+                            "v8a2_gen_noise_std": float(os.environ.get("RL_A2_GEN_NOISE_STD", "0.01")),
+                            "v8a2_min_keep_weight": float(os.environ.get("RL_A2_MIN_KEEP_WEIGHT", "0.15")),
+                            "v8a2_max_keep_weight": float(os.environ.get("RL_A2_MAX_KEEP_WEIGHT", "4.00")),
+                            "v8a2_kl_guard_coef": float(os.environ.get("RL_A2_KL_GUARD_COEF", "0.02")),
+                            "v8a2_ref_mix": float(os.environ.get("RL_A2_REF_MIX", "0.50")),
+                        }
+                    )
+                if ALGO_VERSION in v9a2_family_versions:
+                    tcr_kwargs.update(
+                        {
+                            "v9a2_tau_entropy_eta": float(os.environ.get("RL_V9A2_TAU_ENTROPY_ETA", "0.05")),
+                            "v9a2_shortage_ema_decay": float(os.environ.get("RL_V9A2_SHORTAGE_EMA_DECAY", "0.80")),
+                            "v9a2_kappa_base": float(os.environ.get("RL_V9A2_KAPPA_BASE", "1.00")),
+                            "v9a2_kappa_slope": float(os.environ.get("RL_V9A2_KAPPA_SLOPE", "2.00")),
+                            "v9a2_kappa_min": float(os.environ.get("RL_V9A2_KAPPA_MIN", "0.50")),
+                            "v9a2_kappa_max": float(os.environ.get("RL_V9A2_KAPPA_MAX", "3.00")),
+                        }
+                    )
+            model = build_ppo_new_model(
+                env=env,
+                seed=seed_val,
+                device='cpu',
+                algo_version=ALGO_VERSION,
+                policy='MlpPolicy',
+                n_steps=10,
+                verbose=1,
+                policy_kwargs=hat_policy_kwargs,
+                **tcr_kwargs,
+            )
         elif algorithm == 'PPO':
             if not _SB3_AVAILABLE or PPO is None:
                 raise ImportError("stable_baselines3 is required for PPO. Please install stable-baselines3 + torch.")
@@ -1876,12 +3154,40 @@ def main(algorithm2, mode2):
             #break
            # except:
             #    continue
+        maybe_loaded_model = _maybe_load_model_checkpoint(model)
+        if maybe_loaded_model is not None:
+            model = maybe_loaded_model
         lstm_callback = None
         if USE_LSTM and BaseCallback is not None:
             try:
                 lstm_callback = LstmStatsCallback()
             except Exception:
                 lstm_callback = None
+        tcr_callback = None
+        if BaseCallback is not None and hasattr(model, "tcr_consume_rollout"):
+            try:
+                tcr_callback = TCRRolloutStatsCallback()
+            except Exception:
+                tcr_callback = None
+        learn_callback = None
+        if lstm_callback is not None and tcr_callback is not None:
+            if CallbackList is not None:
+                learn_callback = CallbackList([lstm_callback, tcr_callback])
+            else:
+                learn_callback = lstm_callback
+        elif lstm_callback is not None:
+            learn_callback = lstm_callback
+        elif tcr_callback is not None:
+            learn_callback = tcr_callback
+
+        def _reset_model_inference_state(reason=""):
+            try:
+                if model is not None and hasattr(model, "policy") and hasattr(model.policy, "reset_inference_state"):
+                    model.policy.reset_inference_state(reason=reason)
+            except Exception:
+                pass
+
+        _reset_model_inference_state("run_start")
         # #########imitation learning both baseline and baseline3 have bugs and can't be solved.
         # # baseline: ValueError: Cannot feed value of shape (1, 1, 11) for Tensor 'deepq/input/Ob:0', which has shape '(?, 11)'
         # #           and have error even when run official example
@@ -1911,21 +3217,69 @@ def main(algorithm2, mode2):
         state_action_reward_collect = np.array(np.empty(shape=(0, 9)))
         table_number_collect = {}
         for number_of_learn_evaluate_loops in range(1000000000):
+            if STAGE_MODE == "eval_only":
+                break
             if implement == 1:
                 break
+            if STAGE_MODE == "train_only" and os.path.exists(get_stop_flag_path()):
+                _maybe_save_model_checkpoint(model)
+                return
             if algorithm == 'LBKLAC':
                 model.learn(total_timesteps=total_timesteps2, on_step=_lbklac_on_step)
             else:
-                if lstm_callback is not None and USE_LSTM:
-                    model.learn(total_timesteps=total_timesteps2, callback=lstm_callback)
+                if learn_callback is not None:
+                    model.learn(total_timesteps=total_timesteps2, callback=learn_callback)
                 else:
                     model.learn(total_timesteps=total_timesteps2)
             training_time = timeit.default_timer() - start_time
-            extra = None
+            extra = {}
             try:
                 if hasattr(model, "last_pdi_losses"):
-                    extra = dict(getattr(model, "last_pdi_losses", {}) or {})
+                    extra.update(dict(getattr(model, "last_pdi_losses", {}) or {}))
             except Exception:
+                pass
+            try:
+                if hasattr(model, "last_protomem_losses"):
+                    extra.update(dict(getattr(model, "last_protomem_losses", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v5_metrics"):
+                    extra.update(dict(getattr(model, "last_v5_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v6_metrics"):
+                    extra.update(dict(getattr(model, "last_v6_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_tcr_metrics"):
+                    extra.update(dict(getattr(model, "last_tcr_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v8_metrics"):
+                    extra.update(dict(getattr(model, "last_v8_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v9_metrics"):
+                    extra.update(dict(getattr(model, "last_v9_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v8a2_metrics"):
+                    extra.update(dict(getattr(model, "last_v8a2_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v9a2_metrics"):
+                    extra.update(dict(getattr(model, "last_v9a2_metrics", {}) or {}))
+            except Exception:
+                pass
+            _maybe_console_phase2(extra, phase="train")
+            if not extra:
                 extra = None
             log_training_row("train", step_idx=global_step, training_time=training_time, extra=extra)
             try:
@@ -1975,6 +3329,45 @@ def main(algorithm2, mode2):
                         average_reward, deviation = -1000, -1000
                     print('congestion_terminal_mean_list', congestion_terminal_mean_list, average_reward, deviation)
             rolling_avg = sum(recent_rewards) / len(recent_rewards) if recent_rewards else -1000
+            eval_extra = {}
+            try:
+                if hasattr(model, "last_v5_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_v5_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v6_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_v6_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_tcr_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_tcr_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v8_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_v8_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v9_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_v9_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v8a2_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_v8a2_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_v9a2_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_v9a2_metrics", {}) or {}))
+            except Exception:
+                pass
+            _maybe_console_phase2(eval_extra, phase="eval")
+            if not eval_extra:
+                eval_extra = None
             log_training_row(
                 "eval",
                 step_idx=global_step,
@@ -1982,13 +3375,12 @@ def main(algorithm2, mode2):
                 std_reward=deviation,
                 rolling_avg=rolling_avg,
                 recent_count=len(recent_rewards),
+                extra=eval_extra,
             )
             print('evaluation', 'average_reward', average_reward, 'deviation', deviation)# sys.exit('stop_it_in_testing')
             # Curriculum convergence: used for jumps only
             curriculum_last_avg_reward = rolling_avg
             threshold = CURRICULUM_REWARD_THRESHOLD
-            if SCENARIO_NAME == "S0_Debug":
-                threshold = 0.3
             if rolling_avg >= threshold:
                 sucess_times += 1
             else:
@@ -1998,8 +3390,12 @@ def main(algorithm2, mode2):
             wait_training_finish_last_iteration = 0
             evaluate = 0
             # record_results = record_results.append([travel_time, congestion_1_mean, congestion_2_mean, average_reward, deviation])
+        if STAGE_MODE == "train_only":
+            _maybe_save_model_checkpoint(model)
+            return
         if implement == 1:
             stop_everything_in_learning_and_go_to_implementation_phase = 1
+            _reset_model_inference_state("enter_implement")
             while True:
                 if os.path.exists(get_stop_flag_path()):
                     sys.exit(78)
@@ -2052,6 +3448,7 @@ def main(algorithm2, mode2):
                 print('obs', obs)
                 # while True:
                 implementation_start_time = timeit.default_timer()
+                impl_p_action1 = None
                 if algorithm == 'LBKLAC':
                     act_info = model.act(obs, deterministic=True)
                     action_scalar = int(act_info.get("action", 0))
@@ -2073,8 +3470,10 @@ def main(algorithm2, mode2):
                             lstm_state = None
                         else:
                             lstm_episode_start = False
+                        impl_p_action1 = _predict_action1_prob(model, obs)
                     elif _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
                         action_scalar, _hat_info = _hat_select_action(model, obs)
+                        impl_p_action1 = _hat_info.get("p1")
                     else:
                         if algorithm == "DRCB":
                             drcb_det = os.environ.get("DRCB_IMPL_DETERMINISTIC", "0").strip() == "1"
@@ -2090,6 +3489,7 @@ def main(algorithm2, mode2):
                             action_scalar = int(np.array(action).squeeze())
                         except Exception:
                             action_scalar = action
+                        impl_p_action1 = _predict_action1_prob(model, obs)
                 # if implement == 1 and Intermodal_ALNS34959.ALNS_implement_start_RL_can_move == 1:
                 #     print('wrong...')
                 # #check_RL_ALNS_iteraction_bug()
@@ -2145,7 +3545,10 @@ def main(algorithm2, mode2):
                     Intermodal_ALNS34959.ALNS_implement_start_RL_can_move = 0
                     clear_pairs_done = 1
                     continue
-                send_action(action_scalar)
+                trace_extra = None
+                if impl_p_action1 is not None:
+                    trace_extra = {"p_action1": float(impl_p_action1)}
+                send_action(action_scalar, trace_extra=trace_extra, obs_snapshot=obs)
                 #check_RL_ALNS_iteraction_bug()
                 # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                 #     print('gesa')
@@ -2158,7 +3561,7 @@ def main(algorithm2, mode2):
                     # if len(Intermodal_ALNS34959.state_reward_pairs) == 0:
                     #     print('gesa')
                     if Intermodal_ALNS34959.state_reward_pairs.iloc[0]['action'] == -10000000:
-                        send_action(action_scalar)
+                        send_action(action_scalar, trace_extra=trace_extra, obs_snapshot=obs)
                     if ALNS_got_action_in_implementation == 1 or len(Intermodal_ALNS34959.state_reward_pairs) == 0:#danger donot know why in rare case Intermodal_ALNS34959.state_reward_pairs is empty when alns got action is 0, but i think i can let it go to next iteration
                         # clear all data in pairs
                         if os.path.exists(get_stop_flag_path()):
