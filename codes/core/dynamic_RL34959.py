@@ -7,6 +7,7 @@ import copy
 import random
 import os
 import json
+import csv
 import atexit
 import matplotlib.pyplot as plt
 try:
@@ -43,6 +44,13 @@ except Exception:
     LBKLACAgent = None
     LBKLACConfig = None
     _LBKLAC_AVAILABLE = False
+try:
+    from robust_rl.cql_dqn import DiscreteCQLAgent, CQLConfig
+    _CQL_AVAILABLE = True
+except Exception:
+    DiscreteCQLAgent = None
+    CQLConfig = None
+    _CQL_AVAILABLE = False
 try:
     from core import config as rl_config
 except Exception:
@@ -151,6 +159,7 @@ except Exception:
 PDI_GT_MEAN_LIST = []
 PDI_PHASE_LIST = []
 PDI_REWARD_LIST = []
+_CHECKPOINT_SAVED_ON_STOP = False
 
 
 def _normalize_stage_mode(value):
@@ -202,6 +211,22 @@ def _maybe_save_model_checkpoint(model_obj):
         print(f"[RL] saved model checkpoint to: {path}")
     except Exception as exc:
         print(f"[RL] failed to save checkpoint to {path}: {exc}")
+
+
+def _maybe_save_checkpoint_on_stop_exit():
+    global _CHECKPOINT_SAVED_ON_STOP
+    if _CHECKPOINT_SAVED_ON_STOP:
+        return
+    if str(globals().get("STAGE_MODE", "") or "").strip().lower() != "train_only":
+        return
+    path = str(globals().get("SAVE_MODEL_PATH", "") or "").strip()
+    if not path:
+        return
+    model_obj = globals().get("model", None)
+    if model_obj is None:
+        return
+    _maybe_save_model_checkpoint(model_obj)
+    _CHECKPOINT_SAVED_ON_STOP = True
 
 
 def _normalize_oracle_ctx_mode(mode_val):
@@ -475,6 +500,7 @@ def profile():
 
 # ===== 路径配置 =====
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_DYNAMIC_PATH_MAP_SEEN = set()
 
 WAIT_TIMEOUT_S = float(os.environ.get("RL_WAIT_TIMEOUT_S", "0") or 0)
 WAIT_LOG_INTERVAL_S = float(os.environ.get("RL_WAIT_LOG_INTERVAL_S", "5") or 5)
@@ -497,10 +523,141 @@ def _wait_watchdog(stage, start_ts, last_log_ts, row_dict=None):
         start_ts = now
     return False, last_log_ts, start_ts
 
+def _env_int(name, default):
+    raw = os.environ.get(name, "").strip()
+    if raw == "":
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+SEND_ACTION_MAX_WRITE_RETRY = max(1, _env_int("RL_SEND_ACTION_MAX_WRITE_RETRY", 1000))
+SEND_ACTION_MAX_RESELECT = max(1, _env_int("RL_SEND_ACTION_MAX_RESELECT", 40))
+SEND_ACTION_MAX_WAIT_SLOT_LOOPS = max(1, _env_int("RL_SEND_ACTION_MAX_WAIT_SLOT_LOOPS", 60000))
+SEND_ACTION_MAX_CONFIRM_RETRY = max(1, _env_int("RL_SEND_ACTION_MAX_CONFIRM_RETRY", 1000))
+SEND_ACTION_ERROR_LOG_EVERY = max(1, _env_int("RL_SEND_ACTION_ERROR_LOG_EVERY", 20))
+
+
+def _resolve_dynamic_index(table_number):
+    mode = (os.environ.get("RL_DYNAMIC_INDEX_MODE", "direct") or "direct").strip().lower()
+    if mode not in {"direct", "mod"}:
+        mode = "direct"
+    file_count = _env_int("RL_DYNAMIC_FILE_COUNT", 0)
+    table_base = _env_int("RL_DYNAMIC_TABLE_BASE", 0)
+    mapped_idx = int(table_number)
+    if mode == "mod":
+        if file_count <= 0:
+            mode = "direct"
+            file_count = 0
+        else:
+            mapped_idx = (int(table_number) - int(table_base)) % int(file_count)
+    return mode, int(mapped_idx), int(file_count), int(table_base)
+
+
+def _resolve_path_map_csv():
+    explicit = os.environ.get("RL_DYNAMIC_PATH_MAP_CSV", "").strip()
+    if explicit:
+        return Path(explicit)
+    manifest_path = os.environ.get("RL_DYNAMIC_MANIFEST", "").strip()
+    if manifest_path:
+        manifest = Path(manifest_path)
+        if manifest.suffix.lower() == ".json":
+            return manifest.with_name("outer_path_map.csv")
+        return manifest / "outer_path_map.csv"
+    try:
+        return Path(rl_logging.get_run_dir()) / "post_stage" / "outer_path_map.csv"
+    except Exception:
+        return None
+
+
+def _append_outer_path_map(row):
+    csv_path = _resolve_path_map_csv()
+    if csv_path is None:
+        return
+    key = (
+        row.get("request_number", ""),
+        row.get("table_number", ""),
+        row.get("mapped_idx", ""),
+        row.get("mapped_file", ""),
+        row.get("index_mode", ""),
+    )
+    if key in _DYNAMIC_PATH_MAP_SEEN:
+        return
+    _DYNAMIC_PATH_MAP_SEEN.add(key)
+    fields = [
+        "ts",
+        "module",
+        "iter_id",
+        "phase",
+        "stage_mode",
+        "request_number",
+        "table_number",
+        "mapped_idx",
+        "index_mode",
+        "file_count",
+        "table_base",
+        "dynamic_root",
+        "mapped_file",
+        "exists",
+        "read_ok",
+        "strict_path",
+    ]
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        exists = csv_path.exists()
+        with csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            if not exists:
+                writer.writeheader()
+            writer.writerow({k: row.get(k, "") for k in fields})
+    except Exception:
+        pass
+
+
 def resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types):
     dynamic_root = os.environ.get("DYNAMIC_DATA_ROOT", "").strip()
+    mode, mapped_idx, file_count, table_base = _resolve_dynamic_index(table_number)
+    file_name = f"Intermodal_EGS_data_dynamic_congestion{mapped_idx}.xlsx"
     if dynamic_root:
-        return os.path.join(dynamic_root, f"R{request_number_in_R}", f"Intermodal_EGS_data_dynamic_congestion{table_number}.xlsx")
+        root = Path(dynamic_root)
+        candidate_a = root / f"R{request_number_in_R}" / file_name
+        candidate_b = root / file_name
+        selected = candidate_a
+        if candidate_a.exists():
+            selected = candidate_a
+        elif candidate_b.exists():
+            selected = candidate_b
+        strict_path = os.environ.get("RL_DYNAMIC_STRICT_PATH", "0").strip() == "1"
+        selected_exists = selected.exists()
+        _append_outer_path_map(
+            {
+                "ts": rl_logging.now_ts(),
+                "module": "dynamic_RL34959",
+                "iter_id": os.environ.get("RL_OUTER_ITER_ID", ""),
+                "phase": "implement" if globals().get("implement", 0) == 1 else "train",
+                "stage_mode": str(globals().get("STAGE_MODE", os.environ.get("RL_STAGE_MODE", "train_eval"))),
+                "request_number": int(request_number_in_R),
+                "table_number": int(table_number),
+                "mapped_idx": int(mapped_idx),
+                "index_mode": mode,
+                "file_count": int(file_count),
+                "table_base": int(table_base),
+                "dynamic_root": str(root),
+                "mapped_file": str(selected),
+                "exists": int(selected_exists),
+                "read_ok": int(selected_exists),
+                "strict_path": int(strict_path),
+            }
+        )
+        if strict_path and not selected_exists:
+            raise FileNotFoundError(
+                "[OUTER][ERROR] PATH_CHECK failed: "
+                f"table={table_number} mapped_idx={mapped_idx} mode={mode} "
+                f"request=R{request_number_in_R} expected_file={selected}"
+            )
+        return str(selected)
     base_dir = os.path.join(
         ROOT_DIR,
         "Uncertainties Dynamic planning under unexpected events",
@@ -583,6 +740,13 @@ TRAIN_FIELDS = [
     # V6 CVaR-tail diagnostics
     "cvar_alpha", "cvar_beta", "cvar_quantile", "cvar_tail_frac",
     "cvar_weight_mean", "cvar_tail_reward", "cvar_non_tail_reward",
+    # CQL diagnostics
+    "cql_alpha", "cql_temp", "cql_updates", "cql_td_loss", "cql_cql_loss",
+    "cql_q_mean", "cql_q_std", "cql_q_max", "cql_q_taken", "cql_lse_q", "cql_ood_q_gap",
+    # V6.3 CaDM-adapted auxiliary dynamics diagnostics
+    "cadm_enabled", "cadm_source", "cadm_transitions", "cadm_aux_batches",
+    "cadm_aux_loss", "cadm_nextsev_loss", "cadm_reward_loss",
+    "cadm_nextsev_mae", "cadm_reward_mae",
     # V7.3+/TCR diagnostics
     "tcr_enabled", "tcr_rollout_groups", "tcr_trigger_events", "tcr_triggered_groups",
     "tcr_trigger_group_ids", "tcr_new_samples", "tcr_buffer_size",
@@ -620,7 +784,8 @@ DECISION_FIELDS = [
     "phase", "stage_mode", "stage",
     "uncertainty_index", "request", "vehicle", "pair_index",
     "table_number", "dynamic_t_begin", "duration_type",
-    "gt_mean", "phase_label",
+    "gt_mean", "phase_label", "severity",
+    "stage_family", "action_meaning", "semantic_action",
     "action", "reward", "p_action1",
     "matched", "impl_stream", "impl_list_idx",
     "source", "h_index",
@@ -855,6 +1020,48 @@ def _decision_get_p_action1(trace_extra):
     return _decision_to_float_or_empty(trace_extra.get("p_action1", ""))
 
 
+def _decision_stage_family(impl_stream=""):
+    stream = str(impl_stream or "").strip().lower()
+    if stream in {"removal", "insertion"}:
+        return stream
+    label = str(globals().get("current_stage_label", "") or "").strip().lower()
+    if "insert" in label:
+        return "insertion"
+    if "remove" in label:
+        return "removal"
+    return ""
+
+
+def _decision_semantic_action(stage_family, action_val):
+    try:
+        a_int = int(action_val)
+    except Exception:
+        return ""
+    family = str(stage_family or "").strip().lower()
+    if family == "removal":
+        return "wait" if a_int == 0 else "remove"
+    if family == "insertion":
+        return "insert" if a_int == 0 else "non_insert"
+    if a_int == 0:
+        return "action0"
+    if a_int == 1:
+        return "action1"
+    return ""
+
+
+def _decision_action_meaning(stage_family, action_val):
+    semantic = _decision_semantic_action(stage_family, action_val)
+    mapping = {
+        "wait": "wait",
+        "remove": "remove",
+        "insert": "insert",
+        "non_insert": "non_insert",
+        "action0": "action0",
+        "action1": "action1",
+    }
+    return mapping.get(semantic, "")
+
+
 def _decision_signature(row_dict, phase):
     return "|".join(
         [
@@ -913,6 +1120,11 @@ def _decision_note_send(row, action, obs_snapshot=None, trace_extra=None, source
     phase = _decision_current_phase()
     signature = _decision_signature(row_dict, phase)
     pair_key = _decision_pair_key(row_dict, phase)
+    stage_family = _decision_stage_family("")
+    action_value = _decision_to_action_value(action)
+    severity = globals().get("severity_level", "")
+    action_meaning = _decision_action_meaning(stage_family, action_value)
+    semantic_action = _decision_semantic_action(stage_family, action_value)
     existing_id = _decision_open_by_pair_key.get(pair_key)
     if existing_id in _decision_open_by_id:
         pending = _decision_open_by_id.get(existing_id, {})
@@ -921,6 +1133,14 @@ def _decision_note_send(row, action, obs_snapshot=None, trace_extra=None, source
         p_action1 = _decision_get_p_action1(trace_extra)
         if p_action1 != "":
             pending["p_action1"] = p_action1
+        if not pending.get("stage_family"):
+            pending["stage_family"] = stage_family
+        if pending.get("severity", "") in ("", None):
+            pending["severity"] = severity
+        if not pending.get("action_meaning"):
+            pending["action_meaning"] = action_meaning
+        if not pending.get("semantic_action"):
+            pending["semantic_action"] = semantic_action
         _decision_open_by_id[existing_id] = pending
         return existing_id
     seq, decision_id = _decision_next_id(phase)
@@ -931,8 +1151,12 @@ def _decision_note_send(row, action, obs_snapshot=None, trace_extra=None, source
         "phase": phase,
         "stage_mode": str(globals().get("STAGE_MODE", "")),
         "ts_decision": rl_logging.now_ts(),
-        "action": _decision_to_action_value(action),
+        "action": action_value,
         "p_action1": _decision_get_p_action1(trace_extra),
+        "severity": severity,
+        "stage_family": stage_family,
+        "action_meaning": action_meaning,
+        "semantic_action": semantic_action,
         "row_dict": row_dict,
         "signature": signature,
         "pair_key": pair_key,
@@ -1056,9 +1280,12 @@ def _decision_finalize(row, reward, action=None, stage="receive_reward", source=
     decision_id = _decision_pick_pending_id(row_dict, phase)
     pending = _decision_open_by_id.get(decision_id) if decision_id else None
     matched = 1 if isinstance(pending, dict) else 0
+    stage_family = _decision_stage_family(impl_stream=impl_stream if phase == "implement" else "")
+    severity = globals().get("severity_level", "")
 
     if matched == 0:
         seq, decision_id = _decision_next_id(phase)
+        action_value = _decision_to_action_value(action if action is not None else row_dict.get("action", ""))
         pending = {
             "run_id": _decision_run_id(),
             "decision_seq": seq,
@@ -1066,8 +1293,12 @@ def _decision_finalize(row, reward, action=None, stage="receive_reward", source=
             "phase": phase,
             "stage_mode": str(globals().get("STAGE_MODE", "")),
             "ts_decision": rl_logging.now_ts(),
-            "action": _decision_to_action_value(action if action is not None else row_dict.get("action", "")),
+            "action": action_value,
             "p_action1": "",
+            "severity": severity,
+            "stage_family": stage_family,
+            "action_meaning": _decision_action_meaning(stage_family, action_value),
+            "semantic_action": _decision_semantic_action(stage_family, action_value),
             "row_dict": row_dict,
             "signature": _decision_signature(row_dict, phase),
             "pair_key": _decision_pair_key(row_dict, phase),
@@ -1080,6 +1311,10 @@ def _decision_finalize(row, reward, action=None, stage="receive_reward", source=
     )
     p_action1 = pending.get("p_action1", "")
     reward_val = _decision_to_float_or_empty(reward)
+    payload_stage_family = pending.get("stage_family", stage_family) or stage_family
+    payload_severity = pending.get("severity", severity)
+    action_meaning = pending.get("action_meaning", _decision_action_meaning(payload_stage_family, action_val))
+    semantic_action = pending.get("semantic_action", _decision_semantic_action(payload_stage_family, action_val))
 
     h_index = -1
     if matched == 1:
@@ -1104,6 +1339,10 @@ def _decision_finalize(row, reward, action=None, stage="receive_reward", source=
         "duration_type": getattr(Intermodal_ALNS34959, "duration_type", ""),
         "gt_mean": current_gt_mean,
         "phase_label": str(current_phase_label or ""),
+        "severity": payload_severity,
+        "stage_family": payload_stage_family,
+        "action_meaning": action_meaning,
+        "semantic_action": semantic_action,
         "action": action_val,
         "reward": reward_val,
         "p_action1": p_action1,
@@ -1146,6 +1385,10 @@ def _decision_flush_unmatched_rows():
             "duration_type": getattr(Intermodal_ALNS34959, "duration_type", ""),
             "gt_mean": current_gt_mean,
             "phase_label": str(current_phase_label or ""),
+            "severity": pending.get("severity", globals().get("severity_level", "")),
+            "stage_family": pending.get("stage_family", ""),
+            "action_meaning": pending.get("action_meaning", ""),
+            "semantic_action": pending.get("semantic_action", ""),
             "action": pending.get("action", ""),
             "reward": "",
             "p_action1": pending.get("p_action1", ""),
@@ -1428,17 +1671,35 @@ def stop_wait():
     try:
         if os.path.exists(get_stop_flag_path()) and Intermodal_ALNS34959.ALNS_end_flag != 1:
             save_plot_reward_list()
+            _maybe_save_checkpoint_on_stop_exit()
             sys.exit(78)
     except:
         if os.path.exists(get_stop_flag_path()):
             save_plot_reward_list()
+            _maybe_save_checkpoint_on_stop_exit()
             sys.exit(78)
 #@profile()
 def send_action(action, trace_extra=None, obs_snapshot=None):
-    # global only_stop_once_by_implementation
     if stop_everything_in_learning_and_go_to_implementation_phase == 1:
         return
-    # get the index first
+
+    def _fail_fast(reason, err_text="", row_dict=None):
+        msg = f"[RL][FATAL] send_action {reason}"
+        if err_text:
+            msg += f" | {err_text}"
+        print(msg)
+        try:
+            log_trace_from_row(
+                row_dict or {},
+                "send_action_fatal",
+                action=action,
+                source="RL",
+                extra={"reason": str(reason), "error": str(err_text)},
+            )
+        except Exception:
+            pass
+        raise SystemExit(124)
+
     break_flag = 0
     wait_start = time.time()
     last_log = wait_start
@@ -1447,80 +1708,136 @@ def send_action(action, trace_extra=None, obs_snapshot=None):
             return
         if len(Intermodal_ALNS34959.state_reward_pairs) != 0:
             break
-        else:
-            print('len(Intermodal_ALNS34959.state_reward_pairs) == 0 in send_action function')
-            timed_out, last_log, wait_start = _wait_watchdog("send_action_wait_pairs", wait_start, last_log)
-            if timed_out:
-                return
-            if WAIT_SLEEP_S > 0:
-                time.sleep(WAIT_SLEEP_S)
+        print('len(Intermodal_ALNS34959.state_reward_pairs) == 0 in send_action function')
+        timed_out, last_log, wait_start = _wait_watchdog("send_action_wait_pairs", wait_start, last_log)
+        if timed_out:
+            return
+        if WAIT_SLEEP_S > 0:
+            time.sleep(WAIT_SLEEP_S)
+
     wait_start = time.time()
     last_log = wait_start
+    wait_slot_loops = 0
+    reselect_count = 0
+    last_write_error = ""
+    pair_index = None
+
     while True:
-        # print('send action 1')
-        # if only_stop_once_by_implementation == 0:
-        #     if Intermodal_ALNS34959.interrupt_by_implement_is_one_and_assign_action_once_only == 1:
-        #         only_stop_once_by_implementation = 1
-        #         break
         stop_wait()
         if stop_everything_in_learning_and_go_to_implementation_phase == 1:
             return
+
+        slot_written = False
         for pair_index in Intermodal_ALNS34959.state_reward_pairs.index:
             try:
                 check = Intermodal_ALNS34959.state_reward_pairs['uncertainty_index'][pair_index] == uncertainty_index and \
                     Intermodal_ALNS34959.state_reward_pairs['vehicle'][pair_index] == vehicle and \
                     Intermodal_ALNS34959.state_reward_pairs['request'][pair_index] == request and \
                     Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] == -10000000
-            except:
-                break
+            except Exception:
+                continue
             if implement == 0:
                 if Intermodal_ALNS34959.after_action_review == 1:
                     check = check and Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index] == 'finish'
             else:
                 check = check and Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index] == 'begin'
-            if check:
-                while True:
-                    # print('send action 2')
-                    stop_wait()
-                    if stop_everything_in_learning_and_go_to_implementation_phase == 1:
-                        return
-                    try:
-                        Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
-                        try:
-                            row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
-                        except:
-                            row_dict = {}
-                        row_dict["pair_index"] = pair_index
-                        try:
-                            _decision_note_send(
-                                row=row_dict,
-                                action=action,
-                                obs_snapshot=obs_snapshot,
-                                trace_extra=trace_extra,
-                                source="RL",
-                            )
-                        except Exception:
-                            pass
-                        log_trace_from_row(row_dict, "send_action", action=action, source="RL", extra=trace_extra)
-                        break
-                    except:
-                        print("Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action")
-                        continue
-                # parallel_save_excel(path + 'state_reward_pairs.xlsx', Intermodal_ALNS34959.state_reward_pairs, 'state_reward_pairs')
-                break_flag = 1
-                break
-        if break_flag == 1:
+
+            if not check:
+                continue
+
+            write_retry = 0
             while True:
-                # print('send action 3')
                 stop_wait()
                 if stop_everything_in_learning_and_go_to_implementation_phase == 1:
                     return
-                if Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] != -10000000:
-                    break
-                else:
-                    print("Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] != -10000000")
+                try:
                     Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
+                    try:
+                        row_dict = dict(Intermodal_ALNS34959.state_reward_pairs.loc[pair_index])
+                    except Exception:
+                        row_dict = {}
+                    row_dict["pair_index"] = pair_index
+                    try:
+                        _decision_note_send(
+                            row=row_dict,
+                            action=action,
+                            obs_snapshot=obs_snapshot,
+                            trace_extra=trace_extra,
+                            source="RL",
+                        )
+                    except Exception:
+                        pass
+                    log_trace_from_row(row_dict, "send_action", action=action, source="RL", extra=trace_extra)
+                    slot_written = True
+                    break
+                except Exception as exc:
+                    write_retry += 1
+                    last_write_error = f"{type(exc).__name__}: {exc}"
+                    if write_retry == 1 or write_retry % SEND_ACTION_ERROR_LOG_EVERY == 0:
+                        print(
+                            f"[RL][WARN] send_action_write_retry pair={pair_index} "
+                            f"retry={write_retry}/{SEND_ACTION_MAX_WRITE_RETRY} err={last_write_error}"
+                        )
+                    timed_out, last_log, wait_start = _wait_watchdog(
+                        "send_action_write_retry",
+                        wait_start,
+                        last_log,
+                    )
+                    if timed_out:
+                        return
+                    if write_retry >= SEND_ACTION_MAX_WRITE_RETRY:
+                        reselect_count += 1
+                        print(
+                            f"[RL][WARN] send_action reselect slot after write failures "
+                            f"(reselect={reselect_count}/{SEND_ACTION_MAX_RESELECT}, pair={pair_index})"
+                        )
+                        break
+                    if WAIT_SLEEP_S > 0:
+                        time.sleep(WAIT_SLEEP_S)
+                    continue
+
+            if slot_written:
+                break_flag = 1
+                break
+
+        if break_flag == 1 and pair_index is not None:
+            confirm_retry = 0
+            while True:
+                stop_wait()
+                if stop_everything_in_learning_and_go_to_implementation_phase == 1:
+                    return
+                try:
+                    if Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] != -10000000:
+                        break
+                    Intermodal_ALNS34959.state_reward_pairs['action'][pair_index] = action
+                except Exception as exc:
+                    confirm_retry += 1
+                    err_text = f"{type(exc).__name__}: {exc}"
+                    if confirm_retry == 1 or confirm_retry % SEND_ACTION_ERROR_LOG_EVERY == 0:
+                        print(
+                            f"[RL][WARN] send_action_confirm_slot_retry pair={pair_index} "
+                            f"retry={confirm_retry}/{SEND_ACTION_MAX_CONFIRM_RETRY} err={err_text}"
+                        )
+                    if confirm_retry >= SEND_ACTION_MAX_CONFIRM_RETRY:
+                        _fail_fast("confirm_retry_exhausted", err_text)
+                timed_out, last_log, wait_start = _wait_watchdog(
+                    "send_action_confirm_slot",
+                    wait_start,
+                    last_log,
+                )
+                if timed_out:
+                    return
+                if WAIT_SLEEP_S > 0:
+                    time.sleep(WAIT_SLEEP_S)
             break
+
+        if reselect_count >= SEND_ACTION_MAX_RESELECT:
+            _fail_fast("reselect_exhausted", last_write_error)
+
+        wait_slot_loops += 1
+        if wait_slot_loops >= SEND_ACTION_MAX_WAIT_SLOT_LOOPS:
+            _fail_fast("wait_slot_exhausted", f"loops={wait_slot_loops},last_err={last_write_error}")
+
         timed_out, last_log, wait_start = _wait_watchdog("send_action_wait_slot", wait_start, last_log)
         if timed_out:
             return
@@ -2368,9 +2685,10 @@ def append_new_line(file_name, text_to_append):
         file_object.write(text_to_append)
 
 def main(algorithm2, mode2):
-    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward, LBKLAC_CUSTOM_LOGGING, USE_LSTM, STAGE_IN_OBS, USE_AUGMENTED_OBS, ALGO_VERSION, PPO_NEW_WINDOW_K, STAGE_MODE, INIT_MODEL_PATH, SAVE_MODEL_PATH, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP, ORACLE_CTX_MODE, ORACLE_GT_MEAN_NORM, ORACLE_PHASE_CLASSES, PDI_GT_MEAN_LIST, PDI_PHASE_LIST, PDI_REWARD_LIST
+    global wrong_severity_level_with_probability, add_event_types, stop_everything_in_learning_and_go_to_implementation_phase, clear_pairs_done, ALNS_got_action_in_implementation, table_number_collect, state_action_reward_collect, all_rewards_list, wait_training_finish_last_iteration, state_action_reward_collect_for_evaluate, number_of_state_key, state_keys, evaluate, implement, iteration_times, RL_drop_finish, non_stationary, algorithm, time_dependent, episode_length, next_state_reward_time_step, next_state_penalty_time_step, total_timesteps2, iteration_multiply, add_ALNS, iteration_numbers_unit, mode, travel_time_barge, travel_time_train, travel_time_truck, time_s, model, env, all_average_reward,all_deviation, timestamps, repeat, sucess_times, curriculum_converged, curriculum_last_avg_reward, LBKLAC_CUSTOM_LOGGING, USE_LSTM, STAGE_IN_OBS, USE_AUGMENTED_OBS, ALGO_VERSION, PPO_NEW_WINDOW_K, STAGE_MODE, INIT_MODEL_PATH, SAVE_MODEL_PATH, LSTM_CHAIN_LEN, LSTM_CHAIN_STEP, ORACLE_CTX_MODE, ORACLE_GT_MEAN_NORM, ORACLE_PHASE_CLASSES, PDI_GT_MEAN_LIST, PDI_PHASE_LIST, PDI_REWARD_LIST, _CHECKPOINT_SAVED_ON_STOP
     add_event_types =0 
     stop_everything_in_learning_and_go_to_implementation_phase = 0
+    _CHECKPOINT_SAVED_ON_STOP = False
     clear_pairs_done = 0
     LBKLAC_CUSTOM_LOGGING = False
     # only_stop_once_by_implementation = 0
@@ -2437,6 +2755,7 @@ def main(algorithm2, mode2):
             "v5.2_qcritic", "v52_qcritic", "v5_2_qcritic",
             "v5.3_auxweak", "v53_auxweak", "v5_3_auxweak",
             "v6.2_v3cvar", "v62_v3cvar", "v6_2_v3cvar",
+            "v6.3_cadm", "v63_cadm", "v6_3_cadm",
             "v7.2_poolv3", "v72_poolv3", "v7_2_poolv3",
             "v8_a", "v8-a", "v8a", "pponew_v8_a", "pponewv8_a",
             "v9_a", "v9-a", "v9a", "pponew_v9_a", "pponewv9_a",
@@ -2783,6 +3102,30 @@ def main(algorithm2, mode2):
             if not _SB3_AVAILABLE or DQN is None:
                 raise ImportError("stable_baselines3 is required for DQN. Please install stable-baselines3 + torch.")
             model = DQN('MlpPolicy', env, verbose=1, learning_starts=10, device='cpu', seed=seed_val)
+        elif algorithm in {'CQL_DQN', 'CQL'}:
+            if not _CQL_AVAILABLE or DiscreteCQLAgent is None or CQLConfig is None:
+                raise ImportError("CQL_DQN requires robust_rl.cql_dqn + torch + stable-baselines3.")
+            cql_cfg = CQLConfig(
+                learning_rate=float(os.environ.get("CQL_LR", "0.001")),
+                buffer_size=int(os.environ.get("CQL_BUFFER_SIZE", "50000")),
+                learning_starts=int(os.environ.get("CQL_LEARNING_STARTS", "200")),
+                batch_size=int(os.environ.get("CQL_BATCH_SIZE", "64")),
+                train_freq=int(os.environ.get("CQL_TRAIN_FREQ", "4")),
+                gradient_steps=int(os.environ.get("CQL_GRAD_STEPS", "1")),
+                target_update_interval=int(os.environ.get("CQL_TARGET_UPDATE", "500")),
+                exploration_fraction=float(os.environ.get("CQL_EXPL_FRACTION", "0.1")),
+                exploration_initial_eps=float(os.environ.get("CQL_EXPL_INIT", "1.0")),
+                exploration_final_eps=float(os.environ.get("CQL_EXPL_FINAL", "0.02")),
+                max_grad_norm=float(os.environ.get("CQL_MAX_GRAD_NORM", "10.0")),
+                cql_alpha=float(os.environ.get("CQL_ALPHA", "1.0")),
+                cql_temp=float(os.environ.get("CQL_TEMP", "1.0")),
+                device=os.environ.get("CQL_DEVICE", "cpu"),
+            )
+            model = DiscreteCQLAgent(
+                env,
+                config=cql_cfg,
+                seed=seed_val,
+            )
         elif algorithm == 'QRDQN_CVAR':
             if not _QRDQN_AVAILABLE or SB3_QRDQN is None:
                 raise ImportError("sb3-contrib with QRDQN is required for QRDQN_CVAR.")
@@ -2967,6 +3310,22 @@ def main(algorithm2, mode2):
                 raise ImportError("stable_baselines3 is required for PPO_NEW. Please install stable-baselines3 + torch.")
             from robust_rl.ppo_new import build_model as build_ppo_new_model
             tcr_kwargs = {}
+            ppo_new_extra_kwargs = {}
+
+            ppo_new_ent_coef_raw = str(os.environ.get("RL_PPO_NEW_ENT_COEF", "")).strip()
+            if ppo_new_ent_coef_raw != "":
+                try:
+                    ppo_new_extra_kwargs["ent_coef"] = float(ppo_new_ent_coef_raw)
+                except Exception:
+                    print(f"[RL][WARN] invalid RL_PPO_NEW_ENT_COEF='{ppo_new_ent_coef_raw}', ignored")
+
+            ppo_new_lr_raw = str(os.environ.get("RL_PPO_NEW_LR", "")).strip()
+            if ppo_new_lr_raw != "":
+                try:
+                    ppo_new_extra_kwargs["learning_rate"] = float(ppo_new_lr_raw)
+                except Exception:
+                    print(f"[RL][WARN] invalid RL_PPO_NEW_LR='{ppo_new_lr_raw}', ignored")
+
             tcr_family_versions = (
                 "v7.3_tcrppo", "v73_tcrppo", "v7_3_tcrppo",
                 "v7.4_tcrv3", "v74_tcrv3", "v7_4_tcrv3",
@@ -3071,6 +3430,7 @@ def main(algorithm2, mode2):
                 n_steps=10,
                 verbose=1,
                 policy_kwargs=hat_policy_kwargs,
+                **ppo_new_extra_kwargs,
                 **tcr_kwargs,
             )
         elif algorithm == 'PPO':
@@ -3254,6 +3614,11 @@ def main(algorithm2, mode2):
             except Exception:
                 pass
             try:
+                if hasattr(model, "last_cql_metrics"):
+                    extra.update(dict(getattr(model, "last_cql_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
                 if hasattr(model, "last_tcr_metrics"):
                     extra.update(dict(getattr(model, "last_tcr_metrics", {}) or {}))
             except Exception:
@@ -3341,6 +3706,11 @@ def main(algorithm2, mode2):
             except Exception:
                 pass
             try:
+                if hasattr(model, "last_cql_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_cql_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
                 if hasattr(model, "last_tcr_metrics"):
                     eval_extra.update(dict(getattr(model, "last_tcr_metrics", {}) or {}))
             except Exception:
@@ -3398,6 +3768,7 @@ def main(algorithm2, mode2):
             _reset_model_inference_state("enter_implement")
             while True:
                 if os.path.exists(get_stop_flag_path()):
+                    _maybe_save_checkpoint_on_stop_exit()
                     sys.exit(78)
                 if Dynamic_ALNS_RL34959.RL_can_start_implementation_phase_from_the_last_table == 1:
                     stop_everything_in_learning_and_go_to_implementation_phase = 0
@@ -3423,6 +3794,7 @@ def main(algorithm2, mode2):
             while True:
                 while True:
                     if os.path.exists(get_stop_flag_path()):
+                        _maybe_save_checkpoint_on_stop_exit()
                         sys.exit(78)
                     # if len(Intermodal_ALNS34959.state_reward_pairs) == 1 and implement == 1:
                     #     print('i should check this wrong')
@@ -3483,6 +3855,9 @@ def main(algorithm2, mode2):
                             action, _states = model.predict(obs, deterministic=be_det)
                         elif algorithm == "QRDQN_CVAR":
                             action, _states = model.predict(obs, deterministic=True)
+                        elif algorithm in {"CQL_DQN", "CQL"}:
+                            cql_det = os.environ.get("CQL_IMPL_DETERMINISTIC", "1").strip() == "1"
+                            action, _states = model.predict(obs, deterministic=cql_det)
                         else:
                             action, _states = model.predict(obs)
                         try:
@@ -3565,6 +3940,7 @@ def main(algorithm2, mode2):
                     if ALNS_got_action_in_implementation == 1 or len(Intermodal_ALNS34959.state_reward_pairs) == 0:#danger donot know why in rare case Intermodal_ALNS34959.state_reward_pairs is empty when alns got action is 0, but i think i can let it go to next iteration
                         # clear all data in pairs
                         if os.path.exists(get_stop_flag_path()):
+                            _maybe_save_checkpoint_on_stop_exit()
                             sys.exit(78)
                         _flush_impl_reward_lists(env)
                         if _hat_is_active() and implement == 1 and algorithm in ("PPO", "A2C"):
