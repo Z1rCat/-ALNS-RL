@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -35,14 +36,14 @@ def _print_cmd(tag: str, cmd: List[str]) -> None:
     print(f"[PIPELINE][{tag}] {pretty}")
 
 
-def _run_or_fail(tag: str, cmd: List[str]) -> None:
+def _run_or_fail(tag: str, cmd: List[str], env: Optional[Dict[str, str]] = None) -> None:
     _print_cmd(tag, cmd)
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
 
 
-def _run_with_code(tag: str, cmd: List[str]) -> int:
+def _run_with_code(tag: str, cmd: List[str], env: Optional[Dict[str, str]] = None) -> int:
     _print_cmd(tag, cmd)
-    completed = subprocess.run(cmd, check=False)
+    completed = subprocess.run(cmd, check=False, env=env)
     return int(completed.returncode)
 
 
@@ -83,6 +84,26 @@ def _build_phase1_cmd(
     return cmd
 
 
+def _build_phase1_env(args: argparse.Namespace, run_root: Path) -> Dict[str, str]:
+    env = dict(os.environ)
+    for key in ("RL_PHASE1_HIST_EVERY_TABLES", "RL_PHASE1_HIST_CKPT_DIR", "RL_PHASE1_HIST_MANIFEST"):
+        env.pop(key, None)
+    try:
+        every_tables = max(0, int(args.phase1_history_every_tables))
+    except Exception:
+        every_tables = 0
+    if every_tables <= 0:
+        return env
+    hist_ckpt_dir = (run_root / "post_stage" / "checkpoints" / "phase1_history").resolve()
+    hist_manifest = (run_root / "post_stage" / "phase1_ckpt_manifest.csv").resolve()
+    hist_ckpt_dir.mkdir(parents=True, exist_ok=True)
+    hist_manifest.parent.mkdir(parents=True, exist_ok=True)
+    env["RL_PHASE1_HIST_EVERY_TABLES"] = str(int(every_tables))
+    env["RL_PHASE1_HIST_CKPT_DIR"] = str(hist_ckpt_dir)
+    env["RL_PHASE1_HIST_MANIFEST"] = str(hist_manifest)
+    return env
+
+
 def _build_outer_cmd(
     args: argparse.Namespace,
     python_bin: str,
@@ -90,6 +111,7 @@ def _build_outer_cmd(
     base_ckpt: Optional[Path],
     phase1_data_root: Path,
     passthrough: List[str],
+    extra_tail_args: Optional[List[str]] = None,
 ) -> List[str]:
     cmd = [
         python_bin,
@@ -294,6 +316,8 @@ def _build_outer_cmd(
         cmd.extend(["--base-ckpt", str(base_ckpt)])
     if passthrough:
         cmd.extend(passthrough)
+    if extra_tail_args:
+        cmd.extend([str(x) for x in extra_tail_args])
     return cmd
 
 
@@ -301,14 +325,35 @@ def _read_csv_rows(path: Path) -> List[dict]:
     if not path.exists():
         return []
     with path.open("r", newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        if reader.fieldnames:
+            reader.fieldnames = [str(name).lstrip("\ufeff") if name is not None else "" for name in reader.fieldnames]
+        rows: List[dict] = []
+        for row in reader:
+            clean_row = {}
+            for key, value in row.items():
+                clean_key = str(key).lstrip("\ufeff") if key is not None else ""
+                clean_row[clean_key] = value
+            rows.append(clean_row)
+        return rows
 
 
-def _pick_phase4_ckpt(post_stage: Path, policy: str = "latest_phase3") -> Tuple[Path, Dict[str, object]]:
+def _safe_int(value, default: int = -1) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except Exception:
+        return int(default)
+
+
+def _pick_outer_ckpt_record(
+    post_stage: Path,
+    policy: str = "latest_phase3",
+) -> Tuple[Path, Dict[str, object], Optional[Dict[str, str]]]:
     train_round_csv = post_stage / "outer_train_round.csv"
     rows = _read_csv_rows(train_round_csv)
     policy_name = str(policy or "latest_phase3").strip().lower()
     chosen: Optional[Path] = None
+    chosen_row: Optional[Dict[str, str]] = None
     chosen_meta: Dict[str, object] = {
         "policy": policy_name,
         "source": "",
@@ -343,6 +388,31 @@ def _pick_phase4_ckpt(post_stage: Path, policy: str = "latest_phase3") -> Tuple[
         )
         if ranked:
             chosen, row = ranked[0]
+            chosen_row = dict(row)
+            chosen_meta.update(
+                {
+                    "source": "outer_train_round.csv",
+                    "phase": str(row.get("phase", "")),
+                    "iter_id": str(row.get("iter_id", "")),
+                    "objective_score": _safe_float(
+                        row.get("objective_score", row.get("objective", "")),
+                        default=float("nan"),
+                    ),
+                }
+            )
+    elif policy_name == "best_any_objective":
+        ranked = sorted(
+            valid_rows,
+            key=lambda item: (
+                _safe_float(item[1].get("objective_score", ""), default=float("-inf")),
+                _safe_float(item[1].get("objective", ""), default=float("-inf")),
+                _safe_float(item[1].get("iter_id", ""), default=float("-inf")),
+            ),
+            reverse=True,
+        )
+        if ranked:
+            chosen, row = ranked[0]
+            chosen_row = dict(row)
             chosen_meta.update(
                 {
                     "source": "outer_train_round.csv",
@@ -357,6 +427,7 @@ def _pick_phase4_ckpt(post_stage: Path, policy: str = "latest_phase3") -> Tuple[
     elif policy_name == "latest_any":
         if valid_rows:
             chosen, row = valid_rows[-1]
+            chosen_row = dict(row)
             chosen_meta.update(
                 {
                     "source": "outer_train_round.csv",
@@ -371,6 +442,7 @@ def _pick_phase4_ckpt(post_stage: Path, policy: str = "latest_phase3") -> Tuple[
     else:
         if phase3_rows:
             chosen, row = phase3_rows[-1]
+            chosen_row = dict(row)
             chosen_meta.update(
                 {
                     "source": "outer_train_round.csv",
@@ -384,6 +456,7 @@ def _pick_phase4_ckpt(post_stage: Path, policy: str = "latest_phase3") -> Tuple[
             )
         elif valid_rows:
             chosen, row = valid_rows[-1]
+            chosen_row = dict(row)
             chosen_meta.update(
                 {
                     "source": "outer_train_round.csv_fallback",
@@ -411,7 +484,274 @@ def _pick_phase4_ckpt(post_stage: Path, policy: str = "latest_phase3") -> Tuple[
             )
     if chosen is None:
         raise FileNotFoundError("phase4 init checkpoint not found from outer stage")
+    return chosen, chosen_meta, chosen_row
+
+
+def _pick_phase4_ckpt(post_stage: Path, policy: str = "latest_phase3") -> Tuple[Path, Dict[str, object]]:
+    chosen, chosen_meta, _ = _pick_outer_ckpt_record(post_stage=post_stage, policy=policy)
     return chosen, chosen_meta
+
+
+def _resolve_phase4_eval_context(args: argparse.Namespace) -> Dict[str, object]:
+    phase4_dist = str(args.phase4_dist_name).strip() or str(args.phase1_dist_name)
+    phase4_req = int(args.phase4_request_number) if int(args.phase4_request_number) > 0 else int(args.phase1_request_number)
+    phase4_algo = str(args.phase4_algorithm).strip() or str(args.phase1_algorithm)
+    if str(phase4_algo).strip().upper() == "NOVA_EDRL":
+        phase4_algo = str(args.phase1_algorithm)
+    phase4_ver = str(args.phase4_algo_version).strip() or str(args.phase1_algo_version)
+    phase4_seed = int(args.phase4_seed) if int(args.phase4_seed) >= 0 else int(args.phase1_seed)
+    return {
+        "dist_name": str(phase4_dist),
+        "request_number": int(phase4_req),
+        "algorithm": str(phase4_algo),
+        "algo_version": str(phase4_ver),
+        "seed": int(phase4_seed),
+    }
+
+
+def _resolve_outer_metric(
+    row: Optional[Dict[str, str]],
+    meta: Optional[Dict[str, object]],
+    metric_name: str,
+) -> float:
+    metric_key = str(metric_name or "").strip() or "objective_score"
+    aliases = [metric_key]
+    if metric_key == "objective_score":
+        aliases.extend(["objective"])
+    elif metric_key == "avg_reward":
+        aliases.extend(["J"])
+    elif metric_key == "J":
+        aliases.extend(["avg_reward"])
+    elif metric_key == "action1_rate":
+        aliases.extend(["minority_rate"])
+    elif metric_key == "minority_rate":
+        aliases.extend(["action1_rate"])
+    for key in aliases:
+        if row is not None:
+            val = _safe_float(row.get(key, ""), default=float("nan"))
+            if not math.isnan(val):
+                return float(val)
+        if meta is not None:
+            val = _safe_float(meta.get(key, ""), default=float("nan"))
+            if not math.isnan(val):
+                return float(val)
+    return float("nan")
+
+
+def _rows_to_csv(path: Path, rows: List[Dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames: List[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(str(key))
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def _manifest_for_rollback(args: argparse.Namespace, post_stage: Path) -> Path:
+    raw = str(getattr(args, "rollback_manifest_path", "") or "").strip()
+    if raw:
+        return Path(raw).resolve()
+    return (post_stage / "phase1_ckpt_manifest.csv").resolve()
+
+
+def _manifest_for_actor_rollback(args: argparse.Namespace, post_stage: Path) -> Path:
+    raw = str(getattr(args, "actor_rollback_manifest_path", "") or "").strip()
+    if raw:
+        return Path(raw).resolve()
+    return (post_stage / "phase1_ckpt_manifest.csv").resolve()
+
+
+def _resolve_actor_rollback_early_ckpt(args: argparse.Namespace, post_stage: Path) -> Optional[Path]:
+    raw = str(getattr(args, "actor_rollback_early_ckpt", "") or "").strip()
+    if raw:
+        candidate = Path(raw).resolve()
+        return candidate if candidate.exists() else None
+    manifest_path = _manifest_for_actor_rollback(args=args, post_stage=post_stage)
+    if not manifest_path.exists():
+        return None
+    rows = _read_csv_rows(manifest_path)
+    if not rows:
+        return None
+    preferred: List[Tuple[int, int, Path]] = []
+    fallback: List[Tuple[int, int, Path]] = []
+    for row in rows:
+        ckpt_raw = str(row.get("checkpoint_path", "")).strip()
+        if not ckpt_raw:
+            continue
+        ckpt_path = Path(ckpt_raw).resolve()
+        if not ckpt_path.exists():
+            continue
+        completed = _safe_int(row.get("completed_train_tables", ""), default=10**9)
+        table_number = _safe_int(row.get("table_number", ""), default=10**9)
+        trigger = str(row.get("trigger", "")).strip().lower()
+        item = (completed, table_number, ckpt_path)
+        if trigger != "final_save_model_path":
+            preferred.append(item)
+        fallback.append(item)
+    pool = preferred if preferred else fallback
+    if not pool:
+        return None
+    pool = sorted(pool, key=lambda item: (item[0], item[1], str(item[2]).lower()))
+    return pool[0][2]
+
+
+def _build_actor_rollback_ckpt(
+    args: argparse.Namespace,
+    python_bin: str,
+    *,
+    late_ckpt: Path,
+    early_ckpt: Path,
+    out_ckpt: Path,
+    manifest_path: Path,
+) -> None:
+    cmd = [
+        python_bin,
+        str((CODES_DIR / "analysis" / "eval_actor_head_swap.py").resolve()),
+        "--late-ckpt",
+        str(late_ckpt.resolve()),
+        "--early-ckpt",
+        str(early_ckpt.resolve()),
+        "--mode",
+        str(args.actor_rollback_mode),
+        "--interp-alpha",
+        str(float(args.actor_rollback_interp_alpha)),
+        "--out-ckpt",
+        str(out_ckpt.resolve()),
+        "--manifest-path",
+        str(manifest_path.resolve()),
+    ]
+    _run_or_fail("ACTOR_ROLLBACK_BUILD", cmd)
+
+
+def _run_rollback_ranking(
+    args: argparse.Namespace,
+    python_bin: str,
+    manifest_path: Path,
+    ranking_dir: Path,
+    phase1_data_root: Path,
+) -> Tuple[Path, Path]:
+    phase4_ctx = _resolve_phase4_eval_context(args=args)
+    ckpt_algo = str(args.phase1_algorithm)
+    ckpt_algo_version = str(args.phase1_algo_version)
+    cmd = [
+        python_bin,
+        str((CODES_DIR / "analysis" / "rank_phase1_checkpoints.py").resolve()),
+        "--manifest-path",
+        str(manifest_path),
+        "--out-dir",
+        str(ranking_dir.resolve()),
+        "--run-eval",
+        "--dist-name",
+        str(phase4_ctx["dist_name"]),
+        "--request-number",
+        str(int(phase4_ctx["request_number"])),
+        "--algorithm",
+        str(ckpt_algo),
+        "--algo-version",
+        str(ckpt_algo_version),
+        "--seed",
+        str(int(phase4_ctx["seed"])),
+        "--workers",
+        str(max(1, int(args.phase4_workers))),
+        "--reward-floor-ratio",
+        str(float(args.rollback_reward_floor_ratio)),
+        "--top-k",
+        str(max(1, int(args.rollback_topk))),
+    ]
+    if phase1_data_root.exists():
+        cmd.extend(["--external-data-root", str(phase1_data_root.resolve())])
+    if int(args.rollback_eval_timeout_sec) > 0:
+        cmd.extend(["--timeout-sec", str(int(args.rollback_eval_timeout_sec))])
+    if bool(args.rollback_allow_partial_on_timeout):
+        cmd.append("--allow-partial-on-timeout")
+    _run_or_fail("ROLLBACK_RANK", cmd)
+    return (
+        (ranking_dir / "phase1_ckpt_ranked.csv").resolve(),
+        (ranking_dir / "phase1_ckpt_topk.csv").resolve(),
+    )
+
+
+def _select_branch_winner(
+    rows: List[Dict[str, object]],
+    compare_metric: str,
+) -> Optional[Dict[str, object]]:
+    if not rows:
+        return None
+
+    def _score(item: Dict[str, object]) -> Tuple[int, float, float, int, float]:
+        metric_val = _safe_float(item.get("compare_metric_value", ""), default=float("nan"))
+        objective_val = _safe_float(item.get("objective_score", ""), default=float("nan"))
+        iter_val = _safe_float(item.get("iter_id", ""), default=float("-inf"))
+        metric_ok = 0 if math.isnan(metric_val) else 1
+        obj_ok = 0 if math.isnan(objective_val) else 1
+        return (
+            metric_ok,
+            float("-inf") if math.isnan(metric_val) else float(metric_val),
+            float("-inf") if math.isnan(objective_val) else float(objective_val),
+            1 if str(item.get("branch_id", "")) == "main" else 0,
+            float("-inf") if (not obj_ok and math.isnan(iter_val)) else float(iter_val),
+        )
+
+    ranked = sorted(rows, key=_score, reverse=True)
+    winner = dict(ranked[0])
+    winner["compare_metric"] = str(compare_metric)
+    return winner
+
+
+def _collect_branch_result(
+    branch_id: str,
+    branch_root: Path,
+    post_stage: Path,
+    policy: str,
+    compare_metric: str,
+    candidate_row: Optional[Dict[str, str]] = None,
+    subprocess_exit_code: int = 0,
+) -> Dict[str, object]:
+    result: Dict[str, object] = {
+        "branch_id": str(branch_id),
+        "branch_root": str(branch_root),
+        "post_stage": str(post_stage),
+        "candidate_checkpoint": "" if not candidate_row else str(candidate_row.get("checkpoint_path", "")),
+        "candidate_rank": "" if not candidate_row else str(candidate_row.get("rank", "")),
+        "candidate_completed_train_tables": "" if not candidate_row else str(candidate_row.get("completed_train_tables", "")),
+        "subprocess_exit_code": int(subprocess_exit_code),
+        "status": "no_result",
+        "compare_metric": str(compare_metric),
+        "compare_metric_value": "",
+        "phase": "",
+        "iter_id": "",
+        "objective_score": "",
+        "selected_ckpt": "",
+        "selected_ckpt_source": "",
+    }
+    try:
+        selected_ckpt, selected_meta, selected_row = _pick_outer_ckpt_record(post_stage=post_stage, policy=policy)
+    except Exception as exc:
+        result["status"] = f"select_failed:{type(exc).__name__}"
+        result["error"] = str(exc)
+        return result
+    metric_value = _resolve_outer_metric(row=selected_row, meta=selected_meta, metric_name=compare_metric)
+    result.update(
+        {
+            "status": "ok" if int(subprocess_exit_code) == 0 else "ok_with_nonzero_exit",
+            "compare_metric_value": "" if math.isnan(metric_value) else float(metric_value),
+            "phase": str(selected_meta.get("phase", "")),
+            "iter_id": str(selected_meta.get("iter_id", "")),
+            "objective_score": selected_meta.get("objective_score", ""),
+            "selected_ckpt": str(selected_ckpt),
+            "selected_ckpt_source": str(selected_meta.get("source", "")),
+            "selected_policy": str(selected_meta.get("policy", "")),
+        }
+    )
+    return result
 
 
 def _build_phase4_cmd(
@@ -421,32 +761,25 @@ def _build_phase4_cmd(
     phase4_ckpt: Path,
     phase1_data_root: Path,
 ) -> List[str]:
-    phase4_dist = str(args.phase4_dist_name).strip() or str(args.phase1_dist_name)
-    phase4_req = int(args.phase4_request_number) if int(args.phase4_request_number) > 0 else int(args.phase1_request_number)
-    phase4_algo = str(args.phase4_algorithm).strip() or str(args.phase1_algorithm)
-    if str(phase4_algo).strip().upper() == "NOVA_EDRL":
-        # phase4 must reuse master implement path, not recursively invoke the NOVA pipeline.
-        phase4_algo = str(args.phase1_algorithm)
-    phase4_ver = str(args.phase4_algo_version).strip() or str(args.phase1_algo_version)
-    phase4_seed = int(args.phase4_seed) if int(args.phase4_seed) >= 0 else int(args.phase1_seed)
+    phase4_ctx = _resolve_phase4_eval_context(args=args)
 
     cmd = [
         python_bin,
         str(CODES_DIR / "Dynamic_master34959.py"),
         "--dist_name",
-        str(phase4_dist),
+        str(phase4_ctx["dist_name"]),
         "--request_number",
-        str(int(phase4_req)),
+        str(int(phase4_ctx["request_number"])),
         "--algorithm",
-        str(phase4_algo),
+        str(phase4_ctx["algorithm"]),
         "--algo_version",
-        str(phase4_ver),
+        str(phase4_ctx["algo_version"]),
         "--stage-mode",
         "eval_only",
         "--run-name",
         str(run_name),
         "--seed",
-        str(int(phase4_seed)),
+        str(int(phase4_ctx["seed"])),
         "--skip-generator",
         "--external-data-root",
         str(phase1_data_root.resolve()),
@@ -467,6 +800,10 @@ def _write_pipeline_summary(
     phase4_ckpt_meta: Optional[Dict[str, object]],
     phase1_data_root: Path,
     phase4_ran: bool,
+    phase1_history_every_tables: int = 0,
+    phase1_history_manifest: Optional[Path] = None,
+    actor_rollback_result: Optional[Dict[str, object]] = None,
+    rollback_result: Optional[Dict[str, object]] = None,
 ) -> None:
     payload = {
         "run_id": str(run_name),
@@ -481,6 +818,34 @@ def _write_pipeline_summary(
         "phase4_ckpt_objective_score": "" if not phase4_ckpt_meta else phase4_ckpt_meta.get("objective_score", ""),
         "phase1_data_root": str(phase1_data_root),
         "phase4_ran": int(bool(phase4_ran)),
+        "phase1_history_every_tables": int(phase1_history_every_tables),
+        "phase1_history_manifest": "" if phase1_history_manifest is None else str(phase1_history_manifest),
+        "actor_rollback_enabled": 0 if not actor_rollback_result else int(bool(actor_rollback_result.get("enabled", False))),
+        "actor_rollback_triggered": 0 if not actor_rollback_result else int(bool(actor_rollback_result.get("triggered", False))),
+        "actor_rollback_trigger_metric": "" if not actor_rollback_result else str(actor_rollback_result.get("trigger_metric", "")),
+        "actor_rollback_trigger_threshold": "" if not actor_rollback_result else actor_rollback_result.get("trigger_threshold", ""),
+        "actor_rollback_main_metric_value": "" if not actor_rollback_result else actor_rollback_result.get("main_metric_value", ""),
+        "actor_rollback_selected_branch": "" if not actor_rollback_result else str(actor_rollback_result.get("selected_branch", "")),
+        "actor_rollback_selected_ckpt": "" if not actor_rollback_result else str(actor_rollback_result.get("selected_ckpt", "")),
+        "actor_rollback_compare_metric": "" if not actor_rollback_result else str(actor_rollback_result.get("compare_metric", "")),
+        "actor_rollback_compare_csv": "" if not actor_rollback_result else str(actor_rollback_result.get("compare_csv", "")),
+        "actor_rollback_branch_root": "" if not actor_rollback_result else str(actor_rollback_result.get("branch_root", "")),
+        "actor_rollback_mixed_ckpt": "" if not actor_rollback_result else str(actor_rollback_result.get("mixed_ckpt", "")),
+        "actor_rollback_swap_manifest": "" if not actor_rollback_result else str(actor_rollback_result.get("swap_manifest_path", "")),
+        "actor_rollback_early_ckpt": "" if not actor_rollback_result else str(actor_rollback_result.get("early_ckpt", "")),
+        "actor_rollback_late_ckpt": "" if not actor_rollback_result else str(actor_rollback_result.get("late_ckpt", "")),
+        "rollback_enabled": 0 if not rollback_result else int(bool(rollback_result.get("enabled", False))),
+        "rollback_triggered": 0 if not rollback_result else int(bool(rollback_result.get("triggered", False))),
+        "rollback_trigger_metric": "" if not rollback_result else str(rollback_result.get("trigger_metric", "")),
+        "rollback_trigger_threshold": "" if not rollback_result else rollback_result.get("trigger_threshold", ""),
+        "rollback_main_metric_value": "" if not rollback_result else rollback_result.get("main_metric_value", ""),
+        "rollback_selected_branch": "" if not rollback_result else str(rollback_result.get("selected_branch", "")),
+        "rollback_selected_ckpt": "" if not rollback_result else str(rollback_result.get("selected_ckpt", "")),
+        "rollback_compare_metric": "" if not rollback_result else str(rollback_result.get("compare_metric", "")),
+        "rollback_compare_csv": "" if not rollback_result else str(rollback_result.get("compare_csv", "")),
+        "rollback_ranking_dir": "" if not rollback_result else str(rollback_result.get("ranking_dir", "")),
+        "rollback_ranked_csv": "" if not rollback_result else str(rollback_result.get("ranked_csv", "")),
+        "rollback_topk_csv": "" if not rollback_result else str(rollback_result.get("topk_csv", "")),
     }
     out_path = post_stage / "pipeline_summary.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -500,6 +865,323 @@ def _resolve_phase1_data_root(args: argparse.Namespace, run_root: Path) -> Path:
         if rl_log_root:
             return (Path(rl_log_root).resolve() / run_id_raw / "data").resolve()
     return (run_root / "data").resolve()
+
+
+def _maybe_run_rollback_branches(
+    args: argparse.Namespace,
+    python_bin: str,
+    run_root: Path,
+    post_stage: Path,
+    phase1_data_root: Path,
+    main_ckpt: Path,
+    main_meta: Dict[str, object],
+    main_row: Optional[Dict[str, str]],
+) -> Dict[str, object]:
+    trigger_metric = str(args.rollback_trigger_metric).strip() or "action1_rate"
+    compare_metric = str(args.rollback_compare_metric).strip() or trigger_metric
+    result: Dict[str, object] = {
+        "enabled": bool(args.rollback_enable),
+        "triggered": False,
+        "trigger_metric": trigger_metric,
+        "trigger_threshold": float(args.rollback_trigger_threshold),
+        "compare_metric": compare_metric,
+        "main_metric_value": "",
+        "selected_branch": "main",
+        "selected_ckpt": str(main_ckpt),
+        "selected_meta": dict(main_meta),
+        "ranking_dir": "",
+        "ranked_csv": "",
+        "topk_csv": "",
+        "compare_csv": "",
+        "selected_json": "",
+    }
+    if not bool(args.rollback_enable):
+        return result
+
+    main_trigger_value = _resolve_outer_metric(row=main_row, meta=main_meta, metric_name=trigger_metric)
+    result["main_metric_value"] = "" if math.isnan(main_trigger_value) else float(main_trigger_value)
+    print(
+        "[PIPELINE][ROLLBACK] "
+        f"trigger_metric={trigger_metric} main_value={result['main_metric_value']} "
+        f"threshold={float(args.rollback_trigger_threshold):.6f}"
+    )
+    if math.isnan(main_trigger_value):
+        result["skip_reason"] = "main_metric_missing"
+        print(
+            "[PIPELINE][ROLLBACK][WARN] "
+            f"main branch metric '{trigger_metric}' missing in outer_train_round.csv; skip rollback branches"
+        )
+        return result
+    if float(main_trigger_value) >= float(args.rollback_trigger_threshold):
+        result["skip_reason"] = "threshold_not_triggered"
+        print("[PIPELINE][ROLLBACK] trigger not fired; keep main branch")
+        return result
+
+    manifest_path = _manifest_for_rollback(args=args, post_stage=post_stage)
+    if not manifest_path.exists():
+        result["triggered"] = True
+        result["skip_reason"] = "manifest_missing"
+        print(f"[PIPELINE][ROLLBACK][WARN] manifest not found, skip rollback ranking: {manifest_path}")
+        return result
+
+    result["triggered"] = True
+    session_dir = (run_root / "rollback_branches" / f"session_{int(time.time())}").resolve()
+    ranking_dir = (session_dir / "ranking").resolve()
+    session_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ranked_csv, topk_csv = _run_rollback_ranking(
+            args=args,
+            python_bin=python_bin,
+            manifest_path=manifest_path,
+            ranking_dir=ranking_dir,
+            phase1_data_root=phase1_data_root,
+        )
+    except Exception as exc:
+        result["skip_reason"] = "ranking_failed"
+        result["error"] = str(exc)
+        print(f"[PIPELINE][ROLLBACK][WARN] ranking failed, keep main branch: {exc}")
+        return result
+    result["ranking_dir"] = str(ranking_dir)
+    result["ranked_csv"] = str(ranked_csv)
+    result["topk_csv"] = str(topk_csv)
+
+    candidate_rows = [
+        row
+        for row in _read_csv_rows(topk_csv)
+        if str(row.get("checkpoint_path", "")).strip()
+        and Path(str(row.get("checkpoint_path", "")).strip()).resolve().exists()
+        and _safe_int(row.get("rank_candidate", "0"), default=0) == 1
+    ]
+    if not candidate_rows:
+        result["skip_reason"] = "no_ranked_candidates"
+        print("[PIPELINE][ROLLBACK][WARN] no valid rollback candidates after ranking; keep main branch")
+        return result
+
+    compare_rows: List[Dict[str, object]] = [
+        _collect_branch_result(
+            branch_id="main",
+            branch_root=run_root,
+            post_stage=post_stage,
+            policy=str(args.phase4_ckpt_policy),
+            compare_metric=compare_metric,
+            candidate_row=None,
+            subprocess_exit_code=0,
+        )
+    ]
+    for idx, candidate_row in enumerate(candidate_rows, start=1):
+        candidate_ckpt = Path(str(candidate_row.get("checkpoint_path", "")).strip()).resolve()
+        branch_id = f"cand_{idx:03d}"
+        branch_root = (session_dir / branch_id).resolve()
+        branch_cmd = _build_outer_cmd(
+            args=args,
+            python_bin=python_bin,
+            run_name=str(branch_root),
+            base_ckpt=candidate_ckpt,
+            phase1_data_root=phase1_data_root,
+            passthrough=list(args.outer_passthrough),
+            extra_tail_args=["--resume-mode", "none"],
+        )
+        exit_code = _run_with_code(f"ROLLBACK_{branch_id.upper()}", branch_cmd)
+        compare_rows.append(
+            _collect_branch_result(
+                branch_id=branch_id,
+                branch_root=branch_root,
+                post_stage=(branch_root / "post_stage").resolve(),
+                policy=str(args.phase4_ckpt_policy),
+                compare_metric=compare_metric,
+                candidate_row=candidate_row,
+                subprocess_exit_code=exit_code,
+            )
+        )
+
+    compare_csv = (session_dir / "rollback_branch_compare.csv").resolve()
+    _rows_to_csv(compare_csv, compare_rows)
+    result["compare_csv"] = str(compare_csv)
+
+    winner = _select_branch_winner(compare_rows, compare_metric=compare_metric)
+    if winner is None:
+        result["skip_reason"] = "winner_missing"
+        print("[PIPELINE][ROLLBACK][WARN] branch comparison produced no winner; keep main branch")
+        return result
+
+    selected_ckpt = str(winner.get("selected_ckpt", "")).strip()
+    if selected_ckpt:
+        result["selected_ckpt"] = selected_ckpt
+    result["selected_branch"] = str(winner.get("branch_id", "main"))
+    result["selected_meta"] = {
+        "policy": str(args.phase4_ckpt_policy),
+        "source": "rollback_branch_compare" if str(winner.get("branch_id", "")) != "main" else str(winner.get("selected_ckpt_source", "")),
+        "phase": str(winner.get("phase", "")),
+        "iter_id": str(winner.get("iter_id", "")),
+        "objective_score": winner.get("objective_score", ""),
+        "compare_metric": compare_metric,
+        "compare_metric_value": winner.get("compare_metric_value", ""),
+        "branch_id": str(winner.get("branch_id", "")),
+    }
+    selected_json = (session_dir / "selected_branch.json").resolve()
+    selected_json.write_text(json.dumps(winner, ensure_ascii=False, indent=2), encoding="utf-8")
+    result["selected_json"] = str(selected_json)
+    print(
+        "[PIPELINE][ROLLBACK] "
+        f"winner={result['selected_branch']} compare_metric={compare_metric} "
+        f"value={winner.get('compare_metric_value', '')} ckpt={result['selected_ckpt']}"
+    )
+    return result
+
+
+def _maybe_run_actor_rollback_branch(
+    args: argparse.Namespace,
+    python_bin: str,
+    run_root: Path,
+    post_stage: Path,
+    phase1_data_root: Path,
+    main_ckpt: Path,
+    main_meta: Dict[str, object],
+    main_row: Optional[Dict[str, str]],
+) -> Dict[str, object]:
+    trigger_metric = str(args.actor_rollback_trigger_metric).strip() or "action1_rate"
+    compare_metric = str(args.actor_rollback_compare_metric).strip() or trigger_metric
+    result: Dict[str, object] = {
+        "enabled": bool(args.actor_rollback_enable),
+        "triggered": False,
+        "trigger_metric": trigger_metric,
+        "trigger_threshold": float(args.actor_rollback_trigger_threshold),
+        "compare_metric": compare_metric,
+        "main_metric_value": "",
+        "selected_branch": "main",
+        "selected_ckpt": str(main_ckpt),
+        "selected_meta": dict(main_meta),
+        "branch_root": "",
+        "mixed_ckpt": "",
+        "swap_manifest_path": "",
+        "compare_csv": "",
+        "selected_json": "",
+        "early_ckpt": "",
+        "late_ckpt": str(main_ckpt),
+    }
+    if not bool(args.actor_rollback_enable):
+        return result
+
+    main_trigger_value = _resolve_outer_metric(row=main_row, meta=main_meta, metric_name=trigger_metric)
+    result["main_metric_value"] = "" if math.isnan(main_trigger_value) else float(main_trigger_value)
+    print(
+        "[PIPELINE][ACTOR-ROLLBACK] "
+        f"trigger_metric={trigger_metric} main_value={result['main_metric_value']} "
+        f"threshold={float(args.actor_rollback_trigger_threshold):.6f}"
+    )
+    if math.isnan(main_trigger_value):
+        result["skip_reason"] = "main_metric_missing"
+        print(
+            "[PIPELINE][ACTOR-ROLLBACK][WARN] "
+            f"main branch metric '{trigger_metric}' missing; skip actor rollback branch"
+        )
+        return result
+    if float(main_trigger_value) >= float(args.actor_rollback_trigger_threshold):
+        result["skip_reason"] = "threshold_not_triggered"
+        print("[PIPELINE][ACTOR-ROLLBACK] trigger not fired; keep main branch")
+        return result
+
+    early_ckpt = _resolve_actor_rollback_early_ckpt(args=args, post_stage=post_stage)
+    if early_ckpt is None or (not early_ckpt.exists()):
+        result["triggered"] = True
+        result["skip_reason"] = "early_ckpt_missing"
+        print("[PIPELINE][ACTOR-ROLLBACK][WARN] early checkpoint not found; skip actor rollback branch")
+        return result
+
+    result["triggered"] = True
+    result["early_ckpt"] = str(early_ckpt)
+    session_dir = (run_root / "actor_rollback" / f"session_{int(time.time())}").resolve()
+    mixed_ckpt = (session_dir / "mixed_ckpt" / "theta_actor_rollback.zip").resolve()
+    swap_manifest_path = mixed_ckpt.with_suffix(mixed_ckpt.suffix + ".swap_manifest.json").resolve()
+    branch_root = (session_dir / "branch").resolve()
+    session_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        _build_actor_rollback_ckpt(
+            args=args,
+            python_bin=python_bin,
+            late_ckpt=main_ckpt,
+            early_ckpt=early_ckpt,
+            out_ckpt=mixed_ckpt,
+            manifest_path=swap_manifest_path,
+        )
+    except Exception as exc:
+        result["skip_reason"] = "build_failed"
+        result["error"] = str(exc)
+        print(f"[PIPELINE][ACTOR-ROLLBACK][WARN] build failed, keep main branch: {exc}")
+        return result
+
+    result["mixed_ckpt"] = str(mixed_ckpt)
+    result["swap_manifest_path"] = str(swap_manifest_path)
+    branch_cmd = _build_outer_cmd(
+        args=args,
+        python_bin=python_bin,
+        run_name=str(branch_root),
+        base_ckpt=mixed_ckpt,
+        phase1_data_root=phase1_data_root,
+        passthrough=list(args.outer_passthrough),
+        extra_tail_args=["--resume-mode", "none"],
+    )
+    exit_code = _run_with_code("ACTOR_ROLLBACK_BRANCH", branch_cmd)
+
+    compare_rows: List[Dict[str, object]] = [
+        _collect_branch_result(
+            branch_id="main",
+            branch_root=run_root,
+            post_stage=post_stage,
+            policy=str(args.phase4_ckpt_policy),
+            compare_metric=compare_metric,
+            candidate_row=None,
+            subprocess_exit_code=0,
+        ),
+        _collect_branch_result(
+            branch_id="actor_rollback",
+            branch_root=branch_root,
+            post_stage=(branch_root / "post_stage").resolve(),
+            policy=str(args.phase4_ckpt_policy),
+            compare_metric=compare_metric,
+            candidate_row={
+                "checkpoint_path": str(early_ckpt),
+                "rank": "",
+                "completed_train_tables": "",
+            },
+            subprocess_exit_code=exit_code,
+        ),
+    ]
+    compare_csv = (session_dir / "actor_rollback_compare.csv").resolve()
+    _rows_to_csv(compare_csv, compare_rows)
+    result["compare_csv"] = str(compare_csv)
+    result["branch_root"] = str(branch_root)
+
+    winner = _select_branch_winner(compare_rows, compare_metric=compare_metric)
+    if winner is None:
+        result["skip_reason"] = "winner_missing"
+        print("[PIPELINE][ACTOR-ROLLBACK][WARN] compare produced no winner; keep main branch")
+        return result
+    selected_ckpt = str(winner.get("selected_ckpt", "")).strip()
+    if selected_ckpt:
+        result["selected_ckpt"] = selected_ckpt
+    result["selected_branch"] = str(winner.get("branch_id", "main"))
+    result["selected_meta"] = {
+        "policy": str(args.phase4_ckpt_policy),
+        "source": "actor_rollback_compare" if str(winner.get("branch_id", "")) != "main" else str(winner.get("selected_ckpt_source", "")),
+        "phase": str(winner.get("phase", "")),
+        "iter_id": str(winner.get("iter_id", "")),
+        "objective_score": winner.get("objective_score", ""),
+        "compare_metric": compare_metric,
+        "compare_metric_value": winner.get("compare_metric_value", ""),
+        "branch_id": str(winner.get("branch_id", "")),
+        "actor_rollback_mode": str(args.actor_rollback_mode),
+        "actor_rollback_interp_alpha": float(args.actor_rollback_interp_alpha),
+    }
+    selected_json = (session_dir / "selected_branch.json").resolve()
+    selected_json.write_text(json.dumps(winner, ensure_ascii=False, indent=2), encoding="utf-8")
+    result["selected_json"] = str(selected_json)
+    print(
+        "[PIPELINE][ACTOR-ROLLBACK] "
+        f"winner={result['selected_branch']} compare_metric={compare_metric} "
+        f"value={winner.get('compare_metric_value', '')} ckpt={result['selected_ckpt']}"
+    )
+    return result
 
 
 def parse_args() -> argparse.Namespace:
@@ -523,6 +1205,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase1-save-model-path", type=str, default="")
     parser.add_argument("--phase1-skip-generator", action="store_true")
     parser.add_argument("--phase1-external-data-root", type=str, default="")
+    parser.add_argument("--phase1-history-every-tables", type=int, default=0)
+    parser.add_argument("--actor-rollback-enable", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--actor-rollback-manifest-path", type=str, default="")
+    parser.add_argument("--actor-rollback-early-ckpt", type=str, default="")
+    parser.add_argument(
+        "--actor-rollback-mode",
+        type=str,
+        default="actor_branch_and_head",
+        choices=["action_head_only", "actor_branch_and_head", "action_head_interp"],
+    )
+    parser.add_argument("--actor-rollback-interp-alpha", type=float, default=0.50)
+    parser.add_argument("--actor-rollback-trigger-metric", type=str, default="action1_rate")
+    parser.add_argument("--actor-rollback-trigger-threshold", type=float, default=0.02)
+    parser.add_argument("--actor-rollback-compare-metric", type=str, default="")
+    parser.add_argument("--rollback-enable", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--rollback-manifest-path", type=str, default="")
+    parser.add_argument("--rollback-topk", type=int, default=3)
+    parser.add_argument("--rollback-trigger-metric", type=str, default="action1_rate")
+    parser.add_argument("--rollback-trigger-threshold", type=float, default=0.02)
+    parser.add_argument("--rollback-compare-metric", type=str, default="")
+    parser.add_argument("--rollback-reward-floor-ratio", type=float, default=0.80)
+    parser.add_argument("--rollback-eval-timeout-sec", type=int, default=180)
+    parser.add_argument("--rollback-allow-partial-on-timeout", action=argparse.BooleanOptionalAction, default=True)
 
     parser.add_argument("--outer-phase", type=str, default="auto", choices=["phase2", "phase3", "auto"])
     parser.add_argument("--outer-auto-stop", action=argparse.BooleanOptionalAction, default=True)
@@ -629,7 +1334,7 @@ def parse_args() -> argparse.Namespace:
         "--phase4-ckpt-policy",
         type=str,
         default="latest_phase3",
-        choices=["latest_phase3", "best_phase3_objective", "latest_any"],
+        choices=["latest_phase3", "best_phase3_objective", "best_any_objective", "latest_any"],
         help="phase4 init checkpoint selection policy; default preserves current latest-phase3 behavior",
     )
 
@@ -656,6 +1361,28 @@ def main() -> None:
     print(f"[PIPELINE][INIT] run_root={run_root}")
     print(f"[PIPELINE][INIT] phase1_ckpt={phase1_ckpt}")
     print(f"[PIPELINE][INIT] phase1_data_root={phase1_data_root}")
+    if bool(args.actor_rollback_enable) and bool(args.rollback_enable):
+        raise ValueError("actor rollback and rollback branch are not supported together in one pipeline run")
+    if int(args.phase1_history_every_tables) > 0:
+        print(
+            "[PIPELINE][INIT] "
+            f"phase1_history_every_tables={int(args.phase1_history_every_tables)} "
+            f"manifest={(post_stage / 'phase1_ckpt_manifest.csv').resolve()}"
+        )
+    if bool(args.actor_rollback_enable):
+        print(
+            "[PIPELINE][INIT] "
+            f"actor_rollback_enable=1 mode={str(args.actor_rollback_mode)} "
+            f"metric={str(args.actor_rollback_trigger_metric)} "
+            f"threshold={float(args.actor_rollback_trigger_threshold):.6f}"
+        )
+    if bool(args.rollback_enable):
+        print(
+            "[PIPELINE][INIT] "
+            f"rollback_enable=1 metric={str(args.rollback_trigger_metric)} "
+            f"threshold={float(args.rollback_trigger_threshold):.6f} "
+            f"topk={int(args.rollback_topk)}"
+        )
 
     if not bool(args.phase1_skip):
         phase1_cmd = _build_phase1_cmd(
@@ -664,7 +1391,8 @@ def main() -> None:
             run_name=run_name,
             phase1_ckpt=phase1_ckpt,
         )
-        phase1_code = _run_with_code("PHASE1", phase1_cmd)
+        phase1_env = _build_phase1_env(args=args, run_root=run_root)
+        phase1_code = _run_with_code("PHASE1", phase1_cmd, env=phase1_env)
         if phase1_code != 0:
             if phase1_ckpt.exists():
                 print(
@@ -695,8 +1423,46 @@ def main() -> None:
     )
     _run_or_fail("OUTER", outer_cmd)
 
-    phase4_ckpt: Optional[Path] = None
-    phase4_ckpt_meta: Optional[Dict[str, object]] = None
+    main_phase4_ckpt, main_phase4_meta, main_phase4_row = _pick_outer_ckpt_record(
+        post_stage=post_stage,
+        policy=str(args.phase4_ckpt_policy),
+    )
+    phase4_ckpt: Optional[Path] = main_phase4_ckpt
+    phase4_ckpt_meta: Optional[Dict[str, object]] = dict(main_phase4_meta)
+    actor_rollback_result = _maybe_run_actor_rollback_branch(
+        args=args,
+        python_bin=python_bin,
+        run_root=run_root,
+        post_stage=post_stage,
+        phase1_data_root=phase1_data_root,
+        main_ckpt=main_phase4_ckpt,
+        main_meta=main_phase4_meta,
+        main_row=main_phase4_row,
+    )
+    actor_selected_ckpt_raw = str(actor_rollback_result.get("selected_ckpt", "") or "").strip()
+    actor_selected_meta = actor_rollback_result.get("selected_meta", None)
+    if actor_selected_ckpt_raw:
+        phase4_ckpt = Path(actor_selected_ckpt_raw).resolve()
+    if isinstance(actor_selected_meta, dict) and actor_selected_meta:
+        phase4_ckpt_meta = dict(actor_selected_meta)
+    rollback_result = _maybe_run_rollback_branches(
+        args=args,
+        python_bin=python_bin,
+        run_root=run_root,
+        post_stage=post_stage,
+        phase1_data_root=phase1_data_root,
+        main_ckpt=main_phase4_ckpt,
+        main_meta=main_phase4_meta,
+        main_row=main_phase4_row,
+    )
+    if bool(args.rollback_enable):
+        selected_ckpt_raw = str(rollback_result.get("selected_ckpt", "") or "").strip()
+        selected_meta = rollback_result.get("selected_meta", None)
+        if selected_ckpt_raw:
+            phase4_ckpt = Path(selected_ckpt_raw).resolve()
+        if isinstance(selected_meta, dict) and selected_meta:
+            phase4_ckpt_meta = dict(selected_meta)
+
     phase4_ran = False
     if bool(args.phase4_skip):
         print("[PIPELINE][PHASE4] skipped by --phase4-skip")
@@ -705,10 +1471,6 @@ def main() -> None:
             raise FileNotFoundError(
                 f"phase4 requires phase1 data root for eval_only implement, but it does not exist: {phase1_data_root}"
             )
-        phase4_ckpt, phase4_ckpt_meta = _pick_phase4_ckpt(
-            post_stage=post_stage,
-            policy=str(args.phase4_ckpt_policy),
-        )
         print(
             "[PIPELINE][PHASE4] "
             f"ckpt_policy={str(args.phase4_ckpt_policy)} "
@@ -738,6 +1500,12 @@ def main() -> None:
         phase4_ckpt_meta=phase4_ckpt_meta,
         phase1_data_root=phase1_data_root,
         phase4_ran=phase4_ran,
+        phase1_history_every_tables=int(args.phase1_history_every_tables),
+        phase1_history_manifest=(post_stage / "phase1_ckpt_manifest.csv").resolve()
+        if int(args.phase1_history_every_tables) > 0
+        else None,
+        actor_rollback_result=actor_rollback_result,
+        rollback_result=rollback_result,
     )
     print("[PIPELINE][DONE] phase1->phase2/phase3->phase4 pipeline finished")
 

@@ -160,6 +160,25 @@ PDI_GT_MEAN_LIST = []
 PDI_PHASE_LIST = []
 PDI_REWARD_LIST = []
 _CHECKPOINT_SAVED_ON_STOP = False
+_PHASE1_HIST_SAVED_KEYS = set()
+_PHASE1_HIST_RECORDED_PATHS = set()
+_PHASE1_HIST_LAST_TABLE_NUMBER = None
+_PHASE1_HIST_LAST_COMPLETED_TABLES = 0
+PHASE1_HIST_FIELDS = [
+    "ts",
+    "run_dir",
+    "run_name",
+    "distribution",
+    "algorithm",
+    "algo_version",
+    "seed",
+    "stage_mode",
+    "table_number",
+    "completed_train_tables",
+    "checkpoint_name",
+    "checkpoint_path",
+    "trigger",
+]
 
 
 def _normalize_stage_mode(value):
@@ -167,6 +186,114 @@ def _normalize_stage_mode(value):
     if mode not in {"train_eval", "train_only", "eval_only"}:
         mode = "train_eval"
     return mode
+
+
+def _phase1_hist_every_tables():
+    try:
+        return max(0, int(os.environ.get("RL_PHASE1_HIST_EVERY_TABLES", "0") or 0))
+    except Exception:
+        return 0
+
+
+def _phase1_hist_enabled():
+    return _normalize_stage_mode(os.environ.get("RL_STAGE_MODE", "train_eval")) == "train_only" and _phase1_hist_every_tables() > 0
+
+
+def _phase1_hist_paths():
+    run_dir = Path(rl_logging.get_run_dir())
+    raw_ckpt_dir = str(os.environ.get("RL_PHASE1_HIST_CKPT_DIR", "") or "").strip()
+    raw_manifest = str(os.environ.get("RL_PHASE1_HIST_MANIFEST", "") or "").strip()
+    ckpt_dir = Path(raw_ckpt_dir).resolve() if raw_ckpt_dir else (run_dir / "post_stage" / "checkpoints" / "phase1_history").resolve()
+    manifest_path = Path(raw_manifest).resolve() if raw_manifest else (run_dir / "post_stage" / "phase1_ckpt_manifest.csv").resolve()
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    return ckpt_dir, manifest_path
+
+
+def _append_phase1_hist_manifest(checkpoint_path, table_number, completed_train_tables, trigger):
+    _, manifest_path = _phase1_hist_paths()
+    checkpoint_path = Path(str(checkpoint_path)).resolve()
+    row = {
+        "ts": time.time(),
+        "run_dir": str(rl_logging.get_run_dir()),
+        "run_name": Path(str(rl_logging.get_run_dir())).name,
+        "distribution": str(os.environ.get("SCENARIO_NAME", "") or globals().get("SCENARIO_NAME", "") or ""),
+        "algorithm": str(os.environ.get("RL_ALGORITHM", "") or globals().get("algorithm", "") or ""),
+        "algo_version": str(os.environ.get("RL_ALGO_VERSION", "") or ""),
+        "seed": str(os.environ.get("RL_SEED", "") or ""),
+        "stage_mode": str(os.environ.get("RL_STAGE_MODE", "") or ""),
+        "table_number": "" if table_number is None else int(table_number),
+        "completed_train_tables": int(completed_train_tables) if completed_train_tables is not None else "",
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_path": str(checkpoint_path),
+        "trigger": str(trigger),
+    }
+    file_exists = manifest_path.exists()
+    with manifest_path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=PHASE1_HIST_FIELDS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def maybe_save_phase1_history_checkpoint(table_number, completed_train_tables, trigger="periodic"):
+    global _PHASE1_HIST_LAST_TABLE_NUMBER, _PHASE1_HIST_LAST_COMPLETED_TABLES
+    _PHASE1_HIST_LAST_TABLE_NUMBER = int(table_number)
+    _PHASE1_HIST_LAST_COMPLETED_TABLES = int(completed_train_tables)
+    if not _phase1_hist_enabled():
+        return None
+    every_tables = _phase1_hist_every_tables()
+    if every_tables <= 0 or int(completed_train_tables) <= 0:
+        return None
+    if int(completed_train_tables) % int(every_tables) != 0:
+        return None
+    save_key = (str(trigger), int(table_number), int(completed_train_tables))
+    if save_key in _PHASE1_HIST_SAVED_KEYS:
+        return None
+    model_obj = globals().get("model", None)
+    if model_obj is None:
+        return None
+    ckpt_dir, _ = _phase1_hist_paths()
+    out_path = ckpt_dir / f"theta_phase1_t{int(table_number):04d}_n{int(completed_train_tables):04d}.zip"
+    try:
+        model_obj.save(str(out_path))
+        _append_phase1_hist_manifest(
+            checkpoint_path=out_path,
+            table_number=int(table_number),
+            completed_train_tables=int(completed_train_tables),
+            trigger=str(trigger),
+        )
+        _PHASE1_HIST_SAVED_KEYS.add(save_key)
+        print(
+            "[RL][PHASE1_HIST] "
+            f"saved periodic checkpoint table={int(table_number)} "
+            f"completed={int(completed_train_tables)} path={out_path}"
+        )
+        return str(out_path)
+    except Exception as exc:
+        print(f"[RL][PHASE1_HIST][WARN] failed to save periodic checkpoint: {exc}")
+        return None
+
+
+def _record_phase1_final_checkpoint(saved_path):
+    if not _phase1_hist_enabled():
+        return
+    path_obj = Path(str(saved_path)).resolve()
+    path_key = str(path_obj).lower()
+    if path_key in _PHASE1_HIST_RECORDED_PATHS:
+        return
+    table_number = globals().get("_PHASE1_HIST_LAST_TABLE_NUMBER", None)
+    completed_train_tables = globals().get("_PHASE1_HIST_LAST_COMPLETED_TABLES", 0)
+    try:
+        _append_phase1_hist_manifest(
+            checkpoint_path=path_obj,
+            table_number=table_number,
+            completed_train_tables=completed_train_tables,
+            trigger="final_save_model_path",
+        )
+        _PHASE1_HIST_RECORDED_PATHS.add(path_key)
+    except Exception as exc:
+        print(f"[RL][PHASE1_HIST][WARN] failed to record final checkpoint manifest: {exc}")
 
 
 def _maybe_load_model_checkpoint(model_obj):
@@ -208,6 +335,7 @@ def _maybe_save_model_checkpoint(model_obj):
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         model_obj.save(path)
+        _record_phase1_final_checkpoint(path)
         print(f"[RL] saved model checkpoint to: {path}")
     except Exception as exc:
         print(f"[RL] failed to save checkpoint to {path}: {exc}")

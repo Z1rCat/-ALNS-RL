@@ -273,6 +273,7 @@ def select_algorithm():
     print("  [20] SABER_V0 (learnability-gated replay selector baseline)")
     print("  [21] CQL_DQN (Discrete Conservative Q-Learning)")
     print("  [22] CADM (Context-aware dynamics baseline)")
+    print("  [23] SABER_V1 (hardest-slice severity-aware replay selector)")
     print("=" * 50)
     mapping = {
         "1": "DQN",
@@ -297,6 +298,7 @@ def select_algorithm():
         "20": "SABER_V0",
         "21": "CQL_DQN",
         "22": "CADM",
+        "23": "SABER_V1",
     }
     while True:
         choice = input("请选择算法 (默认 1=DQN): ").strip()
@@ -308,7 +310,7 @@ def select_algorithm():
         if choice_upper == "CQL":
             return "CQL_DQN"
         if choice_upper == "SABER":
-            return "SABER_V0"
+            return "SABER_V1"
         if choice_upper in {
             "PPO_HAT_MOE",
             "A2C_HAT_MOE",
@@ -325,6 +327,7 @@ def select_algorithm():
             "PLR",
             "UED",
             "SABER_V0",
+            "SABER_V1",
             "CQL_DQN",
             "CADM",
         }:
@@ -712,6 +715,10 @@ def run_outer_reference_pipeline(
     save_model_path=None,
     skip_generator=False,
     external_data_root=None,
+    phase1_algorithm="PPO_NEW",
+    phase1_algo_version="v3",
+    outer_algorithm="PPO_NEW",
+    outer_algo_version="v3",
 ):
     script_path = Path(__file__).resolve().parent / "outer_rl" / "run_edrl_pipeline.py"
     if not script_path.exists():
@@ -745,9 +752,9 @@ def run_outer_reference_pipeline(
         "--phase1-request-number",
         str(int(request_number)),
         "--phase1-algorithm",
-        "PPO_NEW",
+        str(phase1_algorithm),
         "--phase1-algo-version",
-        "v3",
+        str(phase1_algo_version),
         "--phase1-seed",
         str(seed_val),
         "--outer-phase",
@@ -757,9 +764,9 @@ def run_outer_reference_pipeline(
         "--outer-request-number",
         str(int(request_number)),
         "--outer-algorithm",
-        "PPO_NEW",
+        str(outer_algorithm),
         "--outer-algo-version",
-        "v3",
+        str(outer_algo_version),
         "--outer-seed",
         str(seed_val),
         "--phase3-min-iters",
@@ -823,7 +830,7 @@ def run_outer_reference_pipeline(
                 "--outer-curriculum-enable",
             ]
         )
-    elif profile in {"SABER_V0", "SABER", "SABER-PLR-V0"}:
+    elif profile in {"SABER_V0", "SABER-PLR-V0"}:
         cmd.extend(
             [
                 "--outer-policy-mode",
@@ -849,6 +856,61 @@ def run_outer_reference_pipeline(
                 "0.55",
                 "--saber-v0-j-sigma",
                 "0.18",
+                "--outer-curriculum-enable",
+            ]
+        )
+    elif profile in {"SABER_V1", "SABER", "SABER-PLR-V1"}:
+        cmd.extend(
+            [
+                "--outer-policy-mode",
+                "ts",
+                "--objective-mode",
+                "saber_v1",
+                "--outer-action-space-version",
+                "v1",
+                "--plr-level-replay",
+                "--plr-p-new",
+                "0.55",
+                "--plr-buffer-size",
+                "200",
+                "--plr-priority-ema-alpha",
+                "0.50",
+                "--plr-min-weight",
+                "0.02",
+                "--phase2-fixed-num-files",
+                "10",
+                "--phase3-num-file-choices",
+                "10,15",
+                "--saber-v1-hard-threshold",
+                "4",
+                "--saber-v1-easy-threshold",
+                "3",
+                "--saber-v1-q-weight",
+                "0.28",
+                "--saber-v1-r-weight",
+                "0.18",
+                "--saber-v1-easy-weight",
+                "0.05",
+                "--saber-v1-dq-weight",
+                "0.10",
+                "--saber-v1-novelty-weight",
+                "0.05",
+                "--saber-v1-no-success-weight",
+                "0.08",
+                "--saber-v1-success-r-threshold",
+                "0.01",
+                "--saber-v1-sticky-replay-iters",
+                "3",
+                "--saber-v1-success-budget-mult",
+                "2.0",
+                "--saber-v1-success-min-num-files",
+                "15",
+                "--saber-v1-j-center",
+                "0.65",
+                "--saber-v1-j-sigma",
+                "0.22",
+                "--phase4-ckpt-policy",
+                "best_any_objective",
                 "--outer-curriculum-enable",
             ]
         )
@@ -901,6 +963,10 @@ def run_single(
             save_model_path=save_model_path,
             skip_generator=skip_generator,
             external_data_root=external_data_root,
+            phase1_algorithm="PPO",
+            phase1_algo_version="v1",
+            outer_algorithm="PPO",
+            outer_algo_version="v1",
         )
         return
     if algorithm_label in {"PLR_UED", "PLR", "UED"}:
@@ -915,11 +981,29 @@ def run_single(
             save_model_path=save_model_path,
             skip_generator=skip_generator,
             external_data_root=external_data_root,
+            phase1_algorithm="PPO",
+            phase1_algo_version="v1",
+            outer_algorithm="PPO",
+            outer_algo_version="v1",
         )
         return
-    if algorithm_label in {"SABER_V0", "SABER", "SABER-PLR-V0"}:
+    if algorithm_label in {"SABER_V0", "SABER-PLR-V0"}:
         run_outer_reference_pipeline(
             profile_name="SABER_V0",
+            dist_name=dist_name,
+            request_number=request_number,
+            workers=workers,
+            seed=seed,
+            run_name=run_name,
+            init_model_path=init_model_path,
+            save_model_path=save_model_path,
+            skip_generator=skip_generator,
+            external_data_root=external_data_root,
+        )
+        return
+    if algorithm_label in {"SABER_V1", "SABER", "SABER-PLR-V1"}:
+        run_outer_reference_pipeline(
+            profile_name="SABER_V1",
             dist_name=dist_name,
             request_number=request_number,
             workers=workers,
@@ -1011,6 +1095,9 @@ def run_single(
         "alns_output_root": str(rl_logging.get_run_dir()),
         "skip_generator": int(bool(skip_generator)),
         "external_data_root": str(external_data_root or ""),
+        "phase1_history_every_tables": str(os.environ.get("RL_PHASE1_HIST_EVERY_TABLES", "") or ""),
+        "phase1_history_ckpt_dir": str(os.environ.get("RL_PHASE1_HIST_CKPT_DIR", "") or ""),
+        "phase1_history_manifest": str(os.environ.get("RL_PHASE1_HIST_MANIFEST", "") or ""),
     })
     log_file = None
     original_stdout = sys.stdout
@@ -1077,7 +1164,7 @@ def parse_args():
     parser.add_argument("--dist_name", type=str)
     parser.add_argument("--request_number", type=int)
     parser.add_argument("--run_count", type=int)
-    parser.add_argument("--algorithm", type=str, help="DQN/PPO/PPO_NEW/A2C/DRCB/LBKLAC/PPO_HAT/A2C_HAT/PPO_LSTM/PPO_HAT_LSTM/PPO_HAT_PDI/PPO_HAT_MOE/A2C_HAT_MOE/QRDQN_CVAR/BE_CVAR_DQN/PPO_PROTOMEM/NOVA_EDRL/RARL/PLR_UED/SABER_V0/CQL_DQN/CADM/HAT")
+    parser.add_argument("--algorithm", type=str, help="DQN/PPO/PPO_NEW/A2C/DRCB/LBKLAC/PPO_HAT/A2C_HAT/PPO_LSTM/PPO_HAT_LSTM/PPO_HAT_PDI/PPO_HAT_MOE/A2C_HAT_MOE/QRDQN_CVAR/BE_CVAR_DQN/PPO_PROTOMEM/NOVA_EDRL/RARL/PLR_UED/SABER_V0/SABER_V1/CQL_DQN/CADM/HAT")
     parser.add_argument("--algo_version", type=str, default="v1", help="algorithm version tag for extensible entries such as PPO_NEW")
     parser.add_argument("--workers", type=int, help="generator workers (1=single core)")
     parser.add_argument("--single_core", action="store_true", help="force generator single core")
@@ -1107,7 +1194,7 @@ def main():
     parallel_runs = int(args.parallel_runs) if args.parallel_runs else 1
     if parallel_runs < 1:
         parallel_runs = 1
-    if algorithm is not None and algorithm not in {"DQN", "PPO", "PPO_NEW", "A2C", "DRCB", "LBKLAC", "PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN", "PPO_PROTOMEM", "NOVA_EDRL", "RARL", "PLR_UED", "PLR", "UED", "SABER_V0", "SABER", "SABER-PLR-V0", "CQL_DQN", "CQL", "CADM", "HAT"}:
+    if algorithm is not None and algorithm not in {"DQN", "PPO", "PPO_NEW", "A2C", "DRCB", "LBKLAC", "PPO_HAT", "A2C_HAT", "PPO_HAT_MOE", "A2C_HAT_MOE", "PPO_LSTM", "PPO_HAT_LSTM", "PPO_HAT_PDI", "QRDQN_CVAR", "BE_CVAR_DQN", "PPO_PROTOMEM", "NOVA_EDRL", "RARL", "PLR_UED", "PLR", "UED", "SABER_V0", "SABER_V1", "SABER", "SABER-PLR-V0", "SABER-PLR-V1", "CQL_DQN", "CQL", "CADM", "HAT"}:
         print(f"未知算法 {algorithm}，回退为 DQN")
         algorithm = "DQN"
 

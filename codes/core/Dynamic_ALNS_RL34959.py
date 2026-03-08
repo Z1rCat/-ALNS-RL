@@ -142,6 +142,15 @@ def main(approach, request_number_in_R = 5):
             train_only = stage_mode == "train_only"
             eval_only = stage_mode == "eval_only"
             train_only_early_stop = os.environ.get("RL_TRAIN_ONLY_EARLY_STOP", "1").strip() == "1"
+            train_only_stop_mode = str(os.environ.get("RL_TRAIN_ONLY_STOP_MODE", "converge") or "converge").strip().lower()
+            if train_only_stop_mode not in {"converge", "fixed_n"}:
+                train_only_stop_mode = "converge"
+            try:
+                train_only_fixed_tables = int(os.environ.get("RL_TRAIN_ONLY_FIXED_TABLES", "0"))
+            except Exception:
+                train_only_fixed_tables = 0
+            train_only_fixed_tables = max(0, int(train_only_fixed_tables))
+            train_only_processed_tables = 0
             try:
                 train_only_min_table = int(os.environ.get("RL_TRAIN_ONLY_MIN_TABLE", str(MIN_SINGLE_STAGE_TRAIN_RANDOM)))
             except Exception:
@@ -219,12 +228,39 @@ def main(approach, request_number_in_R = 5):
                                 pass
                             return
                     else:
+                        if train_only:
+                            # Count completed train tables in this inner run. This is also the
+                            # natural trigger point for optional phase1 historical checkpoints.
+                            train_only_processed_tables += 1
+                            try:
+                                dynamic_RL34959.maybe_save_phase1_history_checkpoint(
+                                    table_number=int(table_number),
+                                    completed_train_tables=int(train_only_processed_tables),
+                                    trigger="periodic_train_table",
+                                )
+                            except Exception as exc:
+                                print(f"[RL][PHASE1_HIST][WARN] table checkpoint hook failed: {exc}")
+                        if train_only and train_only_stop_mode == "fixed_n":
+                            # Stop exactly at budget N after recording the completed table.
+                            if train_only_fixed_tables > 0 and train_only_processed_tables >= train_only_fixed_tables:
+                                print(
+                                    f">>> TRAIN_ONLY FIXED_N STOP: processed_tables={train_only_processed_tables} "
+                                    f"(budget={train_only_fixed_tables}) at table={table_number}."
+                                )
+                                _touch_stop_flag()
+                                return
                         converged = getattr(dynamic_RL34959, "curriculum_converged", 0) == 1
                         next_table_number = table_number + 1
                         if eval_only:
                             dynamic_RL34959.implement = 1
                             next_table_number = TEST_TABLE_START
-                        elif train_only and train_only_early_stop and converged and table_number >= train_only_min_table:
+                        elif (
+                            train_only
+                            and train_only_stop_mode != "fixed_n"
+                            and train_only_early_stop
+                            and converged
+                            and table_number >= train_only_min_table
+                        ):
                             print(
                                 f">>> TRAIN_ONLY EARLY STOP: converged at table={table_number} "
                                 f"(min={train_only_min_table})."

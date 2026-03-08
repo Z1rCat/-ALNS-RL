@@ -93,6 +93,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--run-baseline", action="store_true", default=False, help="run baseline stage")
     parser.add_argument("--no-run-baseline", action="store_false", dest="run_baseline")
+    parser.add_argument("--baseline-include-random", action="store_true", default=False)
     parser.add_argument("--run-plots", action="store_true", default=False, help="run plotting stage")
     parser.add_argument("--no-run-plots", action="store_false", dest="run_plots")
     parser.add_argument("--run-metrics", action="store_true", default=True, help="run metrics stage")
@@ -162,6 +163,8 @@ def build_cmd(args: argparse.Namespace, run_root: Path, task: TaskSpec) -> List[
         cmd.append("--run-baseline")
     else:
         cmd.append("--no-run-baseline")
+    if args.baseline_include_random:
+        cmd.append("--baseline-include-random")
 
     if args.run_plots:
         cmd.append("--run-plots")
