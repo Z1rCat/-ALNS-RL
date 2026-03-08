@@ -22,6 +22,7 @@ from .v5_variants import (
     QCriticPPO,
 )
 from .v6_variants import CvarPPO
+from .v6_cadm import CadmAuxPolicy, CadmAuxPPO
 from .v7_tcr import TriggeredCounterfactualPPO
 from .v8_v9_a import PPOPostV8A, PPOPostV9A
 from .v8_v9_a2 import (
@@ -599,6 +600,58 @@ def build_model_v62_v3cvar(
         conv_dilation_1=1,
         conv_dilation_2=1,
         ppo_cls=CvarPPO,
+        **extra_kwargs,
+    )
+
+
+def build_model_v63_cadm(
+    env,
+    seed,
+    device="cpu",
+    n_stack: int = 4,
+    use_branch: bool = True,
+    use_layernorm: bool = True,
+    embed_dim: int = 32,
+    out_dim: int = 64,
+    cadm_beta: float = 0.05,
+    cadm_lambda_next: float = 1.0,
+    cadm_lambda_reward: float = 0.5,
+    cadm_aux_batch_size: int = 64,
+    cadm_max_transitions: int = 4096,
+    **kwargs,
+):
+    """
+    V6.3 CaDM-adapted PPO:
+      - keep V3 representation (stacked context extractor)
+      - add auxiliary forward prediction loss on (next severity, reward_t)
+    """
+    extra_kwargs: Dict[str, Any] = dict(kwargs or {})
+    extra_kwargs.setdefault("cadm_beta", float(os.environ.get("RL_CADM_BETA", str(cadm_beta))))
+    extra_kwargs.setdefault("cadm_lambda_next", float(os.environ.get("RL_CADM_LAMBDA_NEXT", str(cadm_lambda_next))))
+    extra_kwargs.setdefault("cadm_lambda_reward", float(os.environ.get("RL_CADM_LAMBDA_REWARD", str(cadm_lambda_reward))))
+    extra_kwargs.setdefault(
+        "cadm_aux_batch_size",
+        int(os.environ.get("RL_CADM_AUX_BATCH_SIZE", str(cadm_aux_batch_size))),
+    )
+    extra_kwargs.setdefault(
+        "cadm_max_transitions",
+        int(os.environ.get("RL_CADM_MAX_TRANSITIONS", str(cadm_max_transitions))),
+    )
+    # master currently passes policy='MlpPolicy'; drop it to avoid duplicate policy kwarg.
+    extra_kwargs.pop("policy", None)
+    return _build_model_v3_impl(
+        env=env,
+        seed=seed,
+        device=device,
+        n_stack=int(n_stack),
+        use_branch=bool(use_branch),
+        use_layernorm=bool(use_layernorm),
+        embed_dim=int(embed_dim),
+        out_dim=int(out_dim),
+        conv_dilation_1=1,
+        conv_dilation_2=1,
+        ppo_cls=CadmAuxPPO,
+        policy=CadmAuxPolicy,
         **extra_kwargs,
     )
 

@@ -15,6 +15,7 @@ from .v3_context import (
     build_model_v53_auxweak,
     build_model_v61_cvarppo,
     build_model_v62_v3cvar,
+    build_model_v63_cadm,
     build_model_v71_poolppo,
     build_model_v72_poolv3,
     build_model_v73_tcrppo,
@@ -65,6 +66,8 @@ def build_model(env, seed, device, algo_version="v1", **kwargs):
         return build_model_v61_cvarppo(env=env, seed=seed, device=device, **kwargs)
     if version in ("v6.2_v3cvar", "v62_v3cvar", "v6_2_v3cvar"):
         return build_model_v62_v3cvar(env=env, seed=seed, device=device, **kwargs)
+    if version in ("v6.3_cadm", "v63_cadm", "v6_3_cadm"):
+        return build_model_v63_cadm(env=env, seed=seed, device=device, **kwargs)
     if version in ("v7.1_poolppo", "v71_poolppo", "v7_1_poolppo"):
         return build_model_v71_poolppo(env=env, seed=seed, device=device, **kwargs)
     if version in ("v7.2_poolv3", "v72_poolv3", "v7_2_poolv3"):

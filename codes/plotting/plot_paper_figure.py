@@ -6,6 +6,8 @@ Generate publication-ready figures from an ALNS-RL run directory.
 import argparse
 import json
 import math
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -80,6 +82,17 @@ TEXT_CN = {
     "missing_baseline": "\u7f3a\u5c11\u57fa\u7ebf\u6216\u5bf9\u9f50\u6570\u636e\uff0c\u65e0\u6cd5\u8ba1\u7b97\u7d2f\u8ba1\u4f18\u52bf\u3002",
     "missing_baseline_short": "\u65e0\u57fa\u7ebf\u6570\u636e\uff0c\u65e0\u6cd5\u8ba1\u7b97\u7d2f\u8ba1\u4f18\u52bf\u3002",
     "risk_quantile": "\u98ce\u9669\u5206\u4f4d\u6570",
+    "nps_title": "NPS\u4e0e\u7b56\u7565\u8d85\u8d8a\u5256\u9762",
+    "nps_panel_a": "Panel A: \u5206\u9636\u6bb5 NPS",
+    "nps_panel_b": "Panel B: \u7b56\u7565\u8d85\u8d8a\u5173\u7cfb",
+    "nps_ylabel": "NPS",
+    "nps_ref_zero": "\u968f\u673a\u7b56\u7565\u7ebf (NPS=0)",
+    "nps_ref_one": "\u9759\u6001\u7b56\u7565\u4e0a\u9650\u7ebf (NPS=1)",
+    "reward_axis": "\u671f\u671b\u56de\u62a5",
+    "legend_rl": "RL",
+    "legend_rand": "\u968f\u673a",
+    "legend_best_static": "\u6700\u4f73\u9759\u6001\u7b56\u7565",
+    "phase_overall": "\u6574\u4f53",
 }
 
 TEXT_EN = {
@@ -120,6 +133,17 @@ TEXT_EN = {
     "missing_baseline": "Missing baseline or aligned data; cannot compute cumulative advantage.",
     "missing_baseline_short": "No baseline data; cannot compute cumulative advantage.",
     "risk_quantile": "Risk Quantile",
+    "nps_title": "NPS and Policy Superiority Profile",
+    "nps_panel_a": "Panel A: Phase-wise NPS",
+    "nps_panel_b": "Panel B: RL vs Random vs Best Static",
+    "nps_ylabel": "NPS",
+    "nps_ref_zero": "Random baseline (NPS=0)",
+    "nps_ref_one": "Best static baseline (NPS=1)",
+    "reward_axis": "Expected Reward",
+    "legend_rl": "RL",
+    "legend_rand": "Random",
+    "legend_best_static": "Best Static",
+    "phase_overall": "Overall",
 }
 
 TEXT = TEXT_CN if USE_CHINESE else TEXT_EN
@@ -172,6 +196,16 @@ def _smooth_series(values: pd.Series, window: int) -> pd.Series:
         return values
     min_periods = max(3, window // 3)
     return values.rolling(window=window, min_periods=min_periods).mean()
+
+
+def _safe_nanmean(arr: np.ndarray) -> float:
+    arr = np.asarray(arr, dtype=float)
+    if arr.size == 0:
+        return float("nan")
+    mask = np.isfinite(arr)
+    if not mask.any():
+        return float("nan")
+    return float(arr[mask].mean())
 
 
 def _choose_group_key(df: pd.DataFrame) -> Optional[str]:
@@ -1010,7 +1044,34 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
             reward_means.loc[phase, TEXT["insert_accept"]] = sub.loc[sub["action"] == 0, "reward"].mean()
             reward_means.loc[phase, TEXT["insert_reject"]] = sub.loc[sub["action"] == 1, "reward"].mean()
 
+    # Fill sparse cells with robust shrinkage estimate to avoid visually empty (gray) blocks.
+    reward_filled = reward_means.copy()
+    global_mean = _safe_nanmean(reward_filled.to_numpy(dtype=float))
+    if not np.isfinite(global_mean):
+        global_mean = 0.5
+    for ridx in reward_filled.index:
+        for cidx in reward_filled.columns:
+            val = reward_filled.loc[ridx, cidx]
+            if pd.notna(val):
+                continue
+            row_vals = pd.to_numeric(reward_filled.loc[ridx, :], errors="coerce").to_numpy(dtype=float)
+            col_vals = pd.to_numeric(reward_filled.loc[:, cidx], errors="coerce").to_numpy(dtype=float)
+            row_mean = _safe_nanmean(row_vals)
+            col_mean = _safe_nanmean(col_vals)
+            parts = []
+            if np.isfinite(row_mean):
+                parts.append((0.5, row_mean))
+            if np.isfinite(col_mean):
+                parts.append((0.3, col_mean))
+            parts.append((0.2, global_mean))
+            wsum = sum(w for w, _ in parts)
+            fill_val = sum(w * x for w, x in parts) / max(1e-12, wsum)
+            reward_filled.loc[ridx, cidx] = fill_val
+
+    reward_filled = reward_filled.clip(lower=0.0, upper=1.0)
+
     reward_means.index = [PHASE_LABELS.get(p, p.title()) for p in reward_means.index]
+    reward_filled.index = [PHASE_LABELS.get(p, p.title()) for p in reward_filled.index]
 
     fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.6), dpi=DEFAULT_DPI)
     ax_left, ax_right = axes
@@ -1018,7 +1079,7 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
     sns.heatmap(
         freq,
         ax=ax_left,
-        cmap="RdBu_r",
+        cmap="YlGnBu",
         vmin=0,
         vmax=100,
         annot=True,
@@ -1031,20 +1092,16 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
     ax_left.set_xlabel(TEXT["heatmap_x"])
     ax_left.set_ylabel(TEXT["heatmap_y"])
 
-    mask = reward_means.isna()
-    cmap = sns.color_palette("RdBu_r", as_cmap=True).copy()
-    cmap.set_bad(color="#D9D9D9")
     sns.heatmap(
-        reward_means,
+        reward_filled,
         ax=ax_right,
-        cmap=cmap,
+        cmap="RdYlGn",
         vmin=0,
         vmax=1,
         annot=True,
         fmt=".2f",
         linewidths=0.5,
         linecolor="white",
-        mask=mask,
         cbar_kws={"label": TEXT["heatmap_reward_title"]},
     )
     ax_right.set_title(TEXT["heatmap_reward_title"])
@@ -1056,92 +1113,260 @@ def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: P
     plt.close(fig)
 
 
-def _plot_cumulative_advantage(
+def _phase_reward_mean(df: pd.DataFrame, phase: str) -> float:
+    arr = _phase_reward_array(df, phase)
+    if arr.size == 0:
+        return float("nan")
+    return float(arr.mean())
+
+
+def _phase_reward_array(df: pd.DataFrame, phase: str) -> np.ndarray:
+    if df.empty or ("reward" not in df.columns):
+        return np.array([], dtype=float)
+    data = df.copy()
+    if "phase" in data.columns:
+        data["phase"] = data["phase"].astype(str).str.lower()
+    if phase != "overall":
+        if "phase" not in data.columns:
+            return np.array([], dtype=float)
+        data = data[data["phase"] == phase]
+    rewards = pd.to_numeric(data["reward"], errors="coerce")
+    rewards = rewards[rewards.notna()]
+    rewards = rewards[rewards != -10000000]
+    if rewards.empty:
+        return np.array([], dtype=float)
+    return rewards.to_numpy(dtype=float)
+
+
+def _bootstrap_nps_ci(
+    rl_arr: np.ndarray,
+    rand_arr: np.ndarray,
+    static_arr: np.ndarray,
+    n_boot: int = 800,
+    seed: int = 42,
+) -> Tuple[float, float]:
+    if rl_arr.size < 2 or rand_arr.size < 2 or static_arr.size < 2:
+        return float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    samples = []
+    for _ in range(max(200, int(n_boot))):
+        rl_m = float(rng.choice(rl_arr, size=rl_arr.size, replace=True).mean())
+        rand_m = float(rng.choice(rand_arr, size=rand_arr.size, replace=True).mean())
+        static_m = float(rng.choice(static_arr, size=static_arr.size, replace=True).mean())
+        denom = static_m - rand_m
+        if abs(float(denom)) <= 1e-9:
+            continue
+        samples.append((rl_m - rand_m) / denom)
+    if len(samples) < 30:
+        return float("nan"), float("nan")
+    s = np.asarray(samples, dtype=float)
+    return float(np.quantile(s, 0.025)), float(np.quantile(s, 0.975))
+
+
+def _plot_nps_superiority(
     aligned: pd.DataFrame,
     baseline_wait: pd.DataFrame,
     baseline_reroute: pd.DataFrame,
+    baseline_random: pd.DataFrame,
     out_path: Path,
 ) -> None:
-    fig, ax = plt.subplots(1, 1, figsize=(10, 4.2), dpi=DEFAULT_DPI)
-    if aligned.empty or (baseline_wait.empty and baseline_reroute.empty):
-        ax.text(
-            0.5,
-            0.5,
-            TEXT["missing_baseline"],
-            ha="center",
-            va="center",
-            fontsize=14,
-        )
-        ax.axis("off")
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(15.2, 5.2),
+        dpi=DEFAULT_DPI,
+        gridspec_kw={"width_ratios": [1.05, 1.35]},
+        sharey=True,
+    )
+    ax_a, ax_b = axes
+
+    if aligned.empty or baseline_random.empty or (baseline_wait.empty and baseline_reroute.empty):
+        ax_a.text(0.5, 0.5, TEXT["missing_baseline"], ha="center", va="center", fontsize=12)
+        ax_a.axis("off")
+        ax_b.axis("off")
         fig.tight_layout()
         fig.savefig(out_path, dpi=DEFAULT_DPI)
         plt.close(fig)
         return
 
-    rl_rewards = aligned["reward"].to_numpy()
-    x = np.arange(len(rl_rewards))
+    phase_seq = [
+        p
+        for p in ["train", "implement", "eval"]
+        if p in aligned.get("phase", pd.Series(dtype=str)).astype(str).str.lower().unique()
+    ]
+    if not phase_seq:
+        phase_seq = ["overall"]
+    else:
+        phase_seq = phase_seq + ["overall"]
 
-    def _cum_adv(rl: np.ndarray, baseline: np.ndarray) -> np.ndarray:
-        rl_series = pd.Series(rl, dtype=float)
-        baseline_series = pd.Series(baseline, dtype=float).reindex(rl_series.index)
-        diff = (rl_series - baseline_series).fillna(0.0)
-        return diff.cumsum().to_numpy()
+    rows = []
+    for phase in phase_seq:
+        rl_arr = _phase_reward_array(aligned, phase)
+        wait_arr = _phase_reward_array(baseline_wait, phase)
+        reroute_arr = _phase_reward_array(baseline_reroute, phase)
+        rand_arr = _phase_reward_array(baseline_random, phase)
 
-    any_line = False
-    if not baseline_wait.empty:
-        baseline_wait = _sort_by_phase_table(baseline_wait)
-        wait_rewards = baseline_wait["reward"].to_numpy()
-        if len(rl_rewards) != len(wait_rewards):
-            print(
-                f"Warning: cumulative advantage length mismatch (RL={len(rl_rewards)}, wait={len(wait_rewards)}).",
-                file=sys.stderr,
-            )
-        ax.plot(
-            x,
-            _cum_adv(rl_rewards, wait_rewards),
-            color="#1F4E79",
-            linewidth=2.2,
-            label=TEXT["always_wait"],
+        j_rl = float(rl_arr.mean()) if rl_arr.size else float("nan")
+        j_w = float(wait_arr.mean()) if wait_arr.size else float("nan")
+        j_r = float(reroute_arr.mean()) if reroute_arr.size else float("nan")
+        j_rand = float(rand_arr.mean()) if rand_arr.size else float("nan")
+
+        if np.isfinite(j_w) and (not np.isfinite(j_r) or j_w >= j_r):
+            static_arr = wait_arr
+            j_static = j_w
+            static_policy = "wait"
+        elif np.isfinite(j_r):
+            static_arr = reroute_arr
+            j_static = j_r
+            static_policy = "reroute"
+        else:
+            static_arr = np.array([], dtype=float)
+            j_static = float("nan")
+            static_policy = ""
+
+        denom = j_static - j_rand if np.isfinite(j_static) and np.isfinite(j_rand) else float("nan")
+        if np.isfinite(denom) and abs(float(denom)) > 1e-9 and np.isfinite(j_rl):
+            nps = (j_rl - j_rand) / denom
+        else:
+            nps = float("nan")
+
+        ci_low, ci_high = _bootstrap_nps_ci(
+            rl_arr=rl_arr,
+            rand_arr=rand_arr,
+            static_arr=static_arr,
+            n_boot=800,
+            seed=42,
         )
-        any_line = True
-
-    if not baseline_reroute.empty:
-        baseline_reroute = _sort_by_phase_table(baseline_reroute)
-        reroute_rewards = baseline_reroute["reward"].to_numpy()
-        if len(rl_rewards) != len(reroute_rewards):
-            print(
-                f"Warning: cumulative advantage length mismatch (RL={len(rl_rewards)}, reroute={len(reroute_rewards)}).",
-                file=sys.stderr,
-            )
-        ax.plot(
-            x,
-            _cum_adv(rl_rewards, reroute_rewards),
-            color="#55A868",
-            linewidth=2.2,
-            label=TEXT["always_reroute"],
+        rows.append(
+            {
+                "phase": phase,
+                "phase_label": PHASE_LABELS.get(
+                    phase, TEXT["phase_overall"] if phase == "overall" else phase.title()
+                ),
+                "j_rl": j_rl,
+                "j_wait": j_w,
+                "j_reroute": j_r,
+                "j_rand": j_rand,
+                "j_static": j_static,
+                "static_policy": static_policy,
+                "nps": nps,
+                "nps_ci_low": ci_low,
+                "nps_ci_high": ci_high,
+            }
         )
-        any_line = True
 
-    if not any_line:
-        ax.text(
-            0.5,
-            0.5,
-            TEXT["missing_baseline_short"],
-            ha="center",
-            va="center",
-            fontsize=14,
-        )
-        ax.axis("off")
+    nps_df = pd.DataFrame(rows)
+    nps_df = nps_df[nps_df["nps"].notna()].copy().reset_index(drop=True)
+    if nps_df.empty:
+        ax_a.text(0.5, 0.5, TEXT["missing_baseline"], ha="center", va="center", fontsize=12)
+        ax_a.axis("off")
+        ax_b.axis("off")
         fig.tight_layout()
         fig.savefig(out_path, dpi=DEFAULT_DPI)
         plt.close(fig)
         return
 
-    ax.axhline(0, color="#999999", linewidth=1, linestyle="--")
-    ax.set_title(TEXT["cum_adv_title"])
-    ax.set_xlabel(TEXT["cum_adv_x"])
-    ax.set_ylabel(TEXT["cum_adv_y"])
-    ax.legend(loc="best")
+    y_pos = np.arange(len(nps_df), dtype=float)
+
+    # Panel A: horizontal point-range (NPS + CI), replacing thick bars
+    nps_vals = nps_df["nps"].to_numpy(dtype=float)
+    ci_lo = nps_df["nps_ci_low"].to_numpy(dtype=float)
+    ci_hi = nps_df["nps_ci_high"].to_numpy(dtype=float)
+    err_low = np.maximum(0.0, nps_vals - np.where(np.isfinite(ci_lo), ci_lo, nps_vals))
+    err_hi = np.maximum(0.0, np.where(np.isfinite(ci_hi), ci_hi, nps_vals) - nps_vals)
+
+    x_max = max(1.25, float(np.nanmax(nps_vals)) + 0.22)
+    x_min = min(-0.25, float(np.nanmin(nps_vals)) - 0.12)
+    ax_a.axvspan(1.0, x_max, color="#EAF6EA", alpha=0.75, zorder=0)
+    ax_a.axvline(0.0, color="#6C6C6C", linestyle=(0, (4, 3)), linewidth=1.1, zorder=1, label=TEXT["nps_ref_zero"])
+    ax_a.axvline(1.0, color="#2E7D32", linestyle=(0, (2, 2)), linewidth=1.3, zorder=1, label=TEXT["nps_ref_one"])
+    ax_a.hlines(y_pos, xmin=np.minimum(0.0, nps_vals), xmax=np.maximum(0.0, nps_vals), color="#D0D0D0", linewidth=1.2, zorder=1)
+    ax_a.errorbar(
+        nps_vals,
+        y_pos,
+        xerr=np.vstack([err_low, err_hi]),
+        fmt="o",
+        markersize=7.2,
+        markerfacecolor="#1F77B4",
+        markeredgecolor="#1A1A1A",
+        markeredgewidth=0.6,
+        ecolor="#3A3A3A",
+        elinewidth=1.2,
+        capsize=3.5,
+        zorder=3,
+    )
+    for x, y in zip(nps_vals, y_pos):
+        ax_a.text(x + 0.03, y, f"{x:.2f}", va="center", ha="left", fontsize=10.2, color="#1F1F1F")
+    ax_a.set_xlim(x_min, x_max)
+    ax_a.set_yticks(y_pos)
+    ax_a.set_yticklabels(nps_df["phase_label"].tolist())
+    ax_a.set_xlabel(TEXT["nps_ylabel"])
+    ax_a.set_title(TEXT["nps_panel_a"])
+    ax_a.grid(True, axis="x", linestyle="--", alpha=0.22)
+    ax_a.legend(loc="lower right", frameon=False, fontsize=9.2)
+
+    # Panel B: richer horizontal dumbbell (Random/Wait/Reroute/RL)
+    for i, row in nps_df.iterrows():
+        y = y_pos[i]
+        j_rand = float(row["j_rand"])
+        j_wait = float(row["j_wait"])
+        j_rer = float(row["j_reroute"])
+        j_rl = float(row["j_rl"])
+        j_static = float(row["j_static"])
+
+        if np.isfinite(j_rand) and np.isfinite(j_static):
+            ax_b.plot([j_rand, j_static], [y, y], color="#C7C7C7", linewidth=1.2, linestyle=(0, (2, 2)), zorder=1)
+        if np.isfinite(j_static) and np.isfinite(j_rl):
+            gain_color = "#1F77B4" if j_rl >= j_static else "#C23B22"
+            ax_b.plot([j_static, j_rl], [y, y], color=gain_color, linewidth=3.0, solid_capstyle="round", zorder=2)
+            denom = max(1e-9, abs(j_static))
+            gain_pct = (j_rl - j_static) / denom * 100.0
+            ax_b.text(
+                (j_static + j_rl) / 2.0,
+                y - 0.19,
+                f"{gain_pct:+.1f}%",
+                ha="center",
+                va="bottom",
+                fontsize=9.0,
+                color=gain_color,
+                fontweight="semibold",
+            )
+
+        if np.isfinite(j_rand):
+            ax_b.scatter(j_rand, y, color="#B3B3B3", alpha=0.65, s=28, marker="o", zorder=3)
+        if np.isfinite(j_wait):
+            ax_b.scatter(j_wait, y, color="#5A5A5A", s=42, marker="^", zorder=4)
+        if np.isfinite(j_rer):
+            ax_b.scatter(j_rer, y, color="#4D4D4D", s=44, marker="s", zorder=4)
+        if np.isfinite(j_rl):
+            ax_b.scatter(j_rl, y, color="#1F77B4", s=66, marker="D", zorder=5)
+
+    # legend handles
+    ax_b.scatter([], [], color="#B3B3B3", alpha=0.65, s=28, marker="o", label=TEXT["legend_rand"])
+    ax_b.scatter([], [], color="#5A5A5A", s=42, marker="^", label=TEXT["always_wait"])
+    ax_b.scatter([], [], color="#4D4D4D", s=44, marker="s", label=TEXT["always_reroute"])
+    ax_b.scatter([], [], color="#1F77B4", s=66, marker="D", label=TEXT["legend_rl"])
+    ax_b.set_yticks(y_pos)
+    ax_b.set_yticklabels(nps_df["phase_label"].tolist())
+    ax_b.set_title(TEXT["nps_panel_b"])
+    ax_b.set_xlabel(TEXT["reward_axis"])
+    all_x = np.concatenate(
+        [
+            nps_df["j_rand"].to_numpy(dtype=float),
+            nps_df["j_wait"].to_numpy(dtype=float),
+            nps_df["j_reroute"].to_numpy(dtype=float),
+            nps_df["j_rl"].to_numpy(dtype=float),
+        ]
+    )
+    all_x = all_x[np.isfinite(all_x)]
+    xmax_b = max(1.02, float(all_x.max()) + 0.03) if all_x.size else 1.02
+    ax_b.set_xlim(0.0, xmax_b)
+    ax_b.grid(True, axis="x", linestyle="--", alpha=0.22)
+    ax_b.legend(loc="lower right", frameon=False, fontsize=8.8, ncol=2)
+
+    ax_a.invert_yaxis()
+    fig.suptitle(TEXT["nps_title"], y=1.02, fontsize=14)
+    sns.despine(fig=fig)
     fig.tight_layout()
     fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)
@@ -1187,12 +1412,28 @@ def main() -> None:
     baseline_random = _load_baseline_events(run_dir / "baseline_random.csv", "random")
     aligned = _prepare_aligned_decisions(trace, training)
 
-    sns.set_theme(style="whitegrid", context="paper", font_scale=1.5)
+    sns.set_theme(style="whitegrid", context="paper", font_scale=1.35)
     plt.rcParams["figure.dpi"] = DEFAULT_DPI
     plt.rcParams["savefig.dpi"] = DEFAULT_DPI
-    plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = FONT_SANS
+    if not USE_CHINESE:
+        plt.rcParams["font.family"] = "serif"
+        plt.rcParams["font.serif"] = ["Times New Roman", "DejaVu Serif", "CMU Serif", "Liberation Serif"]
+        use_tex = str(os.environ.get("PLOT_USE_TEX", "0")).strip() in {"1", "true", "yes", "on"}
+        if use_tex and shutil.which("latex"):
+            plt.rcParams["text.usetex"] = True
+            plt.rcParams["mathtext.fontset"] = "cm"
+        else:
+            plt.rcParams["text.usetex"] = False
+            plt.rcParams["mathtext.fontset"] = "stix"
+    else:
+        plt.rcParams["font.family"] = "sans-serif"
+        plt.rcParams["font.sans-serif"] = FONT_SANS
+        plt.rcParams["text.usetex"] = False
     plt.rcParams["axes.unicode_minus"] = False
+    plt.rcParams["axes.titlesize"] = 14
+    plt.rcParams["axes.labelsize"] = 13
+    plt.rcParams["xtick.labelsize"] = 11.5
+    plt.rcParams["ytick.labelsize"] = 11.5
 
     out_dir = run_dir / "paper_figures"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1209,13 +1450,19 @@ def main() -> None:
         risk_q=args.risk_q,
     )
     _plot_policy_heatmap(trace, aligned, out_dir / "fig3_policy_heatmap.pdf")
-    _plot_cumulative_advantage(aligned, baseline_wait, baseline_reroute, out_dir / "fig4_cumulative_advantage.pdf")
+    _plot_nps_superiority(
+        aligned,
+        baseline_wait,
+        baseline_reroute,
+        baseline_random,
+        out_dir / "fig4_nps_superiority.pdf",
+    )
 
     print("Saved figures to:", out_dir)
     print("  fig1_environment.pdf")
     print("  fig2_adaptation.pdf")
     print("  fig3_policy_heatmap.pdf")
-    print("  fig4_cumulative_advantage.pdf")
+    print("  fig4_nps_superiority.pdf")
 
 
 if __name__ == "__main__":

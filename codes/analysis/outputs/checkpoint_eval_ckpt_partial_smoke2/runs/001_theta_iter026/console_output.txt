@@ -1,0 +1,39 @@
+>>> [stage1] skip generator, using external data root: A:\MYpython\34959_RL\codes\logs\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\data
+
+>>> [阶段2] 正在启动主仿真程序 (ALNS + RL)...
+==================================================
+   线程并行编号: [0, 1]
+Using cpu device
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15

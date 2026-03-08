@@ -861,6 +861,12 @@ def run_command(
     timeout_s: Optional[float] = None,
     env: Optional[Dict[str, str]] = None,
 ) -> int:
+    if timeout_s is not None:
+        try:
+            if float(timeout_s) <= 0:
+                timeout_s = None
+        except Exception:
+            timeout_s = None
     try:
         proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, timeout=timeout_s, env=env)
     except subprocess.TimeoutExpired:
@@ -967,12 +973,10 @@ def _baseline_presence_flags(run_dir: Path) -> Dict[str, bool]:
 
 def _baseline_success_flags(run_dir: Path) -> Dict[str, bool]:
     flags = _baseline_presence_flags(run_dir)
-    # Avoid baseline/plot cyclic dependency: baseline success should not require paper.
-    wait_success = bool(flags["reroute"] or flags["wait_impl"] or (flags["paper"] and flags["wait"]))
-    reroute_success = bool(
-        flags["random"] or flags["reroute_impl"] or (flags["paper"] and flags["wait"] and flags["reroute"])
-    )
-    random_success = bool(flags["random_impl"] or (flags["paper"] and flags["wait"] and flags["reroute"] and flags["random"]))
+    # Strict per-policy success: each baseline policy should produce its own file/implement rows.
+    wait_success = bool(flags["wait_impl"] or flags["wait_file"])
+    reroute_success = bool(flags["reroute_impl"] or flags["reroute_file"])
+    random_success = bool(flags["random_impl"] or flags["random_file"])
     return {
         "wait": wait_success,
         "reroute": reroute_success,
@@ -1004,6 +1008,8 @@ def _build_baseline_cmd(run_dir: Path, policy: str) -> List[str]:
         str(run_dir),
         "--policy",
         str(policy),
+        "--phase-mode",
+        "implement_only",
     ]
 
 
@@ -1035,6 +1041,13 @@ def _resolve_master_watch_files(run_dir: Path) -> List[Path]:
     ]
 
 
+def _resolve_master_progress_files(run_dir: Path) -> List[Path]:
+    return [
+        run_dir / "rl_training.csv",
+        run_dir / "rl_summary.csv",
+    ]
+
+
 def _resolve_baseline_watch_files(run_dir: Path, policy: Optional[str] = None) -> List[Path]:
     if policy:
         return [_baseline_policy_path(run_dir, policy)]
@@ -1057,6 +1070,9 @@ def _run_with_watchdog(
     min_bytes: int,
     poll_s: float = 5.0,
     env: Optional[Dict[str, str]] = None,
+    progress_files: Optional[List[Path]] = None,
+    progress_stall_s: float = 0.0,
+    max_wall_s: float = 0.0,
 ) -> int:
     proc = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None, env=env)
     _write_run_status(run_dir, {"stage": stage, "status": "running", "pid": proc.pid})
@@ -1065,6 +1081,9 @@ def _run_with_watchdog(
     last_sizes: Dict[Path, int] = {p: -1 for p in watch_files}
     last_growth_ts = time.monotonic()
     start_ts = last_growth_ts
+    progress_files = list(progress_files or [])
+    last_progress_sizes: Dict[Path, int] = {p: -1 for p in progress_files}
+    last_progress_ts = start_ts
 
     while True:
         code = proc.poll()
@@ -1085,8 +1104,17 @@ def _run_with_watchdog(
             if size > prev:
                 last_sizes[path] = size
                 last_growth_ts = now
+        for path in progress_files:
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                size = 0
+            prev = last_progress_sizes.get(path, -1)
+            if size > prev:
+                last_progress_sizes[path] = size
+                last_progress_ts = now
 
-        if now - start_ts >= startup_s and now - last_growth_ts >= stall_s:
+        if float(stall_s) > 0 and now - start_ts >= startup_s and now - last_growth_ts >= stall_s:
             _append_watchdog_event(
                 run_dir,
                 {
@@ -1108,6 +1136,54 @@ def _run_with_watchdog(
                 except Exception:
                     pass
             _write_run_status(run_dir, {"stage": stage, "status": "killed", "reason": "stall_timeout"})
+            return 124
+        if (
+            progress_files
+            and float(progress_stall_s) > 0
+            and now - start_ts >= startup_s
+            and now - last_progress_ts >= float(progress_stall_s)
+        ):
+            _append_watchdog_event(
+                run_dir,
+                {
+                    "stage": stage,
+                    "event": "stall_timeout",
+                    "reason": "no_progress",
+                    "progress_stall_s": float(progress_stall_s),
+                    "startup_s": startup_s,
+                    "progress_files": [str(p) for p in progress_files],
+                },
+            )
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            _write_run_status(run_dir, {"stage": stage, "status": "killed", "reason": "stall_timeout_no_progress"})
+            return 124
+        if float(max_wall_s) > 0 and (now - start_ts) >= float(max_wall_s):
+            _append_watchdog_event(
+                run_dir,
+                {
+                    "stage": stage,
+                    "event": "wall_timeout",
+                    "reason": "max_wall",
+                    "max_wall_s": float(max_wall_s),
+                    "elapsed_s": float(now - start_ts),
+                },
+            )
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            _write_run_status(run_dir, {"stage": stage, "status": "killed", "reason": "wall_timeout"})
             return 124
 
         time.sleep(poll_s)
@@ -1292,10 +1368,12 @@ def _run_matches_algo_version(run_dir: Path, algorithm: str, algo_version: str) 
 
 
 def _extract_run_key(run_dir: Path, known_algorithms: Iterable[str]) -> Optional[Tuple[str, int, str, int]]:
-    key = _extract_run_key_from_meta(run_dir)
+    # Prefer run-name parsing first. For orchestrated algorithms such as NOVA_EDRL,
+    # meta.json may be overwritten by inner stages and no longer reflect the top-level algorithm.
+    key = _parse_run_name_key(run_dir.name, known_algorithms)
     if key is not None:
         return key
-    return _parse_run_name_key(run_dir.name, known_algorithms)
+    return _extract_run_key_from_meta(run_dir)
 
 
 def _discover_existing_runs(
@@ -1420,7 +1498,7 @@ def run_task(
         "--run-name",
         run_name,
     ]
-    if str(algorithm).strip().upper() == "PPO_NEW":
+    if str(algorithm).strip().upper() in {"PPO_NEW", "NOVA_EDRL"}:
         master_cmd.extend(["--algo_version", str(getattr(config, "algo_version", "v1") or "v1")])
     stage_mode = str(getattr(config, "stage_mode", "train_eval") or "train_eval").strip()
     if stage_mode:
@@ -1433,6 +1511,15 @@ def run_task(
         master_cmd.extend(["--save-model-path", save_model_path])
     master_env = dict(os.environ)
     master_env["RL_LOG_ROOT"] = str(run_dir.parent)
+    # Prevent infinite wait loops in RL<->ALNS interaction: bounded wait + abort can be retried by watchdog.
+    if "RL_WAIT_TIMEOUT_S" not in master_env:
+        master_env["RL_WAIT_TIMEOUT_S"] = str(_env_float("RL_WAIT_TIMEOUT_S", 600.0))
+    if "RL_WAIT_ABORT" not in master_env:
+        master_env["RL_WAIT_ABORT"] = str(_env_int("RL_WAIT_ABORT", 1))
+    if "RL_WAIT_LOG_INTERVAL_S" not in master_env:
+        master_env["RL_WAIT_LOG_INTERVAL_S"] = str(_env_float("RL_WAIT_LOG_INTERVAL_S", 5.0))
+    if "RL_WAIT_SLEEP_S" not in master_env:
+        master_env["RL_WAIT_SLEEP_S"] = str(_env_float("RL_WAIT_SLEEP_S", 0.01))
     if str(algorithm).strip().upper() == "PPO_NEW":
         window_k = getattr(config, "ppo_new_window", None)
         if window_k is not None:
@@ -1537,24 +1624,31 @@ def run_task(
     master_stall_s = _env_float("MASTER_STALL_S", 1800.0)
     master_startup_s = _env_float("MASTER_STARTUP_S", 600.0)
     master_min_bytes = _env_int("MASTER_MIN_BYTES", 1024)
+    master_progress_stall_s = _env_float("MASTER_PROGRESS_STALL_S", 900.0)
+    master_max_wall_s = _env_float("MASTER_MAX_WALL_S", 0.0)
     master_retries = max(0, _env_int("MASTER_RETRIES", 2))
     master_poll_s = _env_float("MASTER_POLL_S", 5.0)
     master_retry_budgets = _resolve_retry_budgets("master", master_retries)
 
-    baseline_stall_s = _env_float("BASELINE_STALL_S", 600.0)
-    baseline_startup_s = _env_float("BASELINE_STARTUP_S", 300.0)
-    baseline_min_bytes = _env_int("BASELINE_MIN_BYTES", 4096)
+    # Baseline replay often contains long ALNS inner solves with sparse file growth.
+    # Disable no-growth timeout by default to avoid false positive kills.
+    baseline_stall_s = _env_float("BASELINE_STALL_S", 0.0)
+    baseline_startup_s = _env_float("BASELINE_STARTUP_S", 180.0)
+    baseline_min_bytes = _env_int("BASELINE_MIN_BYTES", 256)
+    # Disable no-progress timeout by default for baseline stage.
+    baseline_progress_stall_s = _env_float("BASELINE_PROGRESS_STALL_S", 0.0)
+    baseline_max_wall_s = _env_float("BASELINE_MAX_WALL_S", 0.0)
     baseline_retries = max(0, _env_int("BASELINE_RETRIES", 3))
     baseline_poll_s = _env_float("BASELINE_POLL_S", 5.0)
     baseline_retry_budgets = _resolve_retry_budgets("baseline", baseline_retries)
 
-    metrics_timeout_s = _env_float("METRICS_TIMEOUT_S", 3600.0)
+    metrics_timeout_s = _env_float("METRICS_TIMEOUT_S", 0.0)
     metrics_retries = max(0, _env_int("METRICS_RETRIES", 1))
     metrics_retry_budgets = _resolve_retry_budgets("metrics", metrics_retries)
-    plots_timeout_s = _env_float("PLOTS_TIMEOUT_S", 3600.0)
+    plots_timeout_s = _env_float("PLOTS_TIMEOUT_S", 0.0)
     plots_retries = max(0, _env_int("PLOTS_RETRIES", 1))
     plots_retry_budgets = _resolve_retry_budgets("plots", plots_retries)
-    cleanup_timeout_s = _env_float("CLEANUP_TIMEOUT_S", 900.0)
+    cleanup_timeout_s = _env_float("CLEANUP_TIMEOUT_S", 0.0)
     cleanup_retries = max(0, _env_int("CLEANUP_RETRIES", 0))
     cleanup_retry_budgets = _resolve_retry_budgets("cleanup", cleanup_retries)
 
@@ -1628,6 +1722,7 @@ def run_task(
             code = 1
             last_reason = "nonzero_exit"
             watch_files = _resolve_master_watch_files(run_dir)
+            progress_files = _resolve_master_progress_files(run_dir)
             while True:
                 attempt += 1
                 _rotate_master_files(run_dir, attempt)
@@ -1652,6 +1747,9 @@ def run_task(
                     min_bytes=master_min_bytes,
                     poll_s=master_poll_s,
                     env=master_env,
+                    progress_files=progress_files,
+                    progress_stall_s=master_progress_stall_s,
+                    max_wall_s=master_max_wall_s,
                 )
                 stage_times[f"master_sec_attempt_{attempt}"] = time.monotonic() - t0
                 if code == 0:
@@ -1737,6 +1835,9 @@ def run_task(
                         startup_s=baseline_startup_s,
                         min_bytes=baseline_min_bytes,
                         poll_s=baseline_poll_s,
+                        progress_files=watch_files,
+                        progress_stall_s=baseline_progress_stall_s,
+                        max_wall_s=baseline_max_wall_s,
                     )
                     stage_times[f"baseline_{policy}_sec_attempt_{attempt}"] = time.monotonic() - t0
                     if code == 0:

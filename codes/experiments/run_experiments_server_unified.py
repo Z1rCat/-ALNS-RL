@@ -15,15 +15,22 @@ from experiments.run_experiments_common import ExperimentConfig, run_experiments
 
 
 DEFAULT_DISTS = [
-    "O_10_30",
-    "O_10_60",
-    "O_30_60",
-    "F1_10_60",
-    "F2_10_60",
-    "F1_10_30",
-    "F2_10_30",
-    "G_10_30_60",
-    "G_10_60_30",
+    "O_10_90",
+    "O_90_10",
+    "O_30_80",
+    "O_60_20",
+    "O_10_120",
+    "O_120_10",
+    "G_10_90_50",
+    "G_10_40_90",
+    "G_40_80_10",
+    "G_30_60_90",
+    "F1_10_90",
+    "F1_90_10",
+    "F2_10_90",
+    "F2_30_80",
+    "R_10_90",
+    "R_30_80",
 ]
 
 
@@ -234,7 +241,7 @@ def parse_args() -> argparse.Namespace:
         "--variant",
         action="append",
         default=None,
-        help="variant spec (repeatable), format: ALGO[:version], e.g. PPO or PPO_NEW:v3.1",
+        help="variant spec (repeatable), format: ALGO[:version], e.g. PPO, PPO_NEW:v3.1, NOVA_EDRL:v1, RARL:v1, PLR_UED:v1, CQL_DQN:v1, CADM:v1",
     )
     parser.add_argument("--algo", type=str, default="PPO", help="fallback algorithm when --variant not set")
     parser.add_argument("--algo-version", type=str, default="v1", help="fallback algo version when --variant not set")

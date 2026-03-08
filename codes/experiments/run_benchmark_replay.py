@@ -10,6 +10,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -276,7 +277,34 @@ class ImplementDriver(threading.Thread):
 
 
 
-def load_table_phase_sequence(trace_path):
+def _normalize_phase_mode(phase_mode):
+    mode = str(phase_mode or "implement_only").strip().lower()
+    if mode not in {"implement_only", "full_replay"}:
+        mode = "implement_only"
+    return mode
+
+
+def _normalize_policy_name(policy_name):
+    value = str(policy_name or "").strip().lower()
+    aliases = {
+        "always_0": "wait",
+        "always_0implement": "wait",
+        "always0": "wait",
+        "always0implement": "wait",
+        "always_1": "reroute",
+        "always_1implement": "reroute",
+        "always1": "reroute",
+        "always1implement": "reroute",
+        "randomimplement": "random",
+        "waitimplement": "wait",
+        "rerouteimplement": "reroute",
+        "all_implement": "all",
+    }
+    return aliases.get(value, value)
+
+
+def load_table_phase_sequence(trace_path, phase_mode="implement_only"):
+    mode = _normalize_phase_mode(phase_mode)
     sequence = []
     prev = None
     with trace_path.open("r", encoding="utf-8") as f:
@@ -295,6 +323,8 @@ def load_table_phase_sequence(trace_path):
             phase = str(row.get("phase", "") or "").strip().lower()
             if phase not in {"train", "implement"}:
                 phase = "train"
+            if mode == "implement_only" and phase != "implement":
+                continue
             if prev is None or table_number != prev:
                 sequence.append((table_number, phase))
                 prev = table_number
@@ -344,11 +374,12 @@ def to_base_algorithm(algo_label):
 
 
 def build_policy(policy_name, seed):
-    if policy_name == "wait":
+    policy = _normalize_policy_name(policy_name)
+    if policy == "wait":
         return lambda: 0
-    if policy_name == "reroute":
+    if policy == "reroute":
         return lambda: 1
-    if policy_name == "random":
+    if policy == "random":
         rng = random.Random(seed)
         return lambda: rng.choice([0, 1])
     raise ValueError(f"unknown policy: {policy_name}")
@@ -364,7 +395,8 @@ def apply_phase(phase):
 
 def run_policy(run_dir, table_sequence, request_number, policy_name, seed):
     global _BASELINE_LOGGER
-    baseline_path = run_dir / f"baseline_{policy_name}.csv"
+    canonical_policy = _normalize_policy_name(policy_name)
+    baseline_path = run_dir / f"baseline_{canonical_policy}.csv"
     logger = BaselineLogger(baseline_path, TRACE_FIELDS)
     install_baseline_logging(logger)
     _BASELINE_LOGGER = logger
@@ -381,7 +413,7 @@ def run_policy(run_dir, table_sequence, request_number, policy_name, seed):
     Intermodal_ALNS34959.refresh_figures_dir()
     rl_logging.set_run_dir(str(run_dir))
 
-    policy_fn = build_policy(policy_name, seed)
+    policy_fn = build_policy(canonical_policy, seed)
 
     for table_number, phase in table_sequence:
         is_impl = apply_phase(phase)
@@ -404,6 +436,9 @@ def run_policy(run_dir, table_sequence, request_number, policy_name, seed):
             Dynamic_ALNS_RL34959.Intermodal_ALNS_function(request_number)
         except SystemExit:
             pass
+        except Exception:
+            # Keep baseline replay resilient: skip broken table and continue.
+            traceback.print_exc()
         finally:
             stop_event.set()
             if not is_impl:
@@ -419,8 +454,27 @@ def run_policy(run_dir, table_sequence, request_number, policy_name, seed):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, help="path to run_YYYYMMDD... folder")
-    parser.add_argument("--policy", default="all", choices=["wait", "reroute", "random", "all"])
-    parser.add_argument("--include-random", action="store_true", help="include random when policy=all")
+    parser.add_argument(
+        "--policy",
+        default="all",
+        help=(
+            "wait/reroute/random/all or aliases: "
+            "always_0implement, always_1implement, randomimplement"
+        ),
+    )
+    parser.add_argument(
+        "--include-random",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="include random policy when --policy=all",
+    )
+    parser.add_argument(
+        "--phase-mode",
+        type=str,
+        default="implement_only",
+        choices=["implement_only", "full_replay"],
+        help="implement_only: run baseline only on test/implement tables; full_replay: train+implement replay",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-tables", type=int, default=0)
     return parser.parse_args()
@@ -436,11 +490,11 @@ def main():
     if not trace_path.exists():
         raise SystemExit(f"missing rl_trace.csv in {run_dir}")
 
-    table_sequence = load_table_phase_sequence(trace_path)
+    table_sequence = load_table_phase_sequence(trace_path, phase_mode=args.phase_mode)
     if args.max_tables > 0:
         table_sequence = table_sequence[: args.max_tables]
     if not table_sequence:
-        raise SystemExit("table sequence is empty")
+        raise SystemExit(f"table sequence is empty (phase_mode={args.phase_mode})")
 
     request_number = load_request_number(run_dir)
 
@@ -452,14 +506,22 @@ def main():
         except Exception:
             pass
 
-    policies = [args.policy]
-    if args.policy == "all":
+    selected_policy = _normalize_policy_name(args.policy)
+    if selected_policy not in {"wait", "reroute", "random", "all"}:
+        raise SystemExit(f"unknown policy: {args.policy}")
+
+    policies = [selected_policy]
+    if selected_policy == "all":
         policies = ["wait", "reroute"]
         if args.include_random:
             policies.append("random")
 
     for policy in policies:
-        run_policy(run_dir, table_sequence, request_number, policy, args.seed)
+        try:
+            run_policy(run_dir, table_sequence, request_number, policy, args.seed)
+        except Exception:
+            # Do not crash the whole baseline runner on one-policy failure.
+            traceback.print_exc()
 
 
 if __name__ == "__main__":

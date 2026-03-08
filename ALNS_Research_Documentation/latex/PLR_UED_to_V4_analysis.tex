@@ -1,0 +1,186 @@
+﻿% !TEX program = xelatex
+\documentclass[UTF8,11pt,a4paper]{ctexart}
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,mathtools}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{xcolor}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlist[itemize]{topsep=2pt,itemsep=2pt,parsep=0pt,leftmargin=1.6em}
+\setlist[enumerate]{topsep=2pt,itemsep=2pt,parsep=0pt,leftmargin=1.6em}
+
+\title{从 PLR/UED 机理到 V4 设计：\\
+NOVA 在非稳态 OOD 联运调度中的数学分析与改进路线}
+\author{项目内部技术论文（中文 TeX 草稿）}
+\date{2026-03-05}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文围绕当前项目在分布 \texttt{O\_10\_90} 上的观测现象展开：\textbf{PLR\_UED 的测试平均回报高于 NOVA\_EDRL(v3)}。我们给出三部分内容：
+(1) 从公式层面解释 PLR/UED 为什么在非稳态与 OOD 场景有效；
+(2) 对比同类算法（PAIRED、ACCEL、ADR、ALP-GMM、RARL）的目标函数与适用边界；
+(3) 给出以 PLR/UED 为主线、并与 PPO\_NEW(v3) 可兼容的 V4 方案。
+核心结论是：在本项目的二值动作与强不平衡奖励结构下，\textbf{单纯“更难”并不等于“更可学”}；性能提升来自“可学习难度 + 难例回放 + 采样多样性 + 防塌缩约束”的联合机制，而不是任一单项。
+\end{abstract}
+
+\section{问题设置与记号}
+设内层策略为 $\pi_\theta(a\mid s)$，动作 $a\in\{0,1\}$，分布参数（环境级动作）记为
+\begin{equation}
+ g=(\mu_A,\mu_B,p,n,\text{pattern}).
+\end{equation}
+给定 $g$ 生成一批事件文件，内层在该批数据上训练/评估得到平均回报 $J(g)\in[0,1]$。
+
+定义冻结策略（Phase1 checkpoint）在 $g$ 上的性能：
+\begin{equation}
+J_{\mathrm{frozen}}(g)=\mathbb{E}[R\mid \theta=\theta_{\mathrm{phase1}}, g].
+\end{equation}
+定义增益项（学习潜力近似）：
+\begin{equation}
+\Delta J(g)=J_{\mathrm{current}}(g)-J_{\mathrm{ref}}(g).
+\end{equation}
+其中 $J_{\mathrm{ref}}$ 可取上一轮/平滑基线/phase2 冻结统计。
+
+\section{为什么 PLR/UED 更容易成功}
+\subsection{机制 1：学习潜力驱动，而非纯难度驱动}
+PLR 的核心并非“采样最难 level”，而是采样\textbf{最有学习潜力}的 level。原始 PLR 使用 value-loss 家族作为优先级分数：
+\begin{equation}
+S_i \propto \frac{1}{T_i}\sum_{t=1}^{T_i}\left|\hat V(s_t)-\hat G_t\right|,
+\end{equation}
+并基于 $S_i$ 构造 replay 概率。直觉上，$S_i$ 大意味着当前策略在该 level 上“还没学会但有梯度”。
+
+对比到本项目，若外层只最大化 $(1-J_{\mathrm{frozen}})$，会偏向“让内层痛苦”；若加入 $|\Delta J|$ 或 value-loss 近似，则偏向“痛苦但有进步”。这正是 PLR/UED 优于纯 adversarial 的关键。
+
+\subsection{机制 2：Replay 让稀有困难样本持续被看见}
+令 replay buffer 中 level $i$ 的分数为 $q_i$，常见更新为指数平滑：
+\begin{equation}
+q_i\leftarrow (1-\beta)q_i+\beta\cdot \text{score}_i,
+\end{equation}
+采样概率
+\begin{equation}
+P(i)=\frac{(q_i+\epsilon)^\alpha}{\sum_j(q_j+\epsilon)^\alpha}.
+\end{equation}
+这保证高价值难例不会被一次性遗忘，尤其适合你们这种“动作 1 稀有但关键”的场景。
+
+\subsection{机制 3：UED 的“难但可学”边界}
+PAIRED/UED 的思想可写为 regret 型目标：
+\begin{equation}
+\max_{\phi}\;\mathbb{E}_{g\sim p_\phi}\left[ R(\pi^{\text{ant}},g)-R(\pi^{\text{pro}},g)\right].
+\end{equation}
+若没有可学习约束，优化会走向“不可解噪声”。工程上常用 learnability gate 把目标限制在可学区间，例如
+\begin{equation}
+L(g)=\exp\left(-\frac{(J_{\mathrm{frozen}}(g)-c)^2}{2\sigma^2}\right).
+\end{equation}
+当 $J_{\mathrm{frozen}}$ 过高（太简单）或过低（太难）时，$L(g)$ 同时下降，推动采样集中到“决策边界”附近。
+
+\subsection{与本地结果一致的解释}
+在目录 \texttt{local\_adaptive\_o10\_90\_s42\_rerun2} 中，
+PLR\_UED 的 \texttt{average\_reward=0.54}，而 NOVA\_EDRL(v3) 为 \texttt{0.50}。
+同时 implement 阶段 \texttt{send\_action} 里：PLR\_UED 的 action1 占比显著高于 v3。该现象说明 v3 的外层目标仍偏向“高挑战单模态”，未充分利用 replay 与多样性压力。
+
+\section{同类算法谱系与可借鉴点}
+\subsection{PAIRED（UED 对抗课程）}
+\textbf{优势}：regret 定义直接对齐“找薄弱点”。
+\textbf{风险}：在二值稀疏奖励下容易产生不可学分布，需 guardrail。
+
+\subsection{ACCEL（编辑式课程）}
+ACCEL 强调“从高价值历史 level 出发进行局部编辑”，本质是 replay + neighborhood search。
+对你们项目可映射为：以 top replay level 为中心做 $(\mu,p,n,pattern)$ 的局部扰动，而非每轮全局重采样。
+
+\subsection{ADR（Automatic Domain Randomization）}
+ADR 通过扩张参数随机化范围提升泛化上限。其价值在于覆盖，但缺点是样本利用率低。
+在你们场景中，ADR 适合作为“外层先验覆盖器”，不适合作为唯一 outer policy。
+
+\subsection{ALP-GMM（学习进度驱动课程）}
+ALP-GMM 用学习进度（learning progress）而非绝对难度分配采样质量。其思想与 PLR 的 $|\Delta J|$ 一致：
+\begin{equation}
+\text{LP}(g)\approx \left|J_t(g)-J_{t-k}(g)\right|.
+\end{equation}
+这对本项目尤为重要，因为二值奖励会让“绝对回报”对细粒度能力变化不敏感。
+
+\subsection{RARL（纯对抗基线）}
+RARL 的零和设定提供强鲁棒基线，但在当前任务中若缺少 learnability 约束，常导致动作塌缩和训练不稳定。它更适合作为对照，不宜直接当主策略。
+
+\section{V4：以 PLR/UED 为主线的 NOVA 改造}
+\subsection{V4 目标函数（建议主式）}
+建议在 phase2/phase3 统一使用：
+\begin{equation}
+\label{eq:v4_obj}
+\mathcal O_{V4}(g)=
+ w_c\,(1-J_{\mathrm{frozen}}(g))\,L(g)
+ +w_{\Delta}\,|\Delta J(g)|
+ +w_J\,J(g)
+ +w_H\,H(g)
+ +w_m\,G_{\mathrm{minor}}(g)
+ +w_n\,N(g)
+ -D(g),
+\end{equation}
+其中：
+\begin{itemize}
+\item $L(g)$：learnability gate（避免 too easy / too hard）；
+\item $H(g)$：内层动作熵（防策略塌缩）；
+\item $G_{\mathrm{minor}}(g)$：少数动作增益；
+\item $N(g)=1/\sqrt{1+n_{\mathrm{seen}}(g)}$：新颖度；
+\item $D(g)$：可行性/路径错误惩罚。
+\end{itemize}
+
+\subsection{Replay/New 的自适应采样}
+设每轮新采样概率：
+\begin{equation}
+\label{eq:pnew}
+p_{\mathrm{new}}(t)=\mathrm{clip}\Big(p_0+k\,(H^\star-\bar H_t),\;p_{\min},\;p_{\max}\Big).
+\end{equation}
+\begin{itemize}
+\item 若最近熵低（塌缩风险高），提高 $p_{\mathrm{new}}$ 增加探索；
+\item 若最近熵高且不稳定，提高 replay 比例做“巩固训练”。
+\end{itemize}
+
+\subsection{为何该设计更贴合 PPO\_NEW(v3)}
+PPO\_NEW(v3) 内层已具备较强结构化编码；V4 不改动内层算法主干，而是把样本分布设计从“单轮贪分”升级为“可学习课程 + 可复用记忆”。
+这与当前代码体系兼容性高，工程风险低。
+
+\section{下一步改进方向（按优先级）}
+\subsection*{P0：先确保 V4 真的学到 PLR/UED 精髓}
+\begin{enumerate}
+\item 强制输出目标分解项到 \texttt{outer\_actions.csv}：$\mathcal O$ 每个子项单列；
+\item 固化 replay 统计：\texttt{n\_seen, n\_sampled, score\_ema, p\_new\_iter}；
+\item 加入 phase2/phase3 的分开诊断图：目标项占比、动作熵、minority 增益。
+\end{enumerate}
+
+\subsection*{P1：把“高分 level”从点扩展到邻域}
+以 replay top levels 为中心做局部扰动（\(\mu\) 小步、\(p\) 小步、\(n\) 小步），形成 ACCEL 式编辑课程。目标是避免只记住单点（如固定 \(\mu=90\)）而不具备带宽泛化。
+
+\subsection*{P2：引入两时间尺度更新}
+外层每 $K_2$ 轮更新一次策略参数，内层每轮短训 $K_1$；并在 phase3 用内层收敛信号控制切换，而非仅用外层目标窗口。
+
+\subsection*{P3：评价体系对齐泛化目标}
+保留平均回报，同时主报告改为 NPS（你已定义），并补充 OOD 下 action entropy 与 minority recovery 曲线，避免只看单一 reward。
+
+\section{可验证文献来源（原文链接）}
+本文仅列可核验的一手来源（会议/期刊/官方仓库）：
+\begin{enumerate}
+\item Prioritized Level Replay (ICML 2021, PMLR): \\
+\url{https://proceedings.mlr.press/v139/jiang21b.html}
+\item Robust Adversarial Reinforcement Learning (ICML 2017, PMLR): \\
+\url{https://proceedings.mlr.press/v70/pinto17a.html}
+\item Emergent Complexity and Zero-shot Transfer via Unsupervised Environment Design (NeurIPS 2020): \\
+\url{https://proceedings.neurips.cc/paper/2020/hash/985e9a46e10005356bbaf194249f6856-Abstract.html}
+\item Complexity by Editing Levels, or ACCEL (DeepRL Workshop, OpenReview): \\
+\url{https://openreview.net/forum?id=0zJzCjSJux}
+\item Automatic Domain Randomization (arXiv 2019): \\
+\url{https://arxiv.org/abs/1910.07113}
+\item OpenAI \texttt{level-replay} official implementation: \\
+\url{https://github.com/facebookresearch/level-replay}
+\end{enumerate}
+
+\section*{附注}
+本稿为“机理分析 + 方案设计”稿，结论章留空，待你下一轮完整对照实验（NOVA v3/v4 vs PLR\_UED vs PPO\_NEW）后填充统计显著性结果。
+
+\end{document}

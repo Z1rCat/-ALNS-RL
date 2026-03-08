@@ -65,6 +65,7 @@ analysis_results/
 ALNS_Research_Documentation/figures/
 ALNS_Research_Documentation/figures_rl_logs/
 ALNS_Research_Documentation/data/rl_logs_aggregate.csv
+ALNS_Research_Documentation/Paper/
 
 # 训练过程重文件
 Training/Logs/
@@ -120,6 +121,7 @@ _minted*/
 # LaTeX 输出 PDF（可由 .tex 重新生成；不影响 paper_figures/ 子目录中的图）
 ALNS_Research_Documentation/latex/*.pdf
 ALNS_Research_Documentation/latex/old/*.pdf
+ALNS_Research_Documentation/Paper.zip
 
 # Office documents (reports are generated artifacts by default)
 *.docx

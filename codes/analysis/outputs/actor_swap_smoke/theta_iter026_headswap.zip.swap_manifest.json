@@ -1,0 +1,12 @@
+{
+  "late_ckpt": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\\post_stage\\checkpoints\\theta_iter026.zip",
+  "early_ckpt": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\\post_stage\\checkpoints\\theta_phase1.zip",
+  "out_ckpt": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\actor_swap_smoke\\theta_iter026_headswap.zip",
+  "mode": "action_head_only",
+  "interp_alpha": 0.5,
+  "applied_keys": [
+    "action_net.weight",
+    "action_net.bias"
+  ],
+  "applied_key_count": 2
+}

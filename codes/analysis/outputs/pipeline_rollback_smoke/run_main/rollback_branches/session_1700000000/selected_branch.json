@@ -1,0 +1,18 @@
+{
+  "branch_id": "cand_001",
+  "branch_root": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\pipeline_rollback_smoke\\run_main\\rollback_branches\\session_1700000000\\cand_001",
+  "post_stage": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\pipeline_rollback_smoke\\run_main\\rollback_branches\\session_1700000000\\cand_001\\post_stage",
+  "candidate_checkpoint": "a:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\pipeline_rollback_smoke\\run_main\\post_stage\\checkpoints\\hist_001.zip",
+  "candidate_rank": "",
+  "candidate_completed_train_tables": "10",
+  "subprocess_exit_code": 0,
+  "status": "ok",
+  "compare_metric": "action1_rate",
+  "compare_metric_value": 0.05,
+  "phase": "phase3",
+  "iter_id": "",
+  "objective_score": 0.6,
+  "selected_ckpt": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\pipeline_rollback_smoke\\run_main\\rollback_branches\\session_1700000000\\cand_001\\post_stage\\checkpoints\\theta_iter001.zip",
+  "selected_ckpt_source": "outer_train_round.csv",
+  "selected_policy": "latest_phase3"
+}

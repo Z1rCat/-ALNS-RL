@@ -30,6 +30,7 @@ except Exception:
 import sys
 from collections import defaultdict
 import zipfile
+import csv
 # This import registers the 3D projection, but is otherwise unused.
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
 import os
@@ -53,6 +54,7 @@ except ImportError:
         return wrapper
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_DYNAMIC_PATH_MAP_SEEN = set()
 
 def resolve_figures_dir():
     output_root = os.environ.get("ALNS_OUTPUT_ROOT", "").strip()
@@ -66,10 +68,135 @@ def refresh_figures_dir():
     global FIGURES_DIR
     FIGURES_DIR = resolve_figures_dir()
 
+
+def _env_int(name, default):
+    raw = os.environ.get(name, "").strip()
+    if raw == "":
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def _resolve_dynamic_index(table_number):
+    mode = (os.environ.get("RL_DYNAMIC_INDEX_MODE", "direct") or "direct").strip().lower()
+    if mode not in {"direct", "mod"}:
+        mode = "direct"
+    file_count = _env_int("RL_DYNAMIC_FILE_COUNT", 0)
+    table_base = _env_int("RL_DYNAMIC_TABLE_BASE", 0)
+    mapped_idx = int(table_number)
+    if mode == "mod":
+        if file_count <= 0:
+            mode = "direct"
+            file_count = 0
+        else:
+            mapped_idx = (int(table_number) - int(table_base)) % int(file_count)
+    return mode, int(mapped_idx), int(file_count), int(table_base)
+
+
+def _resolve_path_map_csv():
+    explicit = os.environ.get("RL_DYNAMIC_PATH_MAP_CSV", "").strip()
+    if explicit:
+        return Path(explicit)
+    manifest_path = os.environ.get("RL_DYNAMIC_MANIFEST", "").strip()
+    if manifest_path:
+        manifest = Path(manifest_path)
+        if manifest.suffix.lower() == ".json":
+            return manifest.with_name("outer_path_map.csv")
+        return manifest / "outer_path_map.csv"
+    try:
+        return Path(rl_logging.get_run_dir()) / "post_stage" / "outer_path_map.csv"
+    except Exception:
+        return None
+
+
+def _append_outer_path_map(row):
+    csv_path = _resolve_path_map_csv()
+    if csv_path is None:
+        return
+    key = (
+        row.get("request_number", ""),
+        row.get("table_number", ""),
+        row.get("mapped_idx", ""),
+        row.get("mapped_file", ""),
+        row.get("index_mode", ""),
+    )
+    if key in _DYNAMIC_PATH_MAP_SEEN:
+        return
+    _DYNAMIC_PATH_MAP_SEEN.add(key)
+    fields = [
+        "ts",
+        "module",
+        "iter_id",
+        "phase",
+        "stage_mode",
+        "request_number",
+        "table_number",
+        "mapped_idx",
+        "index_mode",
+        "file_count",
+        "table_base",
+        "dynamic_root",
+        "mapped_file",
+        "exists",
+        "read_ok",
+        "strict_path",
+    ]
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        exists = csv_path.exists()
+        with csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            if not exists:
+                writer.writeheader()
+            writer.writerow({k: row.get(k, "") for k in fields})
+    except Exception:
+        pass
+
+
 def resolve_dynamic_data_path(request_number_in_R, table_number, duration_type, add_event_types):
     dynamic_root = os.environ.get("DYNAMIC_DATA_ROOT", "").strip()
+    mode, mapped_idx, file_count, table_base = _resolve_dynamic_index(table_number)
+    file_name = f"Intermodal_EGS_data_dynamic_congestion{mapped_idx}.xlsx"
     if dynamic_root:
-        return os.path.join(dynamic_root, f"R{request_number_in_R}", f"Intermodal_EGS_data_dynamic_congestion{table_number}.xlsx")
+        root = Path(dynamic_root)
+        candidate_a = root / f"R{request_number_in_R}" / file_name
+        candidate_b = root / file_name
+        selected = candidate_a
+        if candidate_a.exists():
+            selected = candidate_a
+        elif candidate_b.exists():
+            selected = candidate_b
+        strict_path = os.environ.get("RL_DYNAMIC_STRICT_PATH", "0").strip() == "1"
+        selected_exists = selected.exists()
+        _append_outer_path_map(
+            {
+                "ts": time.time(),
+                "module": "Intermodal_ALNS34959",
+                "iter_id": os.environ.get("RL_OUTER_ITER_ID", ""),
+                "phase": "implement" if os.environ.get("RL_STAGE_MODE", "train_eval").strip().lower() == "eval_only" else "train",
+                "stage_mode": os.environ.get("RL_STAGE_MODE", "train_eval"),
+                "request_number": int(request_number_in_R),
+                "table_number": int(table_number),
+                "mapped_idx": int(mapped_idx),
+                "index_mode": mode,
+                "file_count": int(file_count),
+                "table_base": int(table_base),
+                "dynamic_root": str(root),
+                "mapped_file": str(selected),
+                "exists": int(selected_exists),
+                "read_ok": int(selected_exists),
+                "strict_path": int(strict_path),
+            }
+        )
+        if strict_path and not selected_exists:
+            raise FileNotFoundError(
+                "[OUTER][ERROR] PATH_CHECK failed: "
+                f"table={table_number} mapped_idx={mapped_idx} mode={mode} "
+                f"request=R{request_number_in_R} expected_file={selected}"
+            )
+        return str(selected)
     base_dir = os.path.join(
         ROOT_DIR,
         "Uncertainties Dynamic planning under unexpected events",

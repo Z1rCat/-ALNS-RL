@@ -387,9 +387,10 @@ i(t)=\big(t-t_0\big)\bmod n,\qquad i(t)\in\{0,\dots,n-1\},
 \begin{enumerate}
 \item Phase1：\texttt{train\_only} 在训练分布完成 V3 基线训练，保存 \texttt{policy\_theta0}。
 \item Phase2：仍用 \texttt{train\_only}，但把 \texttt{DYNAMIC\_DATA\_ROOT} 指向外层生成的小批量目录，进行后训练/微调；此阶段不访问最终测试分布 B 的 reward。
-\item Phase3：\texttt{eval\_only} 在最终测试分布执行只预测评测，不做参数更新。
+\item Phase3：\texttt{train\_only} 或 \texttt{train\_eval}，执行 ``外层生成 + 内层可更新'' 的联合课程训练（混合 base/outer 数据并可启用 replay）。
+\item Phase4：\texttt{eval\_only} 在最终测试分布执行只预测评测，不做参数更新。
 \end{enumerate}
-该方案与项目现有 ``implement 阶段禁止更新'' 约束一致。
+该方案保持 ``测试阶段不更新参数'' 约束：仅 Phase4 为纯评测，Phase1--Phase3 均允许训练更新。
 
 \subsection{可直接复用的日志与验收链路}
 当前项目已具备决策级与表征导出能力，可直接作为 Phase2 数据质量控制：
@@ -503,40 +504,209 @@ t, & \text{direct}\\
 [OUTER][ERROR] reason=FileNotFound strict=1 action=ABORT_ITER
 \end{verbatim}
 
-\subsection{执行计划（只规划，不改代码）}
-\paragraph{里程碑 M0：规范冻结（0.5 天）}
+\subsection{截至 2026-03-01 的实施进展（已完成）}
+\begin{table}[H]
+\centering
+\caption{V3+EDRL 当前已完成事项（代码已落地）}
+\begin{tabular}{p{1.4cm}p{2.2cm}p{7.2cm}p{3.8cm}}
+\toprule
+阶段 & 状态 & 已完成产出 & 主要证据路径 \\
+\midrule
+S0 & 已完成 & 协议冻结 v1.1：统一 outer--inner 交互参数、日志 schema、内层停止模式（\texttt{fixed\_n/converge}）与目标函数口径。 & \texttt{codes/outer\_rl/run\_edrl\_phase2.py} \\
+S1 & 已完成 & 小批量事件生成闭环：按 outer action 生成批次文件、写 \texttt{manifest} / \texttt{outer\_generation.csv} / hash，并支持生成后校验。 & \texttt{codes/generation/generate\_outer\_small\_batch.py}, \texttt{codes/analysis/validate\_outer\_batch.py} \\
+S2 & 已完成 & 路径映射与严格读取闭环：\texttt{direct/mod} 映射、严格模式、路径审计日志 \texttt{outer\_path\_map.csv}、读通率校验。 & \texttt{codes/analysis/validate\_outer\_path\_map.py} \\
+S3 & 已完成（最小可用版） & 外层调度主链路打通：\texttt{outer action $\rightarrow$ generate $\rightarrow$ inner train\_only $\rightarrow$ objective/log}，支持 \texttt{random/ucb/pg} 三种策略模式。 & \texttt{codes/outer\_rl/run\_edrl\_phase2.py} \\
+S3+ & 已完成（稳定性修复） & 修复 checkpoint 退出路径丢失问题（\texttt{SystemExit(78)} 场景仍可落盘）；修正 \texttt{processed\_tables} 统计口径，降低 \texttt{fixed\_budget\_n\_partial} 误报。 & \texttt{codes/core/dynamic\_RL34959.py}, \texttt{codes/outer\_rl/run\_edrl\_phase2.py} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{当前非阻塞已知项}
+退出阶段仍可能出现 \texttt{tkinter atexit} 噪声（\texttt{main thread is not in main loop}）；不影响本轮训练完成、日志落盘与 checkpoint 持久化。
+
+\subsection{分阶段总计划（S0--S6，改进版）}
+\paragraph{S0：规范冻结（2026-03-01 $\sim$ 2026-03-02，已完成）}
+\textbf{目标}：统一协议，消除实现歧义。\\
+\textbf{产出}：Phase 定义、\texttt{DYNAMIC\_DATA\_ROOT} 契约、状态/奖励口径、无泄漏数据分割。\\
+\textbf{验收}：冻结后仅允许增量字段，不改核心语义。
+
+\paragraph{S1：数据生成层闭环（2026-03-03 $\sim$ 2026-03-05，已提前完成）}
+\textbf{目标}：小批量事件文件生成可复现、可核查。\\
+\textbf{产出}：生成器、manifest、\texttt{outer\_generation.csv}、hash、一致性校验脚本。\\
+\textbf{验收}：文件完整率 $100\%$；占比与均值误差在阈值内；失败可定位到 \texttt{iter/file}。
+
+\paragraph{S2：路径映射与严格读取（2026-03-06 $\sim$ 2026-03-08，已提前完成）}
+\textbf{目标}：保证主程序 ``读到正确文件''。\\
+\textbf{产出}：RL/ALNS 双模块统一映射逻辑（\texttt{direct/mod}）、严格模式、\texttt{outer\_path\_map.csv} 审计。\\
+\textbf{验收}：路径读通率目标 $100\%$（最低 $99\%$）；禁止静默 fallback；读错即带上下文报错。
+
+\paragraph{S3：外层最小可用闭环（2026-03-09 $\sim$ 2026-03-12，已提前完成）}
+\textbf{目标}：低风险上线外层策略与训练调度。\\
+\textbf{产出}：\texttt{run\_edrl\_phase2.py} 闭环调度；\texttt{random/ucb/pg} 策略；固定预算 \texttt{fixed\_n}；日志五件套；跨 iter checkpoint 继承。\\
+\textbf{验收}：多轮稳定运行；outer action 非常量退化；checkpoint 按轮可追溯。
+
+\paragraph{S4：联合课程训练（2026-03-13 $\sim$ 2026-03-17，进行中）}
+\textbf{目标}：引入课程混合与反塌缩约束，验证主收益。\\
+\textbf{开发项}：实现 $\alpha$ 课程调度（建议 $0.2\rightarrow0.5\rightarrow0.8$）、难例池 replay、反塌缩监控（\texttt{action1\_rate}, $E[r|a]$, entropy）。\\
+\textbf{验收}：\texttt{action1\_rate} 不塌缩；OOD 指标相对 S3 提升；base 分布退化受控（建议不超过 $5\%$）。
+
+\paragraph{S5：对比实验与消融（2026-03-18 $\sim$ 2026-03-22，待执行）}
+\textbf{目标}：形成可发表证据链。\\
+\textbf{实验矩阵}：V3 baseline、V3+EDRL、去 $\Delta J$、去 $B(E)$、去 base 混合、随机 outer、固定课程基线；每组多 seed（建议 $\ge 3$）。\\
+\textbf{验收}：矩阵完整可复现；统计汇总与机理解释一致（主结论在多个 seed 稳定）。
+
+\paragraph{S6：收口与发布（2026-03-23 $\sim$ 2026-03-24，待执行）}
+\textbf{目标}：工程可复现、文档可交付。\\
+\textbf{产出}：一键复现实验脚本、最终配置快照、验收报告、论文图表输入表。\\
+\textbf{验收}：新环境按文档可复跑；关键结果复现实验通过。
+
+\subsection{关键里程碑（Go/No-Go 门禁）}
+\begin{enumerate}
+\item S1 未通过：不进入 S2。
+\item S2 未通过：禁止进入任何外层训练（S3/S4 全部阻断）。
+\item S3 未通过：不进入联合课程训练（S4）。
+\item S4 未同时满足 ``收益 + 稳定''：回滚到 S3 调参，不进入 S5 大规模消融。
+\end{enumerate}
+
+\subsection{当前外层 RL 设计（已落地实现）}
+\paragraph{目标函数与动作空间}
+当前外层调度脚本 \texttt{codes/outer\_rl/run\_edrl\_phase2.py} 已实现如下目标函数（与日志字段一一对应）：
+\begin{equation}
+\texttt{objective}=-J+\lambda\_{\Delta J}\cdot dJ+\eta\_{\mathrm{collapse}}\cdot B-\gamma\_{\mathrm{path}}\cdot D,
+\end{equation}
+其中 $J\equiv\texttt{avg\_reward}$，$dJ$ 为相邻迭代的增量，$B=-|\texttt{action1\_rate}-\rho^*|$，$D$ 为路径缺失惩罚比例。
+
+外层动作已采用参数化离散组合：
+\begin{equation}
+a_g=(\mu_A,\mu_B,p,n,\text{pattern},\text{seed}),
+\end{equation}
+其中 $(\mu_A,\mu_B,p,n,\text{pattern})$ 来自配置候选集，\texttt{seed} 用于可复现。
+
+\paragraph{策略模式}
 \begin{itemize}
-\item 冻结目录结构、文件命名、CSV schema、console 标签词典。
-\item 冻结路径变量命名：\texttt{RL\_DYNAMIC\_*} 与 \texttt{post\_stage/*}。
+\item \texttt{random}：随机采样动作（对照基线）。
+\item \texttt{ucb}：基于历史 \texttt{objective} 的 UCB 采样（bandit 选择器）。
+\item \texttt{pg}：softmax 参数化 policy-gradient bandit（带 baseline 的策略更新，状态持久化到 \texttt{outer\_policy\_pg.json}）。
 \end{itemize}
 
-\paragraph{里程碑 M1：生成层（1 天）}
+\paragraph{内层执行模式}
+当前外层每轮调用内层 \texttt{train\_only}，已支持两种停止方式：
 \begin{itemize}
-\item 新建小批量生成器（保留旧生成器不动）。
-\item 每轮输出 \texttt{outer\_generation.csv} + \texttt{manifest.json} + 文件 hash。
-\item 控制台实现 \texttt{[OUTER][GEN]} 全量输出。
+\item \texttt{fixed\_n}：按预算表数停止（推荐用于快速 outer-inner 交互）。
+\item \texttt{converge}：沿用内层既有收敛逻辑（用于长训对照）。
+\end{itemize}
+其中 \texttt{fixed\_n} 已验证支持 checkpoint 正常落盘，并记录 \texttt{processed\_tables/stop\_reason/path\_read\_rate}。
+
+\paragraph{外层问题形态与建模选择}
+结合当前工程实现，外层每轮执行 ``一次动作 $\rightarrow$ 一次内层短训 $\rightarrow$ 一个标量回报''，且内层参数会持续变化，环境呈现\textbf{非平稳}。因此更适合建模为\textbf{非平稳 contextual bandit}，而非长时序 MDP。
+这也是当前推荐优先采用 \texttt{ucb/pg}（以及后续可扩展的 TS）而不是重型 PPO/DQN 的核心原因：样本效率更高、调参更稳、与离散动作键天然匹配。
+
+\paragraph{上下文状态定义（不新增数据源）}
+外层状态建议仅由现有日志字段构成，避免引入新采集链路。定义：
+\begin{equation}
+s_t=\big[O_{t-1},J_{t-1},\rho_{t-1},q_{t-1},u_{t-1},\Delta O_{t-1},\kappa_t\big],
+\end{equation}
+其中 $O=\texttt{objective\_score}$，$J=\texttt{avg\_reward}$，$\rho=\texttt{action1\_rate}$，
+$q=\texttt{path\_read\_rate}$，$u=\texttt{processed\_tables}/\texttt{table\_budget\_n}$，
+$\Delta O_t=O_t-O_{t-1}$，$\kappa_t=t/T$（迭代进度）。实现时对各分量做滑窗标准化即可。
+
+\paragraph{动作编码与规模控制}
+当前动作为
+\begin{equation}
+a_g=(\mu_A,\mu_B,p,n,\text{pattern},\text{seed}),
+\end{equation}
+离散动作总规模为
+\begin{equation}
+|\mathcal{A}|=|\mathcal{M}_A|\cdot|\mathcal{M}_B|\cdot|\mathcal{P}|\cdot|\mathcal{N}|\cdot|\mathcal{T}|.
+\end{equation}
+其中 \texttt{seed} 建议作为\textbf{复现实验控制量}而非学习维度（避免把随机性误当作策略增益）。
+
+\paragraph{奖励稳健化（建议）}
+使用现有 \texttt{objective\_score} 作为外层即时奖励 $r_t$，并进行稳健处理：
+\begin{enumerate}
+\item 对有效轮的 $r_t$ 做滑窗标准化或截断（如 clip 到 $[-2,2]$）以抑制极端噪声；
+\item 未通过 valid iter 门禁时，默认\textbf{不更新策略}（仅记录日志）；
+\item 若 \texttt{path\_read\_rate} 低于阈值，可附加固定惩罚，保证策略不会朝坏数据收敛。
+\end{enumerate}
+
+\paragraph{策略实现细化与推荐}
+\begin{itemize}
+\item \texttt{random}（已实现）：仅作下界对照，不参与收敛判断的主结论。
+\item \texttt{ucb}（已实现，推荐首选）：建议采用折扣统计应对非平稳，
+\begin{equation}
+Q_t(a)=\lambda_Q Q_{t-1}(a)+(1-\lambda_Q)\hat r_t(a),\quad
+N_t(a)=\lambda_N N_{t-1}(a)+\mathbf{1}[a_t=a],
+\end{equation}
+\begin{equation}
+\mathrm{score}_t(a)=Q_t(a)+c\sqrt{\frac{\log(\sum_{a'}N_t(a')+1)}{N_t(a)+\epsilon}}.
+\end{equation}
+\item \texttt{pg}（已实现）：softmax bandit 建议使用温度 $\tau$、EMA baseline 与熵正则，
+\begin{equation}
+\pi_\psi(a|s)=\mathrm{softmax}(z_a/\tau),\quad
+\psi\leftarrow\psi+\alpha(r_t-b_t)\nabla_\psi\log\pi_\psi(a_t|s_t)+\beta\nabla_\psi\mathcal{H}(\pi_\psi).
+\end{equation}
+\item \texttt{ts}（建议后续增补）：可引入折扣 Thompson Sampling 作为高样本效率主力策略，优先级高于引入重型 actor-critic。
 \end{itemize}
 
-\paragraph{里程碑 M2：路径层（1 天）}
+\paragraph{Phase2 / Phase3 的策略节奏建议}
 \begin{itemize}
-\item 双模块同步接入映射逻辑（RL/ALNS 各一处）。
-\item 加入严格模式与失败即停。
-\item 写 \texttt{outer\_path\_map.csv} 并打印 \texttt{[OUTER][PATH]}。
+\item Phase2（外层收敛阶段）：保持较强探索（较大 $c$ 或较高 $\tau$），每个有效轮都更新外层策略。
+\item Phase3（内层收敛阶段）：外层改为慢更新或间隔更新（每 $K$ 轮更新一次），防止外层频繁抖动干扰内层收敛。
+\item 当 Phase3 进入后半段（接近 max=200）且指标稳定，可临时冻结外层策略，只验证内层是否达到切换条件。
 \end{itemize}
 
-\paragraph{里程碑 M3：调度层（1--2 天）}
+\paragraph{默认超参数建议（起步值）}
 \begin{itemize}
-\item 新建外层主控：outer action $\to$ 生成 $\to$ 内层 train\_only 短训 $\to$ 记录。
-\item 每轮保存 \texttt{ckpt\_in/ckpt\_out} 与 \texttt{outer\_train\_round.csv}。
-\item 控制台打印 \texttt{[OUTER][ITER]/[OUTER][TRAIN]/[OUTER][CHECK]}。
+\item \texttt{ucb}: $\lambda_Q=\lambda_N=0.98,\ c=1.0,\ \epsilon=10^{-6}$。
+\item \texttt{pg}: $\alpha=0.01,\ \beta=0.01,\ \tau=1.0$（可线性退火到 0.6），baseline EMA 系数 0.9。
+\item valid iter 门禁保持本文既有规则，不额外新增判定字段。
 \end{itemize}
 
-\paragraph{里程碑 M4：验收层（0.5--1 天）}
-\begin{itemize}
-\item 复用 \texttt{validate\_decision\_artifacts.py} 做决策对齐验收。
-\item 新增 outer 验收脚本检查：文件完整率、路径映射正确率、manifest 一致率。
-\item 失败时输出可直接复盘的 \texttt{iter\_id} 与文件清单。
-\end{itemize}
+\subsection{阶段切换规则（仅基于现有日志字段）}
+\paragraph{原则}
+不新增字段，不引入额外标注；仅使用现有 \texttt{outer\_train\_round.csv} 中的
+\texttt{objective\_score, avg\_reward, action1\_rate, path\_read\_rate, processed\_tables, table\_budget\_n, stop\_reason, policy\_entropy} 进行判定。
+
+\paragraph{通用有效轮（valid iter）门禁}
+仅当满足以下条件时，该轮计入收敛统计：
+\begin{enumerate}
+\item \texttt{stop\_reason=fixed\_budget\_n}
+\item \texttt{processed\_tables == table\_budget\_n}
+\item \texttt{path\_read\_rate >= 0.99}
+\end{enumerate}
+未通过门禁的轮次仅记录，不参与阶段切换判据。
+
+\paragraph{Phase2 $\rightarrow$ Phase3（外层 RL 收敛切换）}
+设第 $t$ 轮有效轮的指标为 $O_t=\texttt{objective\_score}$，收敛条件定义为：
+\begin{equation}
+\left|\overline{O}_{t-4:t}-\overline{O}_{t-9:t-5}\right|\le \epsilon_O,\quad
+\mathrm{Std}(O_{t-4:t})\le \sigma_O,
+\end{equation}
+建议默认 $\epsilon_O=0.01,\ \sigma_O=0.03$；若为 \texttt{pg} 模式再增加
+\begin{equation}
+\overline{\texttt{policy\_entropy}}_{t-4:t}\ge h_{\min},
+\end{equation}
+建议 $h_{\min}=0.05$，用于防止外层过早塌缩。\\
+当上述条件\textbf{连续 3 次}满足时，判定 Phase2 收敛并切换到 Phase3。
+
+\paragraph{Phase3 $\rightarrow$ Phase4（内层 RL 在外层数据上收敛切换）}
+按你的约束固定为：\textbf{min=30, max=200}（以有效轮计数）。\\
+设 $J_t=\texttt{avg\_reward}$，$\rho_t=\texttt{action1\_rate}$，收敛条件为：
+\begin{equation}
+\left|\overline{J}_{t-4:t}-\overline{J}_{t-9:t-5}\right|\le \epsilon_J,\quad
+\mathrm{Std}(J_{t-4:t})\le \sigma_J,\quad
+\overline{\rho}_{t-4:t}\ge \rho_{\min},
+\end{equation}
+建议默认 $\epsilon_J=0.01,\ \sigma_J=0.02,\ \rho_{\min}=0.02$。\\
+当有效轮数 $\ge 30$ 且上述条件\textbf{连续 3 次}满足时，切换到 Phase4；若有效轮达到 200 仍未满足，则强制切换并标记 ``max\_reached\_not\_converged''。
+
+\subsection{下一步执行清单（进入 S4 前）}
+\begin{enumerate}
+\item 完成 \texttt{random/ucb/pg} 的同口径对比跑（统一 action space、统一 seed 组、统一 \texttt{fixed\_n}）。
+\item 固化 S4 课程超参（$\alpha$ 调度、replay 容量、采样比）并定义回退策略。
+\item 按本节 ``阶段切换规则'' 固化自动切换阈值，并在 run 结束摘要中输出 ``是否达成连续3次'' 的判定结果。
+\item 预生成 S5 实验清单与命名规范，避免后续结果文件不可比。
+\end{enumerate}
 
 \subsection{命令行执行蓝图（Windows，含可视化核查点）}
 以下为\textbf{规划层面的命令模板}，用于后续实现时的统一运行口径。核心思想是：每条命令都能在控制台打印出 ``当前轮、当前路径、当前映射、当前训练摘要''，便于人工快速判断是否跑偏。
@@ -645,6 +815,161 @@ h_align_rate >= 0.90
 
 \section{结论与下一步}
 V3+EDRL 的价值在于：在不大改 V3 模型结构的情况下，把 OOD 攻坚点从``更强网络''转为``更有效的训练分布与样本结构''。外层策略通过事件文件参数化，完全兼容你们已有工程体系；通过 ``难但可学'' 奖励与反塌缩约束，避免对抗退化与样本饥饿。下一步最关键的工程验证是：外层是否能稳定学到一组 $a_g$ 使 O\_* 的 avg\_reward 与 action1\_rate 同时抬升，并且不显著牺牲 base 分布与 F\_*。
+
+\section{NOVA\_EDRL 一体化主链路（2026-03-02 实现口径）}
+\subsection{统一入口与分流规则}
+\begin{itemize}
+\item 主入口保持在 \texttt{codes/Dynamic\_master34959.py}。
+\item 当 \texttt{--algorithm NOVA\_EDRL} 时，强制执行四阶段编排，不走旧单阶段分支。
+\item 当算法为 \texttt{PPO\_NEW/PPO/A2C/...} 时，维持原有逻辑不变。
+\end{itemize}
+
+\subsection{四阶段执行语义（已落地）}
+\begin{enumerate}
+\item \textbf{Phase1（内层预训练）}：调用 master \texttt{train\_only}，生成/读取 1000 文件数据根，保存 \texttt{theta\_phase1}。
+\item \textbf{Phase2（外层收敛）}：调用 \texttt{codes/outer\_rl/run\_edrl\_phase2.py}，外层策略在动作空间
+\[
+a_g=(\mu_A,\mu_B,p,n,\text{pattern},\text{seed})
+\]
+上选择，驱动 ``生成$\rightarrow$内层短训$\rightarrow$outer reward'' 闭环。
+\item \textbf{Phase3（联合课程）}：继续使用同一外层主循环，启用课程混合与 replay；切换规则为有效轮口径下的收敛窗，且遵循 \texttt{min=30,max=200} 与连续满足约束。
+\item \textbf{Phase4（复用 master implement）}：\textbf{不新建评测器}，直接回到 master，使用
+\texttt{--stage-mode eval\_only --skip-generator --external-data-root <phase1\_data\_root> --init-model-path <phase3\_last\_ckpt>}，
+复用既有 implement/test 评测链路与产物。
+\end{enumerate}
+
+\subsection{当前外层策略实现状态}
+\begin{itemize}
+\item 已实现三种可运行策略：\texttt{random}、\texttt{ucb}、\texttt{pg}。
+\item \texttt{random} 用作下界与连通性烟测；\texttt{ucb}/\texttt{pg} 用于外层可学习策略对照。
+\item 外层目标函数按统一日志字段计算（\(J,dJ,B,D\)），并支持路径严格校验与失败显式报错。
+\end{itemize}
+
+\subsection{实验入口（统一批跑）}
+\begin{itemize}
+\item \texttt{codes/experiments/run\_experiments\_server\_unified.py} 已支持
+\texttt{--variant NOVA\_EDRL:v1}。
+\item \texttt{run\_experiments\_common.py} 已将 \texttt{NOVA\_EDRL} 版本参数透传到 master，并调整运行键提取策略（优先 run name），避免内层 \texttt{meta.json} 覆盖导致的 NOVA 任务识别偏差。
+\end{itemize}
+
+\subsection{Phase4 产物口径}
+Phase4 与旧 master implement 完全同口径，沿用现有评测输出（如 \texttt{rl\_trace.csv}、\texttt{rl\_training.csv}、\texttt{rl\_summary.csv} 及相关派生报表），因此不存在新的 phase4 专用依赖脚本。
+
+\section{NOVA\_EDRL 最新流程与目标函数口径（2026-03-03）}
+\subsection{四阶段完整流程（实现口径）}
+\begin{enumerate}
+\item \textbf{Phase1（内层预训练）}：在 base 分布上执行 master \texttt{train\_only}，产出并固化
+\texttt{theta\_phase1.zip}、训练数据根目录与基础日志。
+\item \textbf{Phase2（外层学习“出难题”）}：外层策略选择动作
+\(
+a_t=(\mu_a,\mu_b,p,n,\text{pattern},\text{seed})
+\)
+生成小批量事件文件；内层每轮都从同一个 \(\theta_{\mathrm{phase1}}\) 启动（冻结，不跨轮继承），据此评估外层奖励并更新外层策略参数。
+\item \textbf{Phase3（联合训练）}：继续外层动作驱动数据生成，但内层恢复跨轮继承更新（第 \(t\) 轮的 \texttt{ckpt\_out} 作为第 \(t+1\) 轮 \texttt{ckpt\_in}），并执行课程混合与 replay。
+\item \textbf{Phase4（复用 master implement）}：不新建评测器，直接回到 master 的 \texttt{eval\_only} implement 路径完成最终评测。
+\end{enumerate}
+
+\subsection{Phase2 目标函数（冻结内层）}
+Phase2 的核心目标是“让外层学会打中内层弱点”，而不是让内层在该阶段持续变强。设
+\(
+J_t
+\)
+为第 \(t\) 轮在冻结内层参数下的平均回报（越大越容易），则难度项为
+\(
+1-J_t
+\)。
+
+最新 Phase2 外层目标定义为：
+\begin{equation}
+\label{eq:phase2_obj_latest}
+\mathcal{O}^{(2)}_t
+=
+w_h\,(1-J_t)
++w_d\,\max(0, J_{\mathrm{ref}}-J_t)
++w_p\,H(a_t)
++w_m\,R_{\mathrm{minor}}(t)
+-w_{\mathrm{path}}\,D_t
+-w_{\mathrm{hard}}\,\max(0,J_{\mathrm{low}}-J_t)^2.
+\end{equation}
+其中：
+\begin{itemize}
+\item \(H(a_t)\)：由 \((\mu_a,\mu_b,p)\) 归一化得到的拥堵强度代理；
+\item \(D_t\)：路径缺失/读取失败惩罚；
+\item \(J_{\mathrm{ref}}\)：Phase2 参考回报（可固定或首轮自动初始化）；
+\item \(J_{\mathrm{low}}\)：过难阈值（防止生成不可学样本）。
+\end{itemize}
+
+\paragraph{新增：少数动作恢复奖励}
+先统计 Phase1 的两种动作占比，记少数动作为 \(a_{\min}\in\{0,1\}\)，其基线占比为
+\(
+\rho^{\mathrm{phase1}}_{\min}
+\)。
+在第 \(t\) 轮 Phase2 中，计算当前训练结果里该同一动作的占比
+\(
+\rho^{(t)}_{\min}
+\)，定义：
+\begin{equation}
+R_{\mathrm{minor}}(t)=\max\!\left(0,\rho^{(t)}_{\min}-\rho^{\mathrm{phase1}}_{\min}\right).
+\end{equation}
+即：若 Phase1 少数动作占比被拉升，则给予外层正奖励；未拉升则不加分。
+
+\subsection{Phase3 目标函数（保持不变）}
+Phase3 继续使用既有 EDRL 目标，不做改动：
+\begin{equation}
+\mathcal{O}^{(3)}_t
+=
+J_t+\lambda_{\Delta J}\,dJ_t
+B_t
+-\gamma_{\mathrm{path}}D_t
+-\text{floor\_soft}_t
+-\text{floor\_hard}_t.
+\end{equation}
+其中 \(B_t\) 与 floor 项负责反塌缩约束，\(dJ_t\) 反映跨轮改进。
+
+\subsection{参数继承与切换规则（最新）}
+\begin{itemize}
+\item \textbf{Phase2}：\texttt{ckpt\_in} 固定为 \(\theta_{\mathrm{phase1}}\)，\texttt{ckpt\_out} 仅用于审计，不用于下一轮 Phase2 初始化。
+\item \textbf{Phase3}：恢复跨轮继承，\texttt{ckpt\_in}=\texttt{prev ckpt\_out}。
+\item \textbf{Phase2\(\rightarrow\)Phase3}：沿用外层收敛窗规则（有效轮口径，默认 \texttt{min=10,max=80}）。
+\item \textbf{Phase3\(\rightarrow\)Phase4}：有效轮 \(\ge 30\) 且收敛条件连续满足 3 次即切换；若达到 \texttt{max=200} 仍未满足则强制切换。
+\end{itemize}
+
+\subsection{日志可验证性（关键字段）}
+\begin{itemize}
+\item \texttt{outer\_train\_round.csv}: \texttt{phase, ckpt\_in, ckpt\_out, objective\_score, avg\_reward, action0\_rate, action1\_rate, minority\_rate, stop\_reason, processed\_tables, path\_read\_rate}
+\item Phase2 诊断打印：\texttt{[OUTER][P2-OBJ] hard/drop/proxy/minority\_gain/minority\_reward/too\_hard}
+\item \texttt{post\_stage/phase2\_action\_baseline.json}: 保存 Phase1 动作占比基线与少数动作标识，供 Phase2 直接复用。
+\end{itemize}
+
+\subsection{2026-03-03 Implementation Delta (CQL/CaDM)}
+\begin{itemize}
+\item \textbf{CQL diagnostics completed}: \texttt{codes/robust\_rl/cql\_dqn.py} now exports
+\texttt{cql\_alpha,cql\_temp,cql\_updates,cql\_td\_loss,cql\_cql\_loss,cql\_q\_mean,cql\_q\_std,cql\_q\_max,cql\_q\_taken,cql\_lse\_q,cql\_ood\_q\_gap}.
+The fields are persisted through \texttt{codes/core/dynamic\_RL34959.py} into \texttt{rl\_training.csv}.
+\item \textbf{CQL alpha ablation script hardened}: \texttt{codes/analysis/run\_cql\_alpha\_ablation.py}
+now selects the last \emph{metric-bearing} train row (instead of the last train row blindly), and falls back to the last eval row for
+\texttt{avg\_reward}/\texttt{rolling\_avg} when needed.
+\item \textbf{CaDM master routing fixed}: \texttt{codes/Dynamic\_master34959.py} now routes
+\texttt{--algorithm CADM} to \texttt{PPO\_NEW} and defaults to \texttt{algo\_version=v6.3\_cadm}
+when the caller does not explicitly override version.
+\item \textbf{Smoke verification status}: \texttt{smoke\_cadm\_master\_default} confirms
+\texttt{cadm\_enabled=1} and non-empty auxiliary losses in \texttt{rl\_training.csv}.
+\item \textbf{RARL adversary refinement}: \texttt{run\_edrl\_phase2.py} now supports
+strict zero-sum reward for adversary updates (\texttt{--rarl-zero-sum-strict=1} uses \(-J\)),
+minimum replay gate (\texttt{--rarl-min-replay}), and windowed adversary state features
+(recent \(J\), action ratio, entropy via \texttt{--rarl-state-window}).
+Policy-mode/objective-mode mismatch can be auto-corrected with \texttt{--rarl-force-objective=1}.
+\item \textbf{PLR plot-ready summary added}: \texttt{codes/analysis/summarize\_outer\_plr\_stats.py}
+exports per-run curve CSV (\texttt{outer\_plr\_curve.csv}), top-priority level table
+(\texttt{outer\_plr\_top\_levels.csv}), and multi-run summary
+(\texttt{plr\_replay\_experiment\_summary.csv}) with replay/new ratios, top-k coverage, and
+priority-sample share for direct paper plotting.
+\item \textbf{Master baseline wiring corrected}: \texttt{codes/Dynamic\_master34959.py}
+now maps \texttt{RARL} profile to \texttt{--outer-policy-mode rarl\_dqn --objective-mode rarl}
+(with strict zero-sum defaults), and maps \texttt{PLR\_UED} profile to true level-replay mode
+(\texttt{--plr-level-replay} plus \texttt{p\_new}/buffer/EMA/min-weight defaults), so the two
+reference baselines execute their core mechanisms by default.
+\end{itemize}
 
 \appendix
 \section{外层动作空间的两个实用版本}

@@ -1,0 +1,2 @@
+ts,module,iter_id,phase,stage_mode,request_number,table_number,mapped_idx,index_mode,file_count,table_base,dynamic_root,mapped_file,exists,read_ok,strict_path
+1772890285.3081598,Intermodal_ALNS34959,,implement,eval_only,30,999,999,direct,0,0,A:\MYpython\34959_RL\codes\analysis\outputs\checkpoint_eval_ckpt_smoke\runs\001_theta_iter026\data,A:\MYpython\34959_RL\codes\analysis\outputs\checkpoint_eval_ckpt_smoke\runs\001_theta_iter026\data\R30\Intermodal_EGS_data_dynamic_congestion999.xlsx,1,1,0

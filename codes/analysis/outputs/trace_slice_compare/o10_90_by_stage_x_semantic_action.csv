@@ -1,0 +1,13 @@
+﻿run_label,stage_family,semantic_action,n,avg_reward,pos_rate,action1_rate,mean_p_action1,wait_share,engage_share
+PLR_UED,insertion,non_insert,4,1.0,1.0,1.0,0.0010382375136638,1.0,0.0
+PLR_UED,removal,remove,9,0.8888888888888888,0.8888888888888888,1.0,0.8618551260377798,0.0,1.0
+PLR_UED,removal,wait,185,0.5081081081081081,0.5081081081081081,0.0,0.006859007976480933,1.0,0.0
+PLR_UED,unknown,unknown,2,,0.0,0.0,0.0010426923399790501,0.0,0.0
+PPO,removal,remove,1,1.0,1.0,1.0,,0.0,1.0
+PPO,removal,wait,198,0.5,0.5,0.0,,1.0,0.0
+PPO_NEW_v3,insertion,insert,1,1.0,1.0,0.0,,0.0,1.0
+PPO_NEW_v3,removal,remove,2,1.0,1.0,1.0,,0.0,1.0
+PPO_NEW_v3,removal,wait,197,0.49746192893401014,0.49746192893401014,0.0,,1.0,0.0
+PPO_NEW_v3_1,insertion,insert,1,1.0,1.0,0.0,,0.0,1.0
+PPO_NEW_v3_1,removal,remove,2,1.0,1.0,1.0,,0.0,1.0
+PPO_NEW_v3_1,removal,wait,196,0.49489795918367346,0.49489795918367346,0.0,,1.0,0.0

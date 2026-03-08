@@ -1,0 +1,3 @@
+﻿checkpoint_path,completed_train_tables,table_number,trigger
+a:\MYpython\34959_RL\codes\analysis\outputs\actor_rollback_helper_debug\run_main\post_stage\checkpoints\theta_phase1_t0009_n0010.zip,10,9,periodic_train_table
+a:\MYpython\34959_RL\codes\analysis\outputs\actor_rollback_helper_debug\run_main\post_stage\checkpoints\theta_phase1.zip,11,10,final_save_model_path

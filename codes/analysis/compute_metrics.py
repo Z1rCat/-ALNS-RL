@@ -5,7 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -163,11 +163,13 @@ def _write_summary_row(summary_csv: Path, row: Dict[str, Any]) -> None:
         "seed",
         "request_number",
         "n_test",
-        "G",
-        "G_prime",
-        "Adv0",
-        "Adv1",
-        "AdvRand",
+        "NPS",
+        "J_rl_avg",
+        "J_rand_avg",
+        "J_a0_avg",
+        "J_a1_avg",
+        "J_best_static_avg",
+        "NPS_denominator",
         "wall_time_sec",
         "cpu_percent_avg",
         "cpu_percent_peak",
@@ -250,44 +252,50 @@ def compute_metrics(run_dir: Path, *, summary_csv: Path = SUMMARY_CSV) -> Dict[s
     strict = os.environ.get("METRICS_STRICT", "0").strip() == "1"
     n_test = int(rewards_rl.shape[0])
 
-    def maybe_load(name: str, path: Path) -> Tuple[Optional[pd.Series], Optional[str]]:
+    def load_baseline_rewards(name: str, path: Path) -> pd.Series:
         if not path.exists():
-            return None, f"missing {name}: {path.name}"
+            raise FileNotFoundError(f"missing {name}: {path.name}")
         rewards = _extract_rewards_from_baseline(_read_csv(path), name=name)
         if strict and int(rewards.shape[0]) != n_test:
             raise ValueError(f"{name}: n_test mismatch (RL={n_test}, {name}={int(rewards.shape[0])})")
         if int(rewards.shape[0]) != n_test:
             warnings.append(f"{name}: n_test mismatch (RL={n_test}, {name}={int(rewards.shape[0])}) -> trim to min")
-        return rewards, None
+        return rewards
 
-    r_wait_series, warn = maybe_load("Always_Wait", run_dir / "baseline_wait.csv")
-    if warn:
-        warnings.append(warn)
-    r_reroute_series, warn = maybe_load("Always_Reroute", run_dir / "baseline_reroute.csv")
-    if warn:
-        warnings.append(warn)
-    r_random_series, warn = maybe_load("Random", run_dir / "baseline_random.csv")
-    if warn:
-        warnings.append(warn)
+    r_wait_series = load_baseline_rewards("Always_Wait", run_dir / "baseline_wait.csv")
+    r_reroute_series = load_baseline_rewards("Always_Reroute", run_dir / "baseline_reroute.csv")
+    r_random_series = load_baseline_rewards("Random", run_dir / "baseline_random.csv")
 
-    lengths = [int(rewards_rl.shape[0])]
-    for series in (r_wait_series, r_reroute_series, r_random_series):
-        if series is not None:
-            lengths.append(int(series.shape[0]))
+    lengths = [
+        int(rewards_rl.shape[0]),
+        int(r_wait_series.shape[0]),
+        int(r_reroute_series.shape[0]),
+        int(r_random_series.shape[0]),
+    ]
     n_test = int(min(lengths)) if lengths else 0
+    if n_test <= 0:
+        raise ValueError("no usable test samples after aligning RL and baseline rewards")
+
     rewards_rl = rewards_rl.iloc[:n_test]
+    r_wait_series = r_wait_series.iloc[:n_test]
+    r_reroute_series = r_reroute_series.iloc[:n_test]
+    r_random_series = r_random_series.iloc[:n_test]
 
-    r_rl = float(rewards_rl.sum())
-    r_wait = float(r_wait_series.iloc[:n_test].sum()) if r_wait_series is not None else None
-    r_reroute = float(r_reroute_series.iloc[:n_test].sum()) if r_reroute_series is not None else None
-    r_random = float(r_random_series.iloc[:n_test].sum()) if r_random_series is not None else None
-
-    adv0 = (r_rl - r_wait) / n_test if r_wait is not None and n_test > 0 else None
-    adv1 = (r_rl - r_reroute) / n_test if r_reroute is not None and n_test > 0 else None
-    adv_rand = (r_random / n_test) if r_random is not None and n_test > 0 else None
-
-    g_prime = (adv0 + adv1) if (adv0 is not None and adv1 is not None) else None
-    g = (g_prime - adv_rand) if (g_prime is not None and adv_rand is not None) else None
+    j_rl_avg = float(rewards_rl.mean())
+    j_a0_avg = float(r_wait_series.mean())
+    j_a1_avg = float(r_reroute_series.mean())
+    j_rand_avg = float(r_random_series.mean())
+    j_best_static_avg = float(max(j_a0_avg, j_a1_avg))
+    nps_denominator = float(j_best_static_avg - j_rand_avg)
+    nps = None
+    nps_eps = 1e-6
+    if nps_denominator <= nps_eps:
+        warnings.append(
+            "NPS denominator is too small or non-positive; set NPS to null. "
+            f"(den={nps_denominator:.8f}, eps={nps_eps:.1e})"
+        )
+    else:
+        nps = float((j_rl_avg - j_rand_avg) / nps_denominator)
 
     resource_usage = None
     resource_path = run_dir / "resource_usage.json"
@@ -308,15 +316,13 @@ def compute_metrics(run_dir: Path, *, summary_csv: Path = SUMMARY_CSV) -> Dict[s
         "request_number": request_number,
         "n_test": n_test,
         "reward_source_rl": rl_reward_source,
-        "R_RL": r_rl,
-        "R_wait": r_wait,
-        "R_reroute": r_reroute,
-        "R_random": r_random,
-        "Adv0": adv0,
-        "Adv1": adv1,
-        "AdvRand": adv_rand,
-        "G_prime": g_prime,
-        "G": g,
+        "J_rl_avg": j_rl_avg,
+        "J_rand_avg": j_rand_avg,
+        "J_a0_avg": j_a0_avg,
+        "J_a1_avg": j_a1_avg,
+        "J_best_static_avg": j_best_static_avg,
+        "NPS_denominator": nps_denominator,
+        "NPS": nps,
         "meta": meta,
         "warnings": warnings,
         "resource_usage": resource_usage,
@@ -334,11 +340,13 @@ def compute_metrics(run_dir: Path, *, summary_csv: Path = SUMMARY_CSV) -> Dict[s
             "seed": seed,
             "request_number": request_number,
             "n_test": n_test,
-            "G": g,
-            "G_prime": g_prime,
-            "Adv0": adv0,
-            "Adv1": adv1,
-            "AdvRand": adv_rand,
+            "NPS": nps,
+            "J_rl_avg": j_rl_avg,
+            "J_rand_avg": j_rand_avg,
+            "J_a0_avg": j_a0_avg,
+            "J_a1_avg": j_a1_avg,
+            "J_best_static_avg": j_best_static_avg,
+            "NPS_denominator": nps_denominator,
             "wall_time_sec": (resource_usage or {}).get("wall_time_sec") if isinstance(resource_usage, dict) else None,
             "cpu_percent_avg": (resource_usage or {}).get("cpu_percent_avg") if isinstance(resource_usage, dict) else None,
             "cpu_percent_peak": (resource_usage or {}).get("cpu_percent_peak")
@@ -363,7 +371,7 @@ def compute_metrics(run_dir: Path, *, summary_csv: Path = SUMMARY_CSV) -> Dict[s
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compute G/Adv metrics for a completed run_dir.")
+    parser = argparse.ArgumentParser(description="Compute NPS metric for a completed run_dir.")
     parser.add_argument("--run-dir", required=True, help="Run directory (contains rl_trace.csv / baseline_*.csv).")
     parser.add_argument(
         "--summary-csv",

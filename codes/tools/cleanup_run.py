@@ -37,7 +37,15 @@ def cleanup_run_dir(
     run_dir: Path,
     *,
     delete_dirs: Iterable[str] = DEFAULT_DELETE_DIRS,
-    require_files: Iterable[str] = ("meta.json", "rl_trace.csv", "rl_training.csv", "baseline_wait.csv", "baseline_reroute.csv", "metrics.json"),
+    require_files: Iterable[str] = (
+        "meta.json",
+        "rl_trace.csv",
+        "rl_training.csv",
+        "baseline_wait.csv",
+        "baseline_reroute.csv",
+        "baseline_random.csv",
+        "metrics.json",
+    ),
 ) -> List[str]:
     if not run_dir.exists() or not run_dir.is_dir():
         raise FileNotFoundError(f"run_dir not found or not a directory: {run_dir}")

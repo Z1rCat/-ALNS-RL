@@ -1,0 +1,3 @@
+﻿rank,checkpoint_path,completed_train_tables,rank_candidate
+1,a:\MYpython\34959_RL\codes\analysis\outputs\pipeline_rollback_smoke_v2\run_main\post_stage\checkpoints\hist_001.zip,10,1
+2,a:\MYpython\34959_RL\codes\analysis\outputs\pipeline_rollback_smoke_v2\run_main\post_stage\checkpoints\hist_002.zip,20,1

@@ -1,0 +1,584 @@
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,longtable,array}
+\usepackage{hyperref}
+\usepackage[dvipsnames]{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{setspace}
+\usepackage{caption}
+\usepackage{listings}
+\hypersetup{colorlinks=true,linkcolor=MidnightBlue,urlcolor=MidnightBlue}
+\onehalfspacing
+\pagestyle{fancy}
+\setlength{\headheight}{15pt}
+\fancyhf{}
+\fancyhead[L]{PLR\_UED 本地实现说明}
+\fancyhead[R]{\thepage/\pageref{LastPage}}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.35em}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\I}{\mathbf{1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  framerule=0.3pt
+}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+{\Huge\bfseries PLR\_UED 算法实现说明\par}
+\vspace{0.6cm}
+{\Large 对应本地运行：\texttt{run\_20260305\_092522\_719454\_R30\_O\_10\_90\_PLR\_UED\_S42}\par}
+\vspace{1.2cm}
+\begin{tcolorbox}[colback=blue!3,colframe=MidnightBlue,boxrule=0.8pt,width=0.94\textwidth]
+\textbf{文档范围}\quad 本文只描述当前项目中 \texttt{PLR\_UED} 这一\textbf{本地化实现}在上述具体 run 中实际执行的算法流程、数学形式、伪代码、参数来源和运行产物。本文不讨论外部论文版本是否等价，也不对算法优劣作结论性评价。
+\end{tcolorbox}
+\vfill
+{\large 代码根目录：\texttt{A:\textbackslash MYpython\textbackslash 34959\_RL}\par}
+{\large 文档日期：\today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{对象与边界}
+
+\subsection{本说明对应的唯一运行实例}
+本文对应的运行目录为：
+\begin{lstlisting}
+A:\MYpython\34959_RL\codes\nexus\local_adaptive_o10_90_s42_rerun2\
+run_20260305_092522_719454_R30_O_10_90_PLR_UED_S42
+\end{lstlisting}
+
+该目录中可直接核对的关键文件包括：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \texttt{meta.json}：最终 implement 评测元信息；
+    \item \texttt{post\_stage/pipeline\_summary.json}：phase1 / outer / phase4 串联摘要；
+    \item \texttt{post\_stage/outer\_train\_round.csv}：outer 每轮训练结果；
+    \item \texttt{post\_stage/outer\_actions.csv}：outer 每轮选中的 level 参数；
+    \item \texttt{post\_stage/outer\_plr\_stats.csv}：PLR replay 统计；
+    \item \texttt{post\_stage/outer\_curriculum.csv}：phase3 课程混合记录；
+    \item \texttt{post\_stage/outer\_policy\_plr\_buffer.json}：最终 replay buffer 状态；
+    \item \texttt{rl\_summary.csv}：最终 implement 评测汇总。
+\end{itemize}
+
+\subsection{“PLR\_UED”在本项目中的含义}
+在当前代码库中，\texttt{PLR\_UED} 不是一个独立仓库，而是 \texttt{Dynamic\_master34959.py} 中的一个 outer profile 名称。该 profile 会调用：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \texttt{codes/outer\_rl/run\_edrl\_pipeline.py}：phase1 $\rightarrow$ outer $\rightarrow$ phase4 的总调度；
+    \item \texttt{codes/outer\_rl/run\_edrl\_phase2.py}：outer 主循环；
+    \item \texttt{codes/Dynamic\_master34959.py}：phase1 与 phase4 的内层训练/评测入口；
+    \item \texttt{codes/core/dynamic\_RL34959.py}：内层 RL 主流程；
+    \item \texttt{codes/algorithms/ppo\_new/nn/context\_extractor.py}：\texttt{PPO\_NEW v3} 表征主干。
+\end{itemize}
+
+因此，本文中的 ``PLR\_UED'' 应理解为：\textbf{当前项目内，以 \texttt{PPO\_NEW v3} 为 inner learner、以 \texttt{objective\_mode=plr} 和 level replay 为 outer 机制的本地实现版本。}
+
+\section{项目内的整体算法结构}
+
+\subsection{四阶段总流程}
+这次 run 的执行结构可以写成：
+\[
+\text{Phase1 warmup} \rightarrow \text{Phase2 outer search} \rightarrow \text{Phase3 curriculum + replay} \rightarrow \text{Phase4 implement eval}.
+\]
+
+结合运行产物，可对应为：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item \textbf{Phase1}：在基础分布上训练一个 \texttt{PPO\_NEW v3} 初始模型，产出 \texttt{theta\_phase1.zip}；
+    \item \textbf{Phase2}：以 \texttt{theta\_phase1.zip} 为固定输入 checkpoint，逐轮生成 outer level，训练内层模型并以 \texttt{plr} 目标给 level 打分；
+    \item \textbf{Phase3}：在上一轮 checkpoint 基础上继续迭代，同时把 outer level 生成的数据与 phase1 数据按比例混合成课程数据集；
+    \item \textbf{Phase4}：用某个 outer 阶段 checkpoint 作为初始模型，在 implement 数据上做 \texttt{eval\_only}，得到最终 \texttt{rl\_summary.csv}。
+\end{enumerate}
+
+\subsection{这次 run 的实际阶段数量}
+根据 \texttt{outer\_train\_round.csv}：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item 总 outer 迭代数：\(51\)；
+    \item 其中 \(\texttt{phase2}=21\) 轮；
+    \item 其中 \(\texttt{phase3}=30\) 轮。
+\end{itemize}
+
+根据 \texttt{pipeline\_summary.json}：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item phase1 checkpoint 为 \texttt{theta\_phase1.zip}；
+    \item phase4 初始化 checkpoint 为 \texttt{theta\_iter051.zip}；
+    \item phase4 实际执行了 implement 评测。
+\end{itemize}
+
+\section{这次 run 的实际配置来源}
+
+\subsection{Profile 显式给出的参数}
+在 \texttt{Dynamic\_master34959.py} 中，\texttt{PLR\_UED} profile 对 outer pipeline 显式添加了如下参数：
+\begin{lstlisting}
+--outer-policy-mode ts
+--objective-mode plr
+--plr-level-replay
+--plr-p-new 0.5
+--plr-buffer-size 200
+--plr-priority-ema-alpha 0.6
+--plr-min-weight 0.05
+--outer-curriculum-enable
+\end{lstlisting}
+
+这一点说明：该 profile 的 outer 核心由三部分组成：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.2em]
+    \item \texttt{objective\_mode=plr}；
+    \item \texttt{plr-level-replay}；
+    \item phase3 课程混合（\texttt{outer-curriculum-enable}）。
+\end{enumerate}
+
+\subsection{Pipeline 默认参数带入的设置}
+由于 \texttt{PLR\_UED} profile 没有覆盖 outer pipeline 的全部参数，因此本次 run 还继承了 pipeline 的默认值。与本次实现直接相关的默认项如下：
+\begin{center}
+\begin{tabular}{p{5.0cm}p{7.5cm}}
+\toprule
+参数 & 本次 run 的值 \\
+\midrule
+\texttt{outer-phase} & \texttt{auto} \\
+\texttt{outer-action-space-version} & \texttt{v1} \\
+\texttt{outer-mu-choices} & \(\{10,30,60,90\}\) \\
+\texttt{outer-ratio-choices} & \(\{0.2,0.3,0.5,0.7,0.8\}\) \\
+\texttt{outer-num-file-choices} & \(\{5,10,15\}\) \\
+\texttt{outer-pattern-choices} & \(\{\texttt{ab},\texttt{random\_mix}\}\) \\
+\texttt{phase2-fixed-num-files} & \(5\) \\
+\texttt{phase3-num-file-choices} & \(\{5,10,15\}\) \\
+\texttt{phase2-min-iters / max-iters} & \(5 / 40\) \\
+\texttt{phase3-min-iters / max-iters} & \(10 / 50\) \\
+\texttt{curriculum-alpha-start / end} & \(0.70 / 0.35\) \\
+\texttt{curriculum-alpha-horizon} & \(25\) \\
+\texttt{curriculum-replay-ratio} & \(0.20\) \\
+\texttt{curriculum-replay-max-iters} & \(5\) \\
+\texttt{plr-dj-weight} & \(1.0\) \\
+\texttt{plr-j-weight} & \(0.1\) \\
+\texttt{path-penalty} & \(2.0\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{内层算法与最终评测配置}
+根据 \texttt{meta.json} 和 pipeline 调度方式：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item phase1 和 phase4 的 inner 算法均为 \texttt{PPO\_NEW}；
+    \item \texttt{algo\_version=v3}；
+    \item 分布为 \texttt{O\_10\_90}；
+    \item 请求数为 \(30\)；
+    \item seed 为 \(42\)；
+    \item generator workers 为 \(2\)。
+\end{itemize}
+
+\section{本地化 action space 与 level 定义}
+
+\subsection{level 参数化}
+在当前实现中，一个 outer level 可写成：
+\[
+g=(\mu_A,\mu_B,p,n,\pi,s),
+\]
+其中：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \(\mu_A,\mu_B\)：两类事件均值参数，对应代码中的 \texttt{mu\_a}, \texttt{mu\_b}；
+    \item \(p\)：比例参数，对应 \texttt{ratio\_a}；
+    \item \(n\)：文件数预算，对应 \texttt{num\_files}；
+    \item \(\pi\)：模式类型，对应 \texttt{pattern}，本次 run 中为 \texttt{ab} 或 \texttt{random\_mix}；
+    \item \(s\)：迭代种子，对应 \texttt{seed}，由 \texttt{base seed} 与 \texttt{iter\_id} 派生。
+\end{itemize}
+
+\subsection{action space v1}
+代码中的 \texttt{v1} 动作空间由笛卡尔积构成：
+\[
+\mathcal{G}=\{(\mu_A,\mu_B,p,n,\pi)\mid \mu_A,\mu_B\in\{10,30,60,90\},\ \mu_A\neq\mu_B,\ p\in\{0.2,0.3,0.5,0.7,0.8\},\ n\in\{5,10,15\},\ \pi\in\{\texttt{ab},\texttt{random\_mix}\}\}.
+\]
+
+由于 \(\mu_A=\mu_B\) 被显式排除，总动作数为：
+\[
+|\mathcal{G}| = 4\times 3 \times 5 \times 3 \times 2 = 360.
+\]
+
+\subsection{相位过滤}
+虽然完整 action space 含 \(n\in\{5,10,15\}\)，但当前实现按相位过滤：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \textbf{phase2}：强制 \(\,n=5\)；
+    \item \textbf{phase3}：允许 \(\,n\in\{5,10,15\}\)。
+\end{itemize}
+
+这意味着在本次 run 中，phase2 只在 \((\mu_A,\mu_B,p,\pi)\) 上搜索，而 phase3 才重新开放 \(n\) 维度。
+
+\section{PLR replay buffer 的本地实现}
+
+\subsection{buffer 条目结构}
+当前实现中的 replay buffer 存储为一个 JSON 文件，条目结构为：
+\begin{lstlisting}
+{
+  "signature": "10|60|0.50000000|5|ab",
+  "action": {...},
+  "score_ema": 0.1538,
+  "last_score": 0.1052,
+  "n_seen": 4,
+  "n_sampled": 3,
+  "last_iter": 40
+}
+\end{lstlisting}
+
+其中 action 的 signature 为：
+\[
+\sigma(g)=\texttt{mu\_a}|\texttt{mu\_b}|\texttt{ratio\_a}|\texttt{num\_files}|\texttt{pattern}.
+\]
+需要注意的是：\textbf{iter seed 不进入 signature}，因此 replay 的 level 同一性只由五元组 \((\mu_A,\mu_B,p,n,\pi)\) 定义。
+
+\subsection{priority 更新}
+当某个 level 在第 \(t\) 轮得到 objective score \(S_t(g)\) 后，若该 level 已存在于 buffer 中，则：
+\[
+q_t(g) = (1-\alpha)\,q_{t-1}(g)+\alpha\,S_t(g),
+\]
+其中本次 run 的 \(\alpha = 0.6\)。
+
+若该 level 首次出现，则直接插入：
+\[
+q_t(g)=S_t(g),\qquad n_{\text{seen}}(g)=1,\qquad n_{\text{sampled}}(g)=0.
+\]
+
+\subsection{replay 抽样权重}
+当从 buffer 中 replay 时，代码不是直接做 softmax，而是使用平移后的线性权重：
+\[
+w_i = \max(\varepsilon,\ q_i-\min_j q_j + \varepsilon),
+\]
+其中本次 run 的 \(\varepsilon = 0.05\)。
+
+归一化后得到 replay 抽样概率：
+\[
+P(i\mid \text{replay})=\frac{w_i}{\sum_j w_j}.
+\]
+
+\subsection{new / replay 混合}
+本次 run 采用混合采样：
+\[
+\Pr(\text{new}) = p_{\text{new}} = 0.5,\qquad \Pr(\text{replay})=0.5.
+\]
+
+更精确地说，代码中的规则为：
+\[
+\text{use\_new} = \big(|\mathcal{B}|=0\big)\ \lor\ \big(U < p_{\text{new}}\big),
+\]
+其中 \(U\sim\mathrm{Uniform}(0,1)\)，\(\mathcal{B}\) 表示 replay buffer。
+
+\section{动作选择流程的本地细节}
+
+\subsection{这次 run 并非“TS 直接选动作”}
+虽然 \texttt{PLR\_UED} profile 设置了 \texttt{--outer-policy-mode ts}，但在当前代码实现中，一旦 \texttt{plr-level-replay} 为真，真正的动作选择首先进入 \texttt{\_choose\_action\_plr\_mixed}，而不是进入 TS 采样分支。
+
+因此，本次 run 的主动作来源实际上只有三种：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.2em]
+    \item \textbf{new}：从完整 action space 随机抽取一个 action template；
+    \item \textbf{replay}：从 replay buffer 按 priority 抽取；
+    \item \textbf{policy\_filtered}：若 new/replay 抽到的 action 不满足当前相位约束，则在允许集合中\textbf{均匀随机}重采样。
+\end{enumerate}
+
+也就是说，\texttt{policy\_mode=ts} 在本次 \texttt{plr-level-replay} 路径里主要是保留接口和日志字段，并不主导 outer action 的实际选择。
+
+\subsection{伪代码：本地 outer 动作选择}
+\begin{lstlisting}
+Input: action space G, replay buffer B, phase phi, p_new
+
+1. Build allowed set A(phi)
+   - phase2: keep only actions with n = 5
+   - phase3: keep only actions with n in {5,10,15}
+
+2. If B is empty or rand() < p_new:
+      sample g from G uniformly          # source = new
+   else:
+      sample g from B with shifted-linear priority  # source = replay
+
+3. If g not in A(phi):
+      resample g uniformly from A(phi)   # source = policy_filtered
+
+4. Attach iter-specific seed to g
+5. Generate outer batch for g
+6. Run inner PPO_NEW-v3 on that batch
+7. Compute objective score S(g)
+8. Update replay buffer with S(g)
+\end{lstlisting}
+
+\section{本次 run 的 objective 公式}
+
+\subsection{统计量定义}
+对 outer 第 \(t\) 轮，代码从新增 decision/path 记录中计算：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \(J_t\)：该轮新增 decision 的平均 reward，即 \texttt{avg\_reward}；
+    \item \(\Delta J_t = J_t - J_{t-1}\)，首轮定义为 \(0\)；
+    \item \(D_t = \frac{\text{missing\_paths}_t}{\max(1,\text{path\_total}_t)}\)；
+    \item 其中 \texttt{path\_penalty}=2.0。
+\end{itemize}
+
+当前 run 的 \texttt{path\_missing} 全程为 \(0\)，\texttt{path\_read\_rate} 全程为 \(1.0\)，因此实际上：
+\[
+D_t = 0,\qquad \forall t.
+\]
+
+\subsection{PLR objective 的真实实现}
+本次 run 的 outer 目标为：
+\begin{equation}
+S_t(g)=w_{\Delta J}\,|\Delta J_t| + w_J\,J_t - \lambda_D\,D_t,
+\end{equation}
+其中：
+\[
+w_{\Delta J}=1.0,\qquad w_J=0.1,\qquad \lambda_D=2.0.
+\]
+
+由于本次 run 中 \(D_t=0\)，因此实际生效的是：
+\[
+S_t(g)=|\Delta J_t|+0.1\,J_t.
+\]
+
+\subsection{说明}
+这一点非常重要：\textbf{本地 \texttt{PLR\_UED} profile 的 outer objective 实际上是一个基于 \(|\Delta J| + 0.1J\) 的学习进展型得分，而不是当前代码中的 EDRL-v4 目标函数。}
+
+换言之，本次 run 的 PLR/UED 核心由两部分构成：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.2em]
+    \item 用 \(|\Delta J| + 0.1J\) 给 level 打分；
+    \item 用 priority replay + phase3 curriculum 反复利用这些高分 level。
+\end{enumerate}
+
+\section{Phase2 与 Phase3 的本地差异}
+
+\subsection{Phase2：固定 phase1 checkpoint，纯 outer batch}
+从 \texttt{outer\_train\_round.csv} 可以直接看到，phase2 的 \texttt{ckpt\_in} 始终为：
+\[
+\texttt{theta\_phase1.zip}.
+\]
+
+因此本次 run 的 phase2 不是 checkpoint 链式推进，而是：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item 固定从 phase1 初始模型出发；
+    \item 每轮只更换 outer batch；
+    \item 用该轮得到的 objective 更新 replay buffer。
+\end{itemize}
+
+同时，phase2 明确不启用 curriculum 混合；即使 profile 打开了 \texttt{outer-curriculum-enable}，代码也规定：
+\begin{quote}
+\texttt{phase2 never uses curriculum}.
+\end{quote}
+
+\subsection{Phase3：链式 checkpoint + mixed curriculum}
+进入 phase3 后，\texttt{ckpt\_in} 变为上一轮的 \texttt{theta\_iterXXX.zip}，即：
+\[
+\theta_{t}^{\text{in}} = \theta_{t-1}^{\text{out}}.
+\]
+
+同时，训练数据不再直接使用 \texttt{outer\_batches/iter\_XXX}，而是先构造：
+\begin{lstlisting}
+post_stage/outer_curriculum/iter_XXX
+\end{lstlisting}
+并将其作为 \texttt{external\_data\_root} 交给内层 \texttt{PPO\_NEW v3}。
+
+\section{Phase3 curriculum 的本地实现}
+
+\subsection{alpha 调度}
+curriculum 的 outer 比例由线性调度给出：
+\[
+\alpha(t)=\alpha_{\text{start}} + (\alpha_{\text{end}}-\alpha_{\text{start}})
+\cdot \min\!\left(1,\frac{t-1}{H-1}\right),
+\]
+其中：
+\[
+\alpha_{\text{start}}=0.70,\qquad
+\alpha_{\text{end}}=0.35,\qquad
+H=25.
+\]
+
+需要注意：该调度使用的是\textbf{全局迭代编号} \(t\)，而不是 phase3 内部编号。因此本次 run 在 phase3 第一个迭代（全局第 \(22\) 轮）时，已经有：
+\[
+\alpha(22)=0.39375,
+\]
+而不是 \(0.70\)。
+
+\subsection{文件级混合规则}
+对某个 phase3 迭代，若当前 \texttt{num\_files}\(=n\)，则代码对 \(i=0,\dots,n-1\) 逐个复制生成 mixed 数据文件。对于每个文件：
+\[
+\Pr(\text{outer bucket})=\alpha(t),\qquad
+\Pr(\text{base bucket})=1-\alpha(t).
+\]
+
+若进入 outer bucket，则进一步以 replay 比例 \(r=0.2\) 判断：
+\[
+\Pr(\text{replay file}\mid \text{outer bucket})=r,\qquad
+\Pr(\text{current outer file}\mid \text{outer bucket})=1-r.
+\]
+
+因此每个文件的最终来源分布为：
+\begin{align}
+\Pr(\text{replay}) &= \alpha(t)\cdot r,\\
+\Pr(\text{current outer}) &= \alpha(t)\cdot (1-r),\\
+\Pr(\text{base}) &= 1-\alpha(t).
+\end{align}
+
+\subsection{本次 run 的实际课程混合统计}
+根据 \texttt{outer\_curriculum.csv}：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item phase3 共构造了 \(30\) 个 mixed curriculum 目录；
+    \item 第一个 phase3 迭代（iter 22）：
+    \[
+    \alpha=0.39375,\quad (\text{outer},\text{base},\text{replay})=(4,1,0).
+    \]
+    \item 最后一个 phase3 迭代（iter 51）：
+    \[
+    \alpha=0.35,\quad (\text{outer},\text{base},\text{replay})=(1,4,0).
+    \]
+\end{itemize}
+
+\section{运行期 replay 统计}
+
+\subsection{最终 replay 统计}
+根据 \texttt{outer\_plr\_stats.csv} 的最后一行：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item 最终 buffer size：\(24\)；
+    \item 总采样次数：\(33\)；
+    \item 其中 new：\(13\)；
+    \item 其中 replay：\(20\)；
+    \item 最终 replay ratio：\(0.6061\)；
+    \item 最近 20 轮 replay ratio：\(0.6\)；
+    \item top-10 覆盖率：\(0.7\)；
+    \item top-10 sample share：\(0.6\)。
+\end{itemize}
+
+\subsection{buffer 文件中可见的 level 统计}
+最终 \texttt{outer\_policy\_plr\_buffer.json} 显示，buffer 中保存的是 level signature 与其 score EMA。示例条目：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \(\texttt{10|60|0.5|5|ab}\)：\texttt{score\_ema}=0.1538，\texttt{n\_seen}=4，\texttt{n\_sampled}=3；
+    \item \(\texttt{60|90|0.7|5|ab}\)：\texttt{score\_ema}=0.1660，\texttt{n\_seen}=6，\texttt{n\_sampled}=5；
+    \item \(\texttt{60|30|0.7|5|random\_mix}\)：\texttt{score\_ema}=0.1763，\texttt{n\_seen}=5，\texttt{n\_sampled}=1。
+\end{itemize}
+
+\section{本次 run 的完整伪代码}
+
+\begin{lstlisting}
+Input:
+  distribution = O_10_90
+  request_number = 30
+  inner learner = PPO_NEW-v3
+  profile = PLR_UED
+
+Phase1:
+  Train PPO_NEW-v3 on base distribution
+  Save theta_phase1.zip
+
+Outer loop (auto = phase2 then phase3):
+  Initialize replay buffer B = {}
+  For iter = 1 ... 51:
+    Determine phase:
+      iter 1..21  -> phase2
+      iter 22..51 -> phase3
+
+    Build allowed action subset:
+      phase2: n = 5 only
+      phase3: n in {5,10,15}
+
+    Select outer level:
+      if B empty or rand < 0.5:
+         sample candidate uniformly from full action space
+      else:
+         sample candidate from B by shifted-linear priority
+      if candidate not allowed in current phase:
+         resample uniformly from allowed subset
+
+    Materialize outer batch for current level
+
+    If phase2:
+       train data = current outer batch only
+       ckpt_in = theta_phase1.zip
+    Else if phase3:
+       mix current outer batch with base data and replay files
+       train data = mixed curriculum directory
+       ckpt_in = previous theta_iter
+
+    Run inner PPO_NEW-v3 training on train data
+    Collect new decisions / path map rows
+    Compute:
+       J  = average reward of new decisions
+       dJ = J - previous J
+       D  = missing_paths / path_total
+       score = |dJ| + 0.1 * J - 2.0 * D
+
+    Update replay buffer entry for current level by EMA(alpha=0.6)
+    Save theta_iterXXX.zip
+
+Phase4:
+  Load theta_iter051.zip
+  Reuse phase1 data root in eval_only implement mode
+  Produce rl_summary.csv and rl_trace.csv
+\end{lstlisting}
+
+\section{本次 run 的最终实现结果}
+
+\subsection{最终 implement 汇总}
+根据 \texttt{rl\_summary.csv}：
+\begin{center}
+\begin{tabular}{p{5.2cm}p{5.0cm}}
+\toprule
+指标 & 数值 \\
+\midrule
+\texttt{reward\_count} & \(200\) \\
+\texttt{average\_reward} & \(0.54\) \\
+\texttt{std\_reward} & \(0.4984\) \\
+\texttt{removal\_action} & \(9\) \\
+\texttt{removal\_action\_reward} & \(8\) \\
+\texttt{removal\_wait\_action} & \(187\) \\
+\texttt{removal\_wait\_action\_reward} & \(96\) \\
+\texttt{insertion\_action} & \(0\) \\
+\texttt{insertion\_action\_reward} & \(0\) \\
+\texttt{insertion\_non\_action} & \(4\) \\
+\texttt{insertion\_non\_action\_reward} & \(4\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{这次 run 可以客观确认的实现特征}
+从代码与运行文件联合可确认：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item inner learner 是 \texttt{PPO\_NEW v3}；
+    \item outer objective 实际为 \(|dJ| + 0.1J - 2D\)；
+    \item replay priority 使用 score EMA，而非 softmax value function；
+    \item replay/new 混合概率固定为 \(0.5/0.5\)；
+    \item phase2 只搜索 \(n=5\) 的 level，并固定从 \texttt{theta\_phase1.zip} 出发；
+    \item phase3 才打开 mixed curriculum，且其 \(\alpha\) 已接近下界 \(0.35\)；
+    \item phase4 使用的是 \texttt{theta\_iter051.zip}。
+\end{enumerate}
+
+\section{与抽象“PLR/UED”表述相比的本地化差异}
+为了避免把通用术语和本地实现混淆，这里只做事实列举：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 本地 \texttt{PLR\_UED} 的优先级分数直接由 \(|dJ| + 0.1J - 2D\) 给出，而不是显式的 regret/uncertainty 网络；
+    \item action source 不是单纯 ``policy''，而是 \texttt{new/replay/policy\_filtered} 三种来源；
+    \item \texttt{policy\_mode=ts} 在 replay 开启时并不直接决定 outer action；
+    \item replay buffer 的 level identity 不含 seed，只含 \((\mu_A,\mu_B,p,n,\pi)\)；
+    \item phase3 的 curriculum mixing 发生在\textbf{文件级复制}上，而不是在环境内部动态切换；
+    \item curriculum alpha 使用全局迭代编号，因此 phase3 入口时已接近 \(\alpha_{\text{end}}\)；
+    \item 本次 run 的最终 implement checkpoint 是 latest phase3 iteration 对应的 \texttt{theta\_iter051.zip}。
+\end{enumerate}
+
+\section{附录：关键代码与结果文件索引}
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \texttt{codes/Dynamic\_master34959.py}
+    \item \texttt{codes/outer\_rl/run\_edrl\_pipeline.py}
+    \item \texttt{codes/outer\_rl/run\_edrl\_phase2.py}
+    \item \texttt{codes/core/dynamic\_RL34959.py}
+    \item \texttt{codes/algorithms/ppo\_new/nn/context\_extractor.py}
+    \item \texttt{codes/nexus/local\_adaptive\_o10\_90\_s42\_rerun2/run\_20260305\_092522\_719454\_R30\_O\_10\_90\_PLR\_UED\_S42/post\_stage/outer\_train\_round.csv}
+    \item \texttt{codes/nexus/local\_adaptive\_o10\_90\_s42\_rerun2/run\_20260305\_092522\_719454\_R30\_O\_10\_90\_PLR\_UED\_S42/post\_stage/outer\_actions.csv}
+    \item \texttt{codes/nexus/local\_adaptive\_o10\_90\_s42\_rerun2/run\_20260305\_092522\_719454\_R30\_O\_10\_90\_PLR\_UED\_S42/post\_stage/outer\_plr\_stats.csv}
+    \item \texttt{codes/nexus/local\_adaptive\_o10\_90\_s42\_rerun2/run\_20260305\_092522\_719454\_R30\_O\_10\_90\_PLR\_UED\_S42/post\_stage/outer\_curriculum.csv}
+    \item \texttt{codes/nexus/local\_adaptive\_o10\_90\_s42\_rerun2/run\_20260305\_092522\_719454\_R30\_O\_10\_90\_PLR\_UED\_S42/post\_stage/outer\_policy\_plr\_buffer.json}
+    \item \texttt{codes/nexus/local\_adaptive\_o10\_90\_s42\_rerun2/run\_20260305\_092522\_719454\_R30\_O\_10\_90\_PLR\_UED\_S42/rl\_summary.csv}
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,5 @@
+﻿run_label,distribution,seed,selected,run_dir,done,summary_ok,trace_ok,credibility,why_selected,algorithm,algo_version
+PPO,O_10_90,42,1,a:\MYpython\34959_RL\codes\nexus\thesis_gapfill_patch\run_20260219_202213_305730_R30_O_10_90_PPO_S42,1,1,1,complete,DONE.json present,PPO,v1
+PPO_NEW_v3,O_10_90,42,1,a:\MYpython\34959_RL\codes\nexus\thesis_matrix_v3_ext\run_20260223_005933_607536_R30_O_10_90_PPO_NEW_S42,1,1,1,complete,DONE.json present,PPO_NEW,v3
+PPO_NEW_v3_1,O_10_90,42,1,a:\MYpython\34959_RL\codes\nexus\thesis_gapfill_patch\run_20260223_053657_571360_R30_O_10_90_PPO_NEW_S42,1,1,1,complete,DONE.json present,PPO_NEW,v3.1
+PLR_UED,O_10_90,42,1,a:\MYpython\34959_RL\codes\nexus\local_adaptive_o10_90_s42_rerun2\run_20260305_092522_719454_R30_O_10_90_PLR_UED_S42,0,1,1,main_result_usable,"DONE.json missing, but rl_summary.csv + rl_trace.csv exist",PPO_NEW,v3

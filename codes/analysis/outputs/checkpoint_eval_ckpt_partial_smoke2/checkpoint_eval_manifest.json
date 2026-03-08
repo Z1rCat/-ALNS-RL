@@ -1,0 +1,20 @@
+{
+  "status": "ok",
+  "out_dir": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_ckpt_partial_smoke2",
+  "summary_path": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_ckpt_partial_smoke2\\checkpoint_eval_summary.csv",
+  "phase_name": "implement",
+  "external_data_root": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\\data",
+  "hard_stage_family": "removal",
+  "hard_min_severity": 5,
+  "easy_max_severity": 3,
+  "lambda_fp": 0.2,
+  "runs": [
+    {
+      "source_kind": "checkpoint",
+      "checkpoint_path": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\\post_stage\\checkpoints\\theta_iter026.zip",
+      "run_dir": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_ckpt_partial_smoke2\\runs\\001_theta_iter026",
+      "subprocess_status": "timeout_30s",
+      "status": "no_decision_frame"
+    }
+  ]
+}

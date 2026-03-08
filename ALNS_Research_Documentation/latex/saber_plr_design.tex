@@ -1,0 +1,839 @@
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm,mathtools}
+\usepackage{booktabs,longtable,array,multirow}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage[dvipsnames]{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{setspace}
+\usepackage{caption}
+\usepackage{tabularx}
+\usepackage{makecell}
+\hypersetup{colorlinks=true,linkcolor=MidnightBlue,urlcolor=MidnightBlue,citecolor=MidnightBlue}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.3em}
+\onehalfspacing
+\pagestyle{fancy}
+\setlength{\headheight}{15pt}
+\fancyhf{}
+\fancyhead[L]{SABER-PLR 设计文档}
+\fancyhead[R]{\thepage/\pageref{LastPage}}
+\fancyfoot[C]{}
+\titleformat{\section}{\Large\bfseries\color{MidnightBlue}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{NavyBlue}}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{RoyalBlue}}{\thesubsubsection}{0.6em}{}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\I}{\mathbf{1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\softmax}{\operatorname{softmax}}
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\sigmoid}{\operatorname{sigmoid}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\argmax}{\operatorname*{argmax}}
+\newcommand{\argmin}{\operatorname*{argmin}}
+\captionsetup{font=small,labelfont=bf}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{2.0cm}
+{\Huge\bfseries SABER-PLR：面向 hardest OOD 的\\[0.4em]严重度与分支感知高效课程重放框架\par}
+\vspace{1.0cm}
+{\Large Severity- and Branch-aware Efficient Replay Prioritization over Levels\par}
+\vspace{1.6cm}
+\begin{tcolorbox}[colback=blue!3,colframe=MidnightBlue,boxrule=0.8pt,width=0.92\textwidth]
+\textbf{文档目的}\quad 给出一套\textbf{按工程现实逐步实现}的新算法家族，用于在你们现有 \texttt{PPO\_NEW-v3/v3.1} 主干之上，重构当前 PLR\_UED 外层流程。设计目标有三点：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 保留现有 PLR/UED 在 \(O\_\{10,90\}\) hardest OOD 上对高严重度边界切片的有效修复能力；
+    \item 减少外层昂贵交互次数，并在完成 runtime profiling 后争取显著压低总耗时，而不是先验承诺固定的 wall-clock 降幅；
+    \item 在 telemetry 与特征导出链路打通的前提下，逐步让外层分布调度感知 \texttt{v3} 的三路结构 \((o,\,meta,\,\Delta o)\)；若链路未打通，则 branch-aware 只能作为后续增强，而不是第一批必做项。
+\end{enumerate}
+\end{tcolorbox}
+\vfill
+{\large 版本：v1.1\par}
+{\large 生成日期：\today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{问题重述与设计出发点}
+
+\subsection{当前最关键的经验事实}
+根据你们当前\textbf{已完成且可核对}的基线与 trace-level 切片分析，现阶段可以较稳地说：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.35em]
+    \item 在 strongest OOD 分布 \(O\_{10,90}\) 上，普通 PPO 的平均回报长期停留在约 \(0.5\) 的低平台，这至少说明当前 hardest OOD 下存在稳定失效模式，而不只是单次随机波动；
+    \item \texttt{PPO\_NEW-v3/v3.1} 作为 inner backbone 在 \(F1\) 与部分 \(G\) 分布上有收益，但对 \(O\_{10,90}\) 并未稳定超过普通 PPO；
+    \item 当前 outer 系方法里，主结果上\textbf{明确跑赢 PPO 的只有 PLR\_UED}；而且它的提升不是全局均匀抬升，而是集中修复了 \textbf{高严重度 \(severity=5/6\) \(\times\) removal} 的边界决策，并伴随少量 insertion 侧收益；
+    \item 因此当前证据更支持如下\textbf{优先级判断}，而不是绝对定理：
+     \[
+     \text{训练分布选择/调度效应} > \text{inner 表征归纳偏置效应} > \text{outer 控制器复杂度}.
+     \]
+\end{enumerate}
+
+\subsection{当前必须承认的工程与证据边界}
+为了避免后文把“研究设想”误写成“现成能力”，这里先把边界说清楚：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.35em]
+    \item \(O\_{10,90}\) 上关于 hardest slice 的机制证据最强，但目前仍以有限 seeds 与有限完整 run 为主，因此适合指导算法设计，不宜写成过度确定的理论结论；
+    \item 当前最可信的 trace-level 信号是 \(severity\)、stream、语义动作、reward，以及 implement 路径上部分可用的 \(p(a=1)\)；训练路径并未稳定导出完整 \(p(a=1)\)；
+    \item 当前 \texttt{PPO\_NEW-v3} 代码主干稳定暴露的是融合后的最终特征 \(h\)，并未稳定导出三路 branch tensor 或 branch 级梯度，因此 branch-aware 设计目前只能视为\textbf{可选研究扩展}；
+    \item 当前 outer action space 本质上是离散 level 网格，而不是连续可微参数空间；因此任何“邻域编辑”都必须遵守当前 generator 真正支持的离散候选，而不是假设连续局部扰动天然存在。
+\end{enumerate}
+
+\subsection{我们真正要修复的坏点}
+记每个 implement 样本为
+\[
+\tau_t=(s_t, a_t, r_t, sev_t, str_t),
+\]
+其中 \(sev_t\) 表示严重度，\(str_t\in\{\texttt{removal},\texttt{insertion}\}\) 表示当前 stream。由已有切片结果可知，hardest OOD 的核心失败模式并非“所有样本都差”，而是集中在集合
+\[
+\mathcal{H}=\{t\mid sev_t\ge \tau_H,\; str_t=\texttt{removal}\},
+\]
+其中默认推荐 \(\tau_H=5\)。
+
+普通 PPO 在该集合上几乎完全塌缩到保守动作 \(a=0\)；而 PLR\_UED 的收益则主要来自：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 在 \(\mathcal{H}\) 上恢复少量但高质量的 \(a=1\)；
+    \item 在 \(sev=5\) 左右保留更好的“继续保守也要保守得准确”的能力；
+    \item 不追求全局激进，而追求 \textbf{selective action1 recovery}。
+\end{enumerate}
+
+因此，新算法不应再是“更通用的 outer RL”，而应是：
+\begin{quote}
+\textbf{围绕 hardest slice 进行定点课程调度的轻量级课程重放器。}
+\end{quote}
+
+\subsection{新算法总名称与版本路线}
+本文给出一个从简单到复杂、便于逐版实现的算法家族，统称
+\begin{center}
+\fbox{\parbox{0.9\textwidth}{\centering\textbf{SABER-PLR: Severity- and Branch-aware\ Efficient Replay Prioritization over Levels}}}
+\end{center}
+并拆为五个递进版本：
+\begin{center}
+\begin{tabular}{p{2.1cm}p{3.0cm}p{8.6cm}}
+\toprule
+版本 & 名称 & 核心新增点 \\
+\midrule
+V0 & PLR-Lite & 最小可替代版：保留 replay 与 learnability，去掉重 outer RL，仅做 score-based level selector。 \\
+V1 & SR-PLR & 加入 \textbf{severity-aware + removal-aware} 定向打分，主攻 hardest slice。 \\
+V2 & SBR-PLR & \textbf{可选研究扩展}：先做 V2a 的 proxy-only branch-aware，再视 telemetry 情况升级到 V2b。 \\
+V3 & BSR-PLR & 在 V1 之上加入 \textbf{learnability 硬门 + 两阶段预算控制} 与 cost-aware utility；这是最有希望先落地降时的版本。 \\
+V4 & SABER-PLR & 完整增强版：在 V1/V3 稳定后，再考虑邻域编辑课程、adaptive new/replay mixing、轻量 selector 等机制。 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{记号、主干网络与总体设计原则}
+
+\subsection{内层 backbone：保持 PPO\_NEW-v3/v3.1 稳定主干不动}
+我们不修改当前 PPO 主优化器，只把 \texttt{v3/v3.1} 作为稳定 backbone。给定时刻 \(t\) 的输入，定义
+\[
+ x_t=[o_t,\,b_t,\,a_{t-1},\,r_{t-1},\,\Delta o_t],
+\]
+其中：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \(o_t\)：当前局部观测；
+    \item \(b_t\)：阶段位或 meta 状态；
+    \item \(a_{t-1},r_{t-1}\)：最短闭环行为反馈；
+    \item \(\Delta o_t\)：短时变化量。
+\end{itemize}
+
+在 \texttt{v3} 中，这些信号被拆成三路：
+\[
+ z_t^{(o)}=f_o(o_t),\quad z_t^{(m)}=f_m(b_t,a_{t-1},r_{t-1}),\quad z_t^{(\Delta)}=f_{\Delta}(\Delta o_t),
+\]
+然后拼接或融合成
+\[
+ z_t = \phi\big(z_t^{(o)}, z_t^{(m)}, z_t^{(\Delta)}\big),
+\]
+再经过 TemporalConv 或轻量时序聚合器得到最终策略特征 \(h_t\)，最后进入 actor/critic 头。
+
+本设计中，\textbf{inner PPO 训练逻辑不改}，新算法只改 outer 的分布选择、候选重放、评估预算与评分信号。
+
+\subsection{外层 level 定义}
+一个外层 level 记为
+\[
+ g=(\mu_A,\mu_B,p,n,pattern),
+\]
+分别表示：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \(\mu_A,\mu_B\)：两类关键事件或上下文参数的均值；
+    \item \(p\)：混合比例或切换比例；
+    \item \(n\)：当前 generator 所支持的离散文件规模或离散长度档位；
+    \item \(pattern\)：当前 generator 所支持的离散模式。
+\end{itemize}
+在当前项目里，outer action space 更接近\textbf{离散 level 网格}，而不是连续可微参数控制。第一版实现应优先复用现有离散 key、现有 replay 机制与现有候选选择器，再讨论局部邻域编辑。
+
+\subsection{四条总原则}
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item \textbf{定点修 hardest slice。} 重点不是全局均值，而是 \(severity\ge 5\) 的 removal 边界。 
+    \item \textbf{选择性恢复 action1。} 目标不是全局提高 \(action1\_rate\)，而是只在“该出手”的高严重度边界上提高高置信度 \(a=1\)。
+    \item \textbf{removal/insertion 非对称。} 同一个二值动作在两个 stream 里的语义相反，因此 outer score 必须拆流统计。
+    \item \textbf{少算昂贵样本。} 你们的瓶颈主要是 ALNS 相关外层交互成本，因此必须用两阶段预算与候选筛选减少 full evaluation 次数。
+\end{enumerate}
+
+\section{统一评分框架：从 PLR 到 SABER-PLR}
+
+\subsection{基础 PLR/UED 项}
+对任意候选 level \(g\)，记冻结策略或当前参考策略在该 level 上的表现为 \(J_{frozen}(g)\)，记短训或最新统计得到的表现为 \(J(g)\)。
+
+沿用 PLR/UED 的核心思想，首先定义一个 \textbf{可学习门}：
+\begin{equation}
+L(g)=\exp\left(-\frac{(J_{frozen}(g)-c)^2}{2\sigma_L^2}\right).
+\label{eq:learnability}
+\end{equation}
+当 \(J_{frozen}(g)\) 太高时，说明太简单；太低时，说明太难。\(L(g)\) 迫使采样集中到“难但可学”的边界附近。
+
+再定义学习进度项：
+\begin{equation}
+LP(g)=\big|J(g)-\bar J_{ref}(g)\big|,
+\label{eq:lp}
+\end{equation}
+其中 \(\bar J_{ref}(g)\) 可以是上一轮、EMA 基线或历史缓冲统计。由于当前任务奖励近似二值，绝对回报对细粒度能力变化不够敏感，因此 \(LP(g)\) 比单纯 \(1-J\) 更重要。
+
+最后，沿用 replay buffer 的优先级更新：
+\begin{equation}
+q_g \leftarrow (1-\beta_q)q_g + \beta_q\,score_g,
+\label{eq:q_update}
+\end{equation}
+采样概率为
+\begin{equation}
+P(g)=\frac{(q_g+\varepsilon_q)^{\alpha_q}}{\sum_{g'}(q_{g'}+\varepsilon_q)^{\alpha_q}}.
+\label{eq:priority_sampling}
+\end{equation}
+
+\subsection{hardest-slice 定向项}
+定义 hardest removal slice 与 hardest insertion slice 为
+\begin{equation}
+\mathcal{H}_{rem}(g)=\{t\mid sev_t\ge \tau_H,\; str_t=\texttt{removal}\},
+\label{eq:hard_slice}
+\end{equation}
+\begin{equation}
+\mathcal{H}_{ins}(g)=\{t\mid sev_t\ge \tau_H,\; str_t=\texttt{insertion}\}.
+\label{eq:hard_slice_ins}
+\end{equation}
+默认 \(\tau_H=5\)。为简化记号，后文若未特别说明，\(\mathcal{H}(g)\equiv \mathcal{H}_{rem}(g)\)，即\textbf{主 score 默认只指向 removal hardest slice}。同时定义 easy slice 为
+\begin{equation}
+\mathcal{E}(g)=\{t\mid sev_t\le \tau_E\},\qquad \tau_E=3.
+\label{eq:easy_slice}
+\end{equation}
+
+当前证据表明，PLR\_UED 的有效增益并不只是“多做 action1”，还包括 hardest slice 上继续保守时的正确性。因此至少需要五个定向统计量。
+
+\paragraph{(1) hardest-slice 总体正确性}
+\begin{equation}
+Q_{hard}(g)=\E_{t\in \mathcal{H}(g)}\big[r_t\big].
+\label{eq:Qhard}
+\end{equation}
+它反映的是 hardest removal slice 的\textbf{总体可处理程度}。这一项必须保留，因为现有 trace 证据说明 PLR\_UED 的收益不只来自恢复少量 \(a=1\)，也来自高严重度下更准确的保守决策。
+
+\paragraph{(2) 高严重度移除边界恢复分数}
+\begin{equation}
+R_{hard}(g)=\E_{t\in \mathcal{H}(g)}\big[\I(a_t=1)\,r_t\big].
+\label{eq:Rhard}
+\end{equation}
+它度量：在 hardest slice 上，是否恢复了真正有用的 \(a=1\)。但若单独使用这一项，容易把 score 推向“过度追求 action1”，因此必须与 \(Q_{hard}\) 联合使用。
+
+\paragraph{(3) 选择性置信分数}
+记策略在 removal 上预测 \(a=1\) 的概率为 \(p_t=\pi_\theta(a=1\mid h_t)\)。定义
+\begin{equation}
+C_{sel}(g)=\E_{t\in \mathcal{H}(g)}\big[p_t\,\I(a_t=1)\,r_t\big]-\lambda_{fp}\E_{t\in \mathcal{E}(g)}\big[\I(a_t=1)\big].
+\label{eq:csel}
+\end{equation}
+第一项奖励“高严重度下高置信度的正确出手”，第二项惩罚 easy slice 上的无谓激进。
+
+若当前 probe 链路\textbf{无法稳定导出} \(p_t\) 或 \(p(a=1)\)，则应退化为
+\begin{equation}
+\tilde C_{sel}(g)=\E_{t\in \mathcal{H}(g)}\big[\I(a_t=1)\,r_t\big]-\lambda_{fp}\E_{t\in \mathcal{E}(g)}\big[\I(a_t=1)\big],
+\label{eq:csel_fallback}
+\end{equation}
+或直接令 \(w_c=0\)。这里不能把“理论上可算”误当成“当前工程上已稳定可算”。
+
+\paragraph{(4) easy-slice 保护项}
+\begin{equation}
+P_{easy}(g)=\E_{t\in \mathcal{E}(g)}\big[\I(a_t=0)\,r_t\big].
+\label{eq:peasy}
+\end{equation}
+它用于抑制为了追求 hardest slice 而伤害 easy slice 的副作用。
+
+\paragraph{(5) insertion 弱辅助监控项}
+由于 insertion 与 removal 语义相反，而且当前 trace 证据显示主收益集中在 removal hardest slice，因此 insertion 在 V1/V3 中\textbf{不与 removal 对称建模}。定义一个弱辅助监控量
+\begin{equation}
+M_{ins}(g)=\E_{t\in \mathcal{H}_{ins}(g)}\big[r_t\big].
+\label{eq:mins}
+\end{equation}
+它只表示：若某些 candidate level 顺带改善了高严重度 insertion slice，可给予\textbf{很小}的辅助奖励。但第一版完全可以取 \(w_i=0\)，把 \(M_{ins}\) 仅作为监控指标，而不进入主优化目标。这样可以明确避免把 insertion 与 removal 完全对称处理。
+
+\subsection{可选研究扩展：branch-aware learnability}
+这一节描述的是\textbf{后续可选扩展}，不是第一批实现的前置条件。当前代码与日志链路尚未稳定导出三路 branch tensor 与 branch 级梯度，因此这里更适合作为中后期研究方向，而不是首版工程规格。其目标不是强迫三路绝对均衡，而是：
+\begin{quote}
+\textbf{避免长期只有一条分支承担 hardest slice 决策，而另外两条分支几乎失活或不可学习。}
+\end{quote}
+
+\paragraph{V2a：proxy-only branch-aware（当前更现实的首版）}
+V2a 只依赖 forward-time 的 activation-level 或 output-level 信号，不要求 per-branch gradient telemetry。记 \(u_t^{(b)}=\norm{z_t^{(b)}}_2\)，定义分支活性占比
+\begin{equation}
+ a_{t,\mathrm{act}}^{(b)} = \frac{u_t^{(b)}}{\sum_{b'} u_t^{(b')}+\varepsilon_a},
+ \qquad b\in\{o,m,\Delta\}.
+ \label{eq:branch_act_ratio}
+\end{equation}
+再定义一个轻量 ablation sensitivity。记 \(\ell_t^{(-b)}\) 为将第 \(b\) 路分支置零、掩蔽或替换为固定基线后得到的当前动作 logit，则
+\begin{equation}
+ \delta_t^{(b)} = \big|\ell_t-\ell_t^{(-b)}\big|,\qquad
+ \tilde\delta_t^{(b)} = \frac{\delta_t^{(b)}}{\sum_{b'}\delta_t^{(b')}+\varepsilon_\delta}.
+ \label{eq:branch_ablation}
+\end{equation}
+在 hardest slice 上求均值得到
+\begin{equation}
+ A_{b,\mathrm{act}}(g)=\E_{t\in\mathcal{H}(g)}\big[a_{t,\mathrm{act}}^{(b)}\big],\qquad
+ S_{b,\mathrm{abl}}(g)=\E_{t\in\mathcal{H}(g)}\big[\tilde\delta_t^{(b)}\big].
+ \label{eq:branch_proxy_stats}
+\end{equation}
+于是 V2a 的 proxy 分数定义为
+\begin{equation}
+S_{branch}^{V2a}(g)=\sum_{b\in\{o,m,\Delta\}}\log\big(\varepsilon_b + A_{b,\mathrm{act}}(g)S_{b,\mathrm{abl}}(g)\big)
+- \eta_b\,\Var\big(A_{o,\mathrm{act}}S_{o,\mathrm{abl}}, A_{m,\mathrm{act}}S_{m,\mathrm{abl}}, A_{\Delta,\mathrm{act}}S_{\Delta,\mathrm{abl}}\big).
+\label{eq:sbranch_v2a}
+\end{equation}
+这一路线只需要\textbf{前向可见的 branch output 与简易遮挡实验}，因此是当前更现实的第一实现版本。
+
+\paragraph{V2b：gradient-aware branch-aware（telemetry 打通后的增强版）}
+若后续 telemetry 打通，记 \(\ell_t\) 为策略对当前动作的 logit。对每个 hardest slice 样本，定义三路分支的 \textbf{相对敏感度}：
+\begin{equation}
+ s_t^{(b)} = \norm{\frac{\partial \ell_t}{\partial z_t^{(b)}}}_2\cdot \norm{z_t^{(b)}}_2,
+ \qquad b\in\{o,m,\Delta\}.
+ \label{eq:sensitivity}
+\end{equation}
+归一化得到三路相对贡献：
+\begin{equation}
+ a_t^{(b)} = \frac{s_t^{(b)}}{\sum_{b'} s_t^{(b')}+\varepsilon_a}.
+ \label{eq:branch_ratio}
+\end{equation}
+在 hardest slice 上求均值得到
+\begin{equation}
+ A_b(g)=\E_{t\in\mathcal{H}(g)}\big[a_t^{(b)}\big].
+ \label{eq:Ab}
+\end{equation}
+
+仅有活性还不够，还需要“可学习”。因此再定义 probe 期间每条分支的梯度可学习度：
+\begin{equation}
+ G_b(g)=\E_{t\in\mathcal{H}(g)}\left[\norm{\nabla_{\theta_b}\mathcal{L}^{probe}_{ppo,t}}_2\right],
+ \label{eq:Gb}
+\end{equation}
+并归一化为 \(\tilde G_b(g)=G_b(g)/(\sum_{b'}G_{b'}(g)+\varepsilon_G)\)。
+
+最后构造更强的 gradient-aware 分数：
+\begin{equation}
+S_{branch}^{V2b}(g)=\sum_{b\in\{o,m,\Delta\}}\log\big(\varepsilon_b + A_b(g)\tilde G_b(g)\big) - \eta_b\,\Var\big(A_o\tilde G_o, A_m\tilde G_m, A_\Delta\tilde G_\Delta\big).
+\label{eq:sbranch_v2b}
+\end{equation}
+其含义是：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item 每条分支都要在 hardest slice 上真正参与，且存在可学习梯度；
+    \item 若只有一路过强、两路失活，则方差项给出惩罚；
+    \item 若某条分支在当前候选 level 上几乎不起作用，则该 level 不应被过度优先。
+\end{itemize}
+
+在总分中统一记
+\begin{equation}
+S_{branch}(g)=
+\begin{cases}
+S_{branch}^{V2a}(g), & \text{若当前采用 V2a/proxy-only 模式},\\
+S_{branch}^{V2b}(g), & \text{若 telemetry 已打通且采用 V2b 模式}.
+\end{cases}
+\label{eq:sbranch}
+\end{equation}
+
+\paragraph{实现前提与保守落地方式}
+若要真正落地 branch-aware，建议按两级推进：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.2em]
+    \item \textbf{V2a 先行。} 只要求 backbone 在 forward 阶段能导出 \(z^{(o)},z^{(m)},z^{(\Delta)}\) 或其等价 proxy，并允许做简易遮挡/置零实验；
+    \item \textbf{V2b 后上。} 只有当 probe 路径允许对 branch 级变量反传并稳定记录梯度统计时，才启用 \eqref{eq:sensitivity}--\eqref{eq:sbranch_v2b}；
+    \item 若连 V2a 的 activation/output proxy 都暂不可用，则直接把 \(w_b\) 置零，保持算法退化为 V1/V3。
+\end{enumerate}
+
+\paragraph{为什么这是“软约束”而不是“硬均衡”}
+我们并不要求 \(A_o=A_m=A_\Delta\)。不同 slice 对三路的需求本就不同。我们只惩罚“单路塌缩”，不追求“完全平均”。因此 \(S_{branch}\) 只能作为辅助项，不能盖过 hardest-slice 主目标。
+
+\subsection{成本感知总评分}
+将以上各项合并，总评分写为
+\begin{equation}
+\begin{aligned}
+S_{raw}(g)=L(g)\Big[&w_q Q_{hard}(g)+w_h R_{hard}(g)+w_c C_{sel}(g)+w_e P_{easy}(g) \\
+&+w_i M_{ins}(g)+w_p LP(g)+w_b S_{branch}(g)+w_n N(g)\Big]-w_d D(g),
+\end{aligned}
+\label{eq:sraw}
+\end{equation}
+其中：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.15em]
+    \item \(N(g)=1/\sqrt{n_{seen}(g)+1}\) 表示新颖度；
+    \item \(D(g)\) 表示文件生成失败、路径错误、空轨迹等工程惩罚；
+    \item \(w_q,w_h,w_c,w_e,w_i,w_p,w_b,w_n,w_d\) 为可调权重；
+    \item 若 branch-aware 或 \(p(a=1)\) 统计暂不可用，则应显式把对应项关闭，而不是保留公式却在实现中隐式跳过。
+\end{itemize}
+这里推荐满足
+\[
+w_q \ge w_h \gg w_i,
+\]
+也就是：\textbf{hardest slice 总体正确性至少不应比 action1 恢复更轻，而 insertion 只能作为弱辅助项或纯监控项。} 这样才能避免总分被“多做 action1”单独主导。
+
+考虑训练成本后，真正用于 outer 选择的效用定义为
+\begin{equation}
+U(g)=\frac{S_{raw}(g)}{Cost(g)+\varepsilon_u}.
+\label{eq:utility}
+\end{equation}
+这一步非常关键，因为你们的外层瓶颈不是“网络更新慢”，而是“每个 outer 样本都贵”。
+
+\section{版本路线：从简单到复杂逐步实现}
+
+\subsection{V0：PLR-Lite（最小可替代版）}
+\subsubsection*{目标}
+用最小风险替代当前高耗时 outer RL。V0 不加 branch-aware，也不加两阶段预算；只保留以下三件事：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item learnability gate \eqref{eq:learnability}；
+    \item learning progress \eqref{eq:lp}；
+    \item replay 更新 \eqref{eq:q_update} 与优先级采样 \eqref{eq:priority_sampling}。
+\end{enumerate}
+
+V0 的总分数定义为
+\begin{equation}
+S_{V0}(g)=L(g)\big[w_\Delta LP(g)+w_J J(g)+w_n N(g)\big]-w_d D(g).
+\label{eq:sv0}
+\end{equation}
+
+\subsubsection*{适用场景}
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item 先替换 EDRL/RARL 这类更重 outer 控制器；
+    \item 验证“轻量 score-based selector + replay”就能跑通；
+    \item 作为后续所有版本的保底退化路径。
+\end{itemize}
+
+\subsubsection*{推荐参数}
+\begin{center}
+\begin{tabular}{p{4.0cm}p{3.0cm}p{6.4cm}}
+\toprule
+参数 & 推荐值 & 说明 \\
+\midrule
+\(c\) & 0.55 & learnability 中心，落在“过易与过难之间”的中间偏低位置 \\
+\(\sigma_L\) & 0.18 & 可学习带宽 \\
+\(\alpha_q\) & 0.9 & priority exponent \\
+\(\beta_q\) & 0.20 & score EMA \\
+\(\varepsilon_q\) & 1e-4 & 防止零概率 \\
+\(w_\Delta,w_J,w_n,w_d\) & 0.45, 0.25, 0.15, 0.15 & 先偏向 learning\ progress \\
+replay/new & 0.65 / 0.35 & 初始混合 \\
+buffer size & 64 & 小而稳，便于快速周转 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{V1：SR-PLR（Severity-aware Removal PLR）}
+\subsubsection*{目标}
+从“通用 high-value replay”升级为“定向 hardest slice replay”。V1 的关键不是简单追求更多 \(a=1\)，而是把 score 从全局统计改成针对 hardest removal slice 的\textbf{边界决策质量}统计。
+
+\subsubsection*{总分数}
+\begin{equation}
+S_{V1}(g)=L(g)\big[w_q Q_{hard}(g)+w_h R_{hard}(g)+w_c C_{sel}(g)+w_e P_{easy}(g)+w_i M_{ins}(g)+w_p LP(g)+w_n N(g)\big]-w_d D(g).
+\label{eq:sv1}
+\end{equation}
+
+\subsubsection*{核心变化}
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item \textbf{用 \(Q_{hard}+R_{hard}\) 取代通用 difficulty。} 优先修复 \(sev\ge 5\) 的 removal 边界，而不是全局最难分布；
+    \item \textbf{引入 \(C_{sel}\)，但允许回退。} 若 \(p(a=1)\) 暂不可稳定导出，则使用 \(\tilde C_{sel}\) 或直接关闭该项；
+    \item \textbf{引入 \(P_{easy}\)。} 保住 easy slice 的校准与稳定性，避免为了 hardest slice 而整体变得激进；
+    \item \textbf{insertion 只做弱辅助。} \(M_{ins}\) 只占很小权重，第一版甚至可以设为 0，仅保留监控。
+\end{enumerate}
+
+\subsubsection*{推荐参数}
+\begin{center}
+\begin{tabular}{p{4.0cm}p{3.0cm}p{6.4cm}}
+\toprule
+参数 & 推荐值 & 说明 \\
+\midrule
+\(\tau_H\) & 5 & hard severity threshold \\
+\(\tau_E\) & 3 & easy threshold \\
+\(\lambda_{fp}\) & 0.20 & easy slice 假阳性惩罚 \\
+\(w_q,w_h,w_c,w_e,w_i,w_p,w_n,w_d\) & 0.28, 0.18, 0.14, 0.15, 0.05, 0.10, 0.05, 0.05 & 让 hardest 总体正确性重于 action1 恢复，insertion 仅弱辅助 \\
+\(w_q:w_h:w_i\) & \(0.28:0.18:0.05\) & 满足 \(w_q \ge w_h \gg w_i\)，避免主目标被“多做 action1”带偏 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{V2：SBR-PLR（Stream- and Branch-aware PLR）}
+\subsubsection*{目标}
+V2 解决“outer 调度与 v3 主干脱节”的问题，但前提是 branch telemetry 至少部分可见。除保留 V1 所有项外，新增 \(S_{branch}(g)\) 作为辅助项。这里进一步分成两个现实层级：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.2em]
+    \item \textbf{V2a：proxy-only branch-aware。} 只依赖 activation-level / output-level proxy，是当前更现实的第一实现版本；
+    \item \textbf{V2b：gradient-aware branch-aware。} 只有在 telemetry 打通后才启用，是后续增强版。
+\end{enumerate}
+若连 V2a 的 proxy 都暂不可稳定导出，则 V2 应继续关闭，不应强行上线。
+
+\subsubsection*{总分数}
+\begin{equation}
+S_{V2}(g)=S_{V1}(g)+L(g)\,w_b S_{branch}(g).
+\label{eq:sv2}
+\end{equation}
+
+\subsubsection*{关键思想}
+\begin{itemize}[leftmargin=2.2em,itemsep=0.25em]
+    \item 如果某个 level 只能把 \(z^{(o)}\) 打热，而 \(meta\) 与 \(\Delta o\) 路分支几乎无活性或无敏感度，则它更像“单路刷分 level”，不应被过度优先；
+    \item 如果某个 level 在 hardest slice 上使三路都产生非零可学习信号，说明它更能训练出稳健边界；
+    \item 这样外层选择的不只是“短期提分 level”，而是“更能训练 v3 结构先验的 level”；
+    \item 但这条思路只有在 branch proxy 与真实性能确实相关时才成立，因此 V2 必须默认带退化开关；
+    \item 工程上应先上 V2a，再决定是否值得升级到 V2b。
+\end{itemize}
+
+\subsubsection*{推荐参数}
+\begin{center}
+\begin{tabular}{p{4.0cm}p{3.0cm}p{6.4cm}}
+\toprule
+参数 & 推荐值 & 说明 \\
+\midrule
+\(w_b\) & 0.05 -- 0.10 & 只做辅助项；V2a 建议从 0.05 起，V2b 再视效果上调 \\
+\(\eta_b\) & 0.35 & 分支失衡惩罚 \\
+\(\varepsilon_a,\varepsilon_\delta,\varepsilon_G,\varepsilon_b\) & 1e-6 & 数值稳定 \\
+V2a 统计样本 & hardest slice only & 只在 \(sev\ge 5\), removal 上统计 branch proxy \\
+V2b 梯度采样频率 & 每个 probe 末 1 次 & 降低额外开销；若无法稳定反传，则停留在 V2a \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{保守开关机制}
+为避免 \(S_{branch}\) 误导总分数，推荐加入保守门控：若最近 \(m\) 轮验证中，\(S_{branch}\) 与 \(\Delta J\) 的秩相关系数不为正，则暂时将 \(w_b\) 退火到 0。即
+\begin{equation}
+ w_b(t+1)=
+ \begin{cases}
+ \rho_w\, w_b(t), & \text{if } \mathrm{Corr}(S_{branch},\Delta J) \le 0,\\
+ \min(w_b^{max}, w_b(t)/\rho_w), & \text{otherwise},
+ \end{cases}
+\label{eq:wb_schedule}
+\end{equation}
+其中 \(\rho_w=0.5\) 推荐。这样即便 branch-aware 信号暂时无效，也能自动退化回 V1。
+
+\subsection{V3：BSR-PLR（Budgeted Severity-aware Replay PLR）}
+\subsubsection*{目标}
+V3 是\textbf{最有希望明显降时}的关键版本。它加入两阶段预算控制，把大部分无效 full evaluation 换成廉价 probe。这里的“更快”首先指外层 candidate-evaluation 成本更低，而不是先验承诺整个实验 wall-clock 必然按同一比例下降。
+
+\subsubsection*{两阶段流程}
+\paragraph{阶段 A：cheap probe}
+对每个候选 level 只做少量 rollout 或极短 inner short-train，得到
+\[
+J_{frozen}(g),\; LP(g),\; Q_{hard}(g),\; R_{hard}(g),\; C_{sel}(g),\; P_{easy}(g),\; M_{ins}(g),\; S_{branch}(g),\; D(g).
+\]
+基于这些量计算 \(U(g)\)。
+
+\paragraph{阶段 B：full short-train}
+只对满足 \(L(g)\ge \tau_L\) 的候选中、\(U(g)\) 前 \(M\) 个 level 做正式短训，并用训练后的真实结果更新 \(q_g\)。
+
+\subsubsection*{预算函数}
+为避免把大预算浪费在“太差但其实不可学”的候选上，先定义 learnability 硬门
+\begin{equation}
+\Gamma_L(g)=\I\big(L(g)\ge \tau_L\big).
+\label{eq:learnability_gate_budget}
+\end{equation}
+记 full short-train 预算为 \(B(g)\)，定义
+\begin{equation}
+B(g)=
+\begin{cases}
+0, & L(g)<\tau_L,\\
+B_{min}+(B_{max}-B_{min})\cdot \sigmoid\Big(\alpha_B(\tau_U-U(g)) + \beta_B(\tau_R-R_{hard}(g))\Big), & L(g)\ge\tau_L.
+\end{cases}
+\label{eq:budget}
+\end{equation}
+解释如下：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item 若 \(L(g)<\tau_L\)，则该候选\textbf{直接跳过 full evaluation}，因为它已经落到“太难或不可学”的一侧；
+    \item 若 \(U(g)\) 高、\(R_{hard}(g)\) 也高，说明该 level 已经学得不错或 probe 已充分，预算靠近 \(B_{min}\)；
+    \item 若 \(U(g)\) 尚可但 \(R_{hard}(g)\) 仍差，说明这是“仍值得进一步修 hardest slice”的 level，预算靠近 \(B_{max}\)。
+\end{itemize}
+
+\subsubsection*{成本感知效用}
+V3 采用 \eqref{eq:utility}，其中
+\begin{equation}
+Cost(g)=c_0 + c_1\,T_{probe}(g)+c_2\,B(g),
+\label{eq:cost}
+\end{equation}
+\(T_{probe}(g)\) 为 probe 时间或统一设定的 probe 步数。
+
+\subsubsection*{推荐参数}
+\begin{center}
+\begin{tabular}{p{4.0cm}p{3.0cm}p{6.4cm}}
+\toprule
+参数 & 推荐值 & 说明 \\
+\midrule
+候选数 \(N_{cand}\) & 6 & 每轮只看 6 个候选，控制外层成本 \\
+full 进入数 \(M\) & 2 & 只对前 2 个做正式短训 \\
+\(B_{min},B_{max}\) & 0.25, 1.00 & 相对当前 full short-train 标准预算的比例 \\
+probe 预算 & 0.12 -- 0.18 倍 full & 一般推荐 0.15 倍 \\
+\(\tau_L\) & 0.30 -- 0.40 & learnability 硬门，建议先从 0.35 起步 \\
+\(\alpha_B,\beta_B\) & 3.0, 4.0 & 让 hardest-recovery 主导预算分配 \\
+\(\tau_U,\tau_R\) & 0.55, 0.20 & utility 与 hard-recovery 的中间门槛 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{理论上的加速来源}
+若当前 PLR\_UED 每轮对 \(N_{cand}\) 个候选都做 full evaluation，则其每轮成本近似为
+\[
+T_{old}\approx N_{cand}\,C_{full}.
+\]
+V3 后变为
+\[
+T_{new}\approx N_{cand}\,C_{probe} + M\,C_{full},
+\]
+若取 \(N_{cand}=6\), \(M=2\), \(C_{probe}=0.15C_{full}\)，则
+\[
+\frac{T_{new}}{T_{old}}\approx \frac{6\times0.15+2}{6}=0.4833.
+\]
+这说明：若只看\textbf{候选评估型训练开销}，V3 在结构上有机会把该部分压到旧版本的约 \(48\%\)。但这\textbf{不等于}最终 wall-clock 必然减半，因为真实总耗时还包含事件文件生成、子进程启动、日志落盘、checkpoint 切换等额外成本。因此 V3 的速度收益必须配合 runtime profiling 报告，不能只靠公式口径下结论。
+
+\subsection{V4：SABER-PLR（完整版）}
+\subsubsection*{目标}
+V4 在 V3 的基础上，把“找对 level”这件事做得更稳。它新增三项机制：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 邻域编辑课程：从 top replay level 出发做局部扰动，不再只重放单点；
+    \item adaptive new/replay mixing：根据当前 hardest slice 修复情况调节探索比例；
+    \item 轻量 contextual bandit/UCB 选择器：优先复用或轻改现有 UCB/TS 式候选选择器，而不是再引入一套重 outer RL。
+\end{enumerate}
+
+\subsubsection*{邻域编辑}
+从 replay top-\(K\) level 中抽一个种子 \(g_i\)，做局部编辑：
+\begin{equation}
+ g' = (\mu_A+\delta_A,\; \mu_B+\delta_B,\; p+\delta_p,\; n+\delta_n,\; pattern'),
+\label{eq:edit}
+\end{equation}
+其中推荐默认扰动集合：
+\[
+\delta_A,\delta_B\in\{\pm 10\},\qquad \delta_p\in\{\pm 0.1\},\qquad \delta_n\in\mathcal{N}^{adj}_{files}(n).
+\]
+其中 \(\mathcal{N}^{adj}_{files}(n)\) 表示\textbf{当前 generator 所支持的离散相邻文件规模档位}，而不是默认存在连续的 \(\pm 100\) 扰动。对 \(pattern\) 也同理：第一版只能在\textbf{当前 generator 真正支持}的模式集合内切换；若当前实现只稳定支持少数模式，则不得把 \(ab\leftrightarrow aba\leftrightarrow abba\) 这类编辑写成现成能力。
+
+\subsubsection*{adaptive new/replay mixing}
+定义最近窗口内 hardest-slice 修复率为
+\begin{equation}
+\rho_{hard}(t)=\frac{1}{W}\sum_{k=t-W+1}^{t} \E\big[\I(sev\ge 5, str=\texttt{removal}, a=1)\,r\big].
+\label{eq:rhohard}
+\end{equation}
+再定义当前新样本概率：
+\begin{equation}
+p_{new}(t)=\clip\Big(p_0 + k_1(H^*-\bar H_t)+k_2(\rho_{hard}^*-\rho_{hard}(t)),\; p_{min},\; p_{max}\Big),
+\label{eq:pnew}
+\end{equation}
+其中 \(\bar H_t\) 可为 recent entropy 或 recent diversity 指标。含义是：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item 若动作熵过低、hardest recovery 仍弱，则提高 \(p_{new}\) 去找新 level；
+    \item 若 hardest recovery 已起色但不稳定，则提高 replay 比例做巩固训练。
+\end{itemize}
+
+\subsubsection*{轻量选择器：UCB over utility}
+不训练重 outer RL，只在当前候选集上做轻量 UCB：
+\begin{equation}
+A(g)=U(g)+\beta_{ucb}\sqrt{\frac{\log(t+1)}{n(g)+1}},
+\label{eq:ucb}
+\end{equation}
+每轮取 \(\argmax_g A(g)\) 作为进入 full short-train 的主候选之一。
+
+\subsubsection*{推荐参数}
+\begin{center}
+\begin{tabular}{p{4.0cm}p{3.0cm}p{6.4cm}}
+\toprule
+参数 & 推荐值 & 说明 \\
+\midrule
+replay top-\(K\) & 8 & 从 top-8 中采样邻域种子 \\
+邻域编辑比例 & 0.5 & 新候选中一半来自邻域编辑 \\
+\(p_0,p_{min},p_{max}\) & 0.35, 0.15, 0.65 & 新样本基础概率 \\
+\(k_1,k_2\) & 0.20, 0.25 & 熵与 hardest-recovery 双调节 \\
+\(\beta_{ucb}\) & 0.05 -- 0.12 & 轻量探索系数 \\
+窗口 \(W\) & 10 & 统计 \(\rho_{hard}(t)\) 的滑窗长度 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{统一训练阶段设计}
+
+\subsection{Stage 0：inner backbone 预热}
+保持你们现有的 Phase1，不做任何变动：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 用当前 base 分布训练出稳定的 \(\theta_{base}\)；
+    \item 缓存基础统计：整体 reward、action ratio、trace 切片、hardest slice 基线；
+    \item 初始化 replay buffer，可以把 base 附近的一小部分分布作为“热启动候选”。
+\end{enumerate}
+
+\subsection{Stage 1：候选生成}
+每一轮 outer 先构造候选集 \(\mathcal{C}_t\)，由三部分组成：
+\begin{equation}
+\mathcal{C}_t = \mathcal{C}^{replay}_t \cup \mathcal{C}^{edit}_t \cup \mathcal{C}^{new}_t.
+\label{eq:candidates}
+\end{equation}
+其中：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \(\mathcal{C}^{replay}_t\)：从优先级 buffer 中抽的历史高价值 level；
+    \item \(\mathcal{C}^{edit}_t\)：从 replay top level 生成的邻域编辑 level；
+    \item \(\mathcal{C}^{new}_t\)：按当前 \(p_{new}(t)\) 抽的全新 level。
+\end{itemize}
+
+\subsection{Stage 2：cheap probe 与评分}
+\paragraph{实现前提}
+在进入这一阶段之前，至少要保证 probe/trace 链路能稳定导出 \(severity\)、stream、语义动作、reward；若 \(p(a=1)\) 或 branch 统计暂不可用，则对应项必须显式关闭，而不是在文档里保留、在实现里默默跳过。
+
+对 \(\mathcal{C}_t\) 中每个候选 level：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 生成对应事件文件；
+    \item 用冻结或当前 backbone 做极短 rollout / short-train；
+    \item 只在 trace 中抽取 hardest 与 easy slice；
+    \item 计算 \(L, LP, Q_{hard}, R_{hard}, C_{sel}, P_{easy}, M_{ins}, S_{branch}, D\)；
+    \item 算出 \(S_{raw}(g)\) 与 \(U(g)\)。
+\end{enumerate}
+
+\subsection{Stage 3：选择与 full short-train}
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 先按 \(\Gamma_L(g)=\I(L(g)\ge \tau_L)\) 过滤掉不可学候选，再用 \eqref{eq:ucb} 或直接按 \(U(g)\) 排序，选出前 \(M\) 个候选；
+    \item 对每个被选中的候选，根据 \eqref{eq:budget} 分配预算 \(B(g)\)；
+    \item 在该候选上做正式 short-train，得到真实 \(J(g)\) 与 trace 统计；
+    \item 用真实结果更新 \(q_g\)、\(n_{seen}(g)\)、\(\rho_{hard}(t)\)、\(p_{new}(t)\)。
+\end{enumerate}
+
+\subsection{Stage 4：回放更新与切换条件}
+若最近 \(W\) 轮满足以下任一条件，可进入下一阶段或触发终止：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item \(\rho_{hard}(t)\) 持续上升且方差收缩；
+    \item \(R_{hard}(g)\) 进入平台区，但 easy slice 未明显受损；
+    \item replay top level 已出现稳定的邻域簇，而非单点垄断；
+    \item 达到外层预算上限。
+\end{enumerate}
+
+\section{推荐默认参数与调参顺序}
+
+\subsection{推荐默认参数总表}
+\begin{center}
+\small
+\begin{longtable}{p{3.2cm}p{2.8cm}p{7.2cm}}
+\toprule
+类别 & 参数 & 推荐值 \\
+\midrule
+\endfirsthead
+\toprule
+类别 & 参数 & 推荐值 \\
+\midrule
+\endhead
+learnability & \(c,\sigma_L\) & \(0.55,\;0.18\) \\
+priority replay & \(\alpha_q,\beta_q,\varepsilon_q\) & \(0.9,\;0.20,\;10^{-4}\) \\
+hard/easy slice & \(\tau_H,\tau_E\) & \(5,\;3\) \\
+selective action & \(\lambda_{fp}\) & \(0.20\) \\
+stream asymmetry & \(w_i\) / monitor & \(w_i=0.05\) 或直接取 0，仅把 insertion 作为弱辅助或监控项 \\
+score weights (V1) & \makecell[l]{$w_q,w_h,w_c,w_e,$\\$w_i,w_p,w_n,w_d$} & \makecell[l]{0.28, 0.18, 0.14, 0.15\\0.05, 0.10, 0.05, 0.05} \\
+branch-aware & \(w_b,\eta_b\) & \(0.05\text{--}0.10,\;0.35\)；V2a 先上，V2b 后上 \\
+probe/full & \(N_{cand},M\) & \(6,\;2\) \\
+budget & \(B_{min},B_{max},\tau_L\) & \(0.25,\;1.00,\;0.35\) \\
+probe ratio & \(C_{probe}/C_{full}\) & \(0.15\) \\
+budget slope & \(\alpha_B,\beta_B\) & \(3.0,\;4.0\) \\
+new/replay & \(p_0,p_{min},p_{max}\) & \(0.35,\;0.15,\;0.65\) \\
+adaptive mix & \(k_1,k_2\) & \(0.20,\;0.25\) \\
+UCB & \(\beta_{ucb}\) & \(0.08\) \\
+edit neighborhood & \(\delta_\mu,\delta_p,\delta_n\) & \(\pm10,\;\pm0.1,\;\mathcal{N}^{adj}_{files}(n)\) \\
+window & \(W\) & 10 \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{建议的实现顺序}
+为降低工程风险，建议按下面顺序推进，而不是一次性上完整版：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.3em]
+    \item \textbf{先做 V0。} 目标是用最小替换跑通 replay + score-selector 的主链路；
+    \item \textbf{再做 V1。} 一旦 trace 级 hardest slice 指标能稳定导出，就立刻切到定向 score；
+    \item \textbf{再做 V3。} 因为你当前最痛的是时间，预算控制应早于 branch-aware 上线；
+    \item \textbf{然后再决定是否做 V2。} 若 branch proxy 已可稳定导出，先做 V2a；只有当 V2a 确实有效且 telemetry 打通后，再考虑 V2b；
+    \item \textbf{最后做 V4。} 邻域编辑与 adaptive mixing 放到稳定主链之后，不要一开始全上。
+\end{enumerate}
+
+如果只能做三版，我建议依次做：
+\[
+\text{V0} \rightarrow \text{V1} \rightarrow \text{V3}.
+\]
+因为这三版已经覆盖：\textbf{替换重 outer、定点修 hardest slice、显著降时} 这三件核心事情。
+
+\section{为什么 branch-aware 项值得加，但不能当主角}
+\subsection{值得加的理由}
+若没有 \(S_{branch}(g)\)，新算法仍然可能有效，但它更像“PLR\_UED 外层 + v3 内层”的并列组合。加入 \(S_{branch}(g)\) 后，outer 在挑分布时会回答一个更细的问题：
+\begin{quote}
+\textbf{哪些 level 不仅能提分，而且在 hardest slice 上更可能训练出三路可学习而非单路塌缩的表征？}
+\end{quote}
+这样就把 v3 的结构先验抬升成了 outer 的候选选择依据。但必须强调：这是一种\textbf{研究扩展价值}，不是当前项目里已经稳定上线的能力。工程上更合理的做法是先验证 V2a 的 proxy-only 版本，再决定是否值得走到 V2b。
+
+\subsection{不能当主角的理由}
+当前已有证据说明，hardest OOD 的主导因素仍是 \textbf{训练分布调度}，而不是继续加重 inner 表征。因此：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item \(S_{branch}\) 应作为辅助项，权重不宜过大；
+    \item 一旦发现 \(S_{branch}\) 与真实提升脱钩，就应通过 \eqref{eq:wb_schedule} 自动退化；
+    \item 即使最终发现 branch-aware 项收益有限，V2 也应稳定退化回 V1，V3 仍可独立作为速度主线存在。 
+\end{itemize}
+
+\section{实验建议、消融建议与预期结论口径}
+
+\subsection{最关键的对比与消融}
+推荐最少做以下对比：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item PPO vs PPO\_NEW-v3/v3.1 vs PLR\_UED vs V1 vs V3；
+    \item 在 \(O\_{10,90}\) 上至少做 3 seeds，并强制报告 trace-level slice，而不是只报平均回报；
+    \item V1 去掉 \(Q_{hard}\)（验证 hardest-slice 总体正确性是否必要）；
+    \item V1 去掉 \(C_{sel}\)（验证 selective action1 是否必要）；
+    \item V1 令 \(w_i=0\)（验证 insertion 弱辅助是否真的有价值）；
+    \item V1 去掉 \(P_{easy}\)（验证 easy-slice 保护是否必要）；
+    \item V2a vs V2b（验证 proxy-only 版本是否已经足够）；
+    \item V2 去掉 \(S_{branch}\)（验证 branch-aware 是否真的增益）；
+    \item V3 去掉 learnability gate 或去掉两阶段预算（验证主要加速来源）；
+    \item V4 去掉邻域编辑（验证是否避免只记单点）。
+\end{enumerate}
+
+\subsection{推荐主指标}
+不建议只报 average reward。至少要同时报告：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.2em]
+    \item hardest slice overall quality：\(Q_{hard}\)；
+    \item hardest slice recovery：\(R_{hard}\)；
+    \item selective action quality：\(C_{sel}\)；
+    \item easy-slice preservation：\(P_{easy}\)；
+    \item insertion weak monitor：\(M_{ins}\)；
+    \item 总体平均回报；
+    \item 外层 wall-clock、单轮候选评估耗时以及 \(\Gamma_L(g)=0\) 的跳过比例；
+    \item replay 覆盖率、top-k 邻域覆盖率。
+\end{itemize}
+
+\subsection{应当如何写“理论安全性”}
+不能诚实地声称“真实测试回报必定提升”，因为这需要超出当前信息的严格证明。但可以较稳地表述为：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.25em]
+    \item 新算法是对现有 PLR 主线的\textbf{保守增强}，而非推翻；
+    \item 若新增 hardest-slice 或 branch-aware 信号无效，权重可自动退化到 0，算法退化为 V0/V1；
+    \item 两阶段预算控制对外层\textbf{候选评估型训练开销}有明确的削减机制，因此“更快”可以给出结构性解释；但这不是对最终 wall-clock 减半的直接保证；
+    \item hardest-slice 定向 score 是对当前 trace 证据的直接利用，因此比通用外层难度目标更贴近真实失效模式。
+\end{enumerate}
+
+\section{总结：建议你实际落地时如何推进}
+\begin{tcolorbox}[colback=blue!3,colframe=MidnightBlue,title=一句话总结]
+\textbf{不要再把主要创新放在更复杂的 outer RL 控制器上，而要把现有 PLR/UED 提炼成一个“定点修复 severity 5/6 removal 边界、以 V1/V3 为主线、先做可验证的速度优化、branch-aware 仅作后续可选增强”的高样本效率课程重放框架。}
+\end{tcolorbox}
+
+更具体地说：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.3em]
+    \item 第一批实现建议先做 V0，快速替掉重 outer RL；
+    \item 第二批直接切到 V1，把 score 对齐到 hardest slice；
+    \item 若时间压力很大，第三批优先做 V3，而不是先做 V2；
+    \item branch-aware 项值得做，但应视为“在 telemetry 打通后再验证”的辅助增强，而不是第一优先级；
+    \item 完整版 V4 适合作为论文中的主方法，但工程实现上应在 V1/V3 验证稳定后再上。
+\end{enumerate}
+
+\vspace{0.8em}
+\begin{tcolorbox}[colback=green!3,colframe=OliveGreen,title=推荐命名]
+\textbf{工程主线名：SR-PLR / BSR-PLR}\\
+中文：\textbf{严重度感知的高效优先级课程重放}\\
+若后续 branch-aware 扩展被真实验证，再把完整版命名为：\textbf{SABER-PLR}。这样命名更符合“先落地 V1/V3，再决定是否引入 V2/V4”的实现顺序。
+\end{tcolorbox}
+
+\end{document}

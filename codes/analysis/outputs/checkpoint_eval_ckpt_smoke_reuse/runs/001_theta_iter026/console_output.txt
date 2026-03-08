@@ -1,0 +1,1217 @@
+>>> [stage1] skip generator, using external data root: A:\MYpython\34959_RL\codes\logs\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\data
+
+>>> [阶段2] 正在启动主仿真程序 (ALNS + RL)...
+==================================================
+   线程并行编号: [0, 1]
+Using cpu device
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15
+current_i  3000000000001.0
+left_r 14
+current_i  3000000000025.0
+left_r 13
+current_i  3000000000015.0
+left_r 12
+current_i  3000000000022.0
+left_r 11
+current_i  3000000000013.0
+left_r 10
+current_i  3000000000026.0
+left_r 9
+current_i  3000000000017.0
+left_r 8
+current_i  3000000000019.0
+left_r 7
+current_i  3000000000005.0
+left_r 6
+current_i  3000000000028.0
+left_r 5
+current_i  3000000000002.0
+left_r 4
+current_i  3000000000024.0
+left_r 3
+current_i  3000000000006.0
+left_r 2
+current_i  3000000000018.0
+left_r 1
+current_i  3000000000021.0
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+running time of initial solution:  19.616571500000003
+66326.131 313.82 -17215.8 30
+iteration 1
+random_removal
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+want_to_swap_request  3000000000024
+cost_gap 3312.497000000001
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 1748.4130000000014
+swap_success
+want_to_swap_request  3000000000004
+cost_gap 1444.7229999999993
+swap_success
+want_to_swap_request  3000000000006
+cost_gap 1106.7039999999997
+swap_success
+want_to_swap_request  3000000000011
+cost_gap 758.9359999999997
+swap_success
+want_to_swap_request  3000000000028
+cost_gap 371.8409999999999
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 352.822000000001
+swap_success
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+swap_cost 66326.131
+Acceptance Probability:1
+Temperature:6566.286969
+66326.131 313.82 -17215.8 30
+Running_Time  20.514404400000007 CPU_Time  20.538446500000003
+times_of_compare_cost_obj 1
+  overall_distance overall_cost  ... overall_delay_penalty iteration_time
+0           4725.0    66326.131  ...                     0      19.616572
+1           4725.0    66326.131  ...                     0       0.884871
+
+[2 rows x 15 columns]
+[RL] loaded model parameters from: A:\MYpython\34959_RL\codes\logs\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\post_stage\checkpoints\theta_iter026.zip
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15
+current_i  3000000000001.0
+left_r 14
+current_i  3000000000025.0
+left_r 13
+current_i  3000000000015.0
+left_r 12
+current_i  3000000000022.0
+left_r 11
+current_i  3000000000013.0
+left_r 10
+current_i  3000000000026.0
+left_r 9
+current_i  3000000000017.0
+left_r 8
+current_i  3000000000019.0
+left_r 7
+current_i  3000000000005.0
+left_r 6
+current_i  3000000000028.0
+left_r 5
+current_i  3000000000002.0
+left_r 4
+current_i  3000000000024.0
+left_r 3
+current_i  3000000000006.0
+left_r 2
+current_i  3000000000018.0
+left_r 1
+current_i  3000000000021.0
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+running time of initial solution:  19.874011699999997
+66326.131 313.82 -17215.8 30
+iteration 1
+random_removal
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+want_to_swap_request  3000000000019
+cost_gap 3029.8520000000062
+swap_success
+want_to_swap_request  3000000000013
+cost_gap 2186.0570000000007
+swap_success
+want_to_swap_request  3000000000022
+cost_gap 1920.8599999999997
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 1748.4130000000014
+swap_success
+want_to_swap_request  3000000000016
+cost_gap 1510.3780000000002
+swap_success
+want_to_swap_request  3000000000006
+cost_gap 1106.7040000000002
+swap_success
+want_to_swap_request  3000000000011
+cost_gap 758.9369999999999
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+swap_cost 66326.131
+Acceptance Probability:1
+Temperature:6566.286969
+66326.131 313.82 -17215.8 30
+Running_Time  20.844847100000003 CPU_Time  20.842761699999997
+times_of_compare_cost_obj 1
+  overall_distance overall_cost  ... overall_delay_penalty iteration_time
+0           4725.0    66326.131  ...                     0      19.874012
+1           4725.0    66326.131  ...                     0       0.957871
+
+[2 rows x 15 columns]
+obs [149.   4.   0.   0.   0.   0.   0. 149.   4.   0.   0.   0.   0.   0.
+ 149.   4.   0.   0.   0.   0.   0. 149.   4.   0.   0.   0.   0.   0.]
+[[0 0 5 5]
+ [112 112 119.0 5]
+ [112 112 119.0 5]
+ [112 113 120.0 5]
+ ['begin_depot' '3000000000001pickup' '3000000000001delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000001
+vehicle                                                   60
+delay_tolerance                                        149.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               1
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 1
+
+>>> [Debug] Attempting to save table. Total rewards: 1
+obs [56.6  6.   0.   0.   0.   0.   0.  56.6  6.   0.   0.   0.   0.   0.
+ 56.6  6.   0.   0.   0.   0.   0.  56.6  6.   0.   0.   0.   0.   0. ]
+obs [36.6  6.   0.   0.   0.   0.   0.  36.6  6.   0.   0.   0.   0.   0.
+ 36.6  6.   0.   0.   0.   0.   0.  36.6  6.   0.   0.   0.   0.   0. ]
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                            1
+uncertainty_type                                         begin
+request                                          3000000000022
+vehicle                                                     36
+delay_tolerance                                           56.6
+passed_terminals     [1.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                75
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 2
+
+>>> [Debug] Attempting to save table. Total rewards: 2
+top
+top
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                            1
+uncertainty_type                                         begin
+request                                          3000000000019
+vehicle                                                     36
+delay_tolerance                                           36.6
+passed_terminals     [1.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                75
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 3
+
+>>> [Debug] Attempting to save table. Total rewards: 3
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15
+current_i  3000000000001.0
+left_r 14
+current_i  3000000000025.0
+left_r 13
+current_i  3000000000015.0
+left_r 12
+current_i  3000000000022.0
+left_r 11
+current_i  3000000000013.0
+left_r 10
+current_i  3000000000026.0
+left_r 9
+current_i  3000000000017.0
+left_r 8
+current_i  3000000000019.0
+left_r 7
+current_i  3000000000005.0
+left_r 6
+current_i  3000000000028.0
+left_r 5
+current_i  3000000000002.0
+left_r 4
+current_i  3000000000024.0
+left_r 3
+current_i  3000000000006.0
+left_r 2
+current_i  3000000000018.0
+left_r 1
+current_i  3000000000021.0
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+running time of initial solution:  20.1067611
+66326.131 313.82 -17215.8 30
+iteration 1
+random_removal
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+want_to_swap_request  3000000000017
+cost_gap 2315.844
+swap_success
+want_to_swap_request  3000000000013
+cost_gap 2186.0570000000007
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 2013.046000000004
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 1748.4130000000014
+swap_success
+want_to_swap_request  3000000000016
+cost_gap 1510.3770000000009
+swap_success
+want_to_swap_request  3000000000006
+cost_gap 1106.7040000000002
+swap_success
+want_to_swap_request  3000000000011
+cost_gap 758.9369999999999
+swap_success
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000004
+cost_gap 11.077999999992926
+swap_success
+swap_cost 66326.131
+Acceptance Probability:1
+Temperature:6566.286969
+66326.131 313.82 -17215.8 30
+Running_Time  21.041849100000007 CPU_Time  20.9973861
+times_of_compare_cost_obj 1
+  overall_distance overall_cost  ... overall_delay_penalty iteration_time
+0           4725.0    66326.131  ...                     0      20.106761
+1           4725.0    66326.131  ...                     0        0.92241
+
+[2 rows x 15 columns]
+obs [73.28  6.    0.    0.    0.    0.    0.   73.28  6.    0.    0.    0.
+  0.    0.   73.28  6.    0.    0.    0.    0.    0.   73.28  6.    0.
+  0.    0.    0.    0.  ]
+obs [151.5   6.    0.    0.    0.    0.    0.  151.5   6.    0.    0.    0.
+   0.    0.  151.5   6.    0.    0.    0.    0.    0.  151.5   6.    0.
+   0.    0.    0.    0. ]
+obs [67.  6.  0.  0.  0.  0.  0. 67.  6.  0.  0.  0.  0.  0. 67.  6.  0.  0.
+  0.  0.  0. 67.  6.  0.  0.  0.  0.  0.]
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                            0
+uncertainty_type                                         begin
+request                                          3000000000016
+vehicle                                                     82
+delay_tolerance                                          73.28
+passed_terminals     [0.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                 3
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 4
+
+>>> [Debug] Attempting to save table. Total rewards: 4
+[[2 2 2 4 4 4]
+ [125 125 125 137.0 137.0 4]
+ [125 125 125 137.0 137.0 4]
+ [125 126 126 138.0 138.0 4]
+ ['begin_depot' '3000000000029pickup' '3000000000015Tp'
+  '3000000000015delivery' '3000000000029Td' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                            0
+uncertainty_type                                         begin
+request                                          3000000000015
+vehicle                                                     83
+delay_tolerance                                          151.5
+passed_terminals     [0.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                 3
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 5
+
+>>> [Debug] Attempting to save table. Total rewards: 5
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000012
+vehicle                                                   90
+delay_tolerance                                         67.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               3
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 6
+
+>>> [Debug] Attempting to save table. Total rewards: 6
+obs [9. 6. 0. 0. 0. 0. 0. 9. 6. 0. 0. 0. 0. 0. 9. 6. 0. 0. 0. 0. 0. 9. 6. 0.
+ 0. 0. 0. 0.]
+dsf
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                            1
+uncertainty_type                                         begin
+request                                          3000000000005
+vehicle                                                    113
+delay_tolerance                                            9.0
+passed_terminals     [7.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               111
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 7
+
+>>> [Debug] Attempting to save table. Total rewards: 7
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15
+current_i  3000000000001.0
+left_r 14
+current_i  3000000000025.0
+left_r 13
+current_i  3000000000015.0
+left_r 12
+current_i  3000000000022.0
+left_r 11
+current_i  3000000000013.0
+left_r 10
+current_i  3000000000026.0
+left_r 9
+current_i  3000000000017.0
+left_r 8
+current_i  3000000000019.0
+left_r 7
+current_i  3000000000005.0
+left_r 6
+current_i  3000000000028.0
+left_r 5
+current_i  3000000000002.0
+left_r 4
+current_i  3000000000024.0
+left_r 3
+current_i  3000000000006.0
+left_r 2
+current_i  3000000000018.0
+left_r 1
+current_i  3000000000021.0
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+running time of initial solution:  19.751819499999996
+66326.131 313.82 -17215.8 30
+iteration 1
+random_removal
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+want_to_swap_request  3000000000024
+cost_gap 3312.497000000001
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 2013.046000000004
+swap_success
+want_to_swap_request  3000000000016
+cost_gap 1510.3770000000009
+swap_success
+want_to_swap_request  3000000000020
+cost_gap 862.1300000000001
+swap_success
+want_to_swap_request  3000000000029
+cost_gap 387.46900000000005
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 352.822000000001
+swap_success
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+Acceptance Probability:1
+Temperature:6566.286969
+66326.131 313.82 -17215.8 30
+Running_Time  20.608237999999986 CPU_Time  20.611194499999996
+times_of_compare_cost_obj 1
+  overall_distance overall_cost  ... overall_delay_penalty iteration_time
+0           4725.0    66326.131  ...                     0      19.751819
+1           4725.0    66326.131  ...                     0       0.843268
+
+[2 rows x 15 columns]
+obs [42.  4.  0.  0.  0.  0.  0. 42.  4.  0.  0.  0.  0.  0. 42.  4.  0.  0.
+  0.  0.  0. 42.  4.  0.  0.  0.  0.  0.]
+obs [85.  4.  0.  0.  0.  0.  0. 85.  4.  0.  0.  0.  0.  0. 85.  4.  0.  0.
+  0.  0.  0. 85.  4.  0.  0.  0.  0.  0.]
+obs [75.  4.  0.  0.  0.  0.  0. 75.  4.  0.  0.  0.  0.  0. 75.  4.  0.  0.
+  0.  0.  0. 75.  4.  0.  0.  0.  0.  0.]
+obs [125.   4.   0.   0.   0.   0.   0. 125.   4.   0.   0.   0.   0.   0.
+ 125.   4.   0.   0.   0.   0.   0. 125.   4.   0.   0.   0.   0.   0.]
+obs [125.   4.   0.   0.   0.   0.   0. 125.   4.   0.   0.   0.   0.   0.
+ 125.   4.   0.   0.   0.   0.   0. 125.   4.   0.   0.   0.   0.   0.]
+obs [146.   4.   0.   0.   0.   0.   0. 146.   4.   0.   0.   0.   0.   0.
+ 146.   4.   0.   0.   0.   0.   0. 146.   4.   0.   0.   0.   0.   0.]
+obs [38.5  4.   0.   0.   0.   0.   0.  38.5  4.   0.   0.   0.   0.   0.
+ 38.5  4.   0.   0.   0.   0.   0.  38.5  4.   0.   0.   0.   0.   0. ]
+obs [74.5  4.   0.   0.   0.   0.   0.  74.5  4.   0.   0.   0.   0.   0.
+ 74.5  4.   0.   0.   0.   0.   0.  74.5  4.   0.   0.   0.   0.   0. ]
+obs [48.1  4.   0.   0.   0.   0.   0.  48.1  4.   0.   0.   0.   0.   0.
+ 48.1  4.   0.   0.   0.   0.   0.  48.1  4.   0.   0.   0.   0.   0. ]
+obs [73.  4.  0.  0.  0.  0.  0. 73.  4.  0.  0.  0.  0.  0. 73.  4.  0.  0.
+  0.  0.  0. 73.  4.  0.  0.  0.  0.  0.]
+obs [121.2   4.    0.    0.    0.    0.    0.  121.2   4.    0.    0.    0.
+   0.    0.  121.2   4.    0.    0.    0.    0.    0.  121.2   4.    0.
+   0.    0.    0.    0. ]
+obs [103.   4.   0.   0.   0.   0.   0. 103.   4.   0.   0.   0.   0.   0.
+ 103.   4.   0.   0.   0.   0.   0. 103.   4.   0.   0.   0.   0.   0.]
+obs [97.5  4.   0.   0.   0.   0.   0.  97.5  4.   0.   0.   0.   0.   0.
+ 97.5  4.   0.   0.   0.   0.   0.  97.5  4.   0.   0.   0.   0.   0. ]
+obs [128.   4.   0.   0.   0.   0.   0. 128.   4.   0.   0.   0.   0.   0.
+ 128.   4.   0.   0.   0.   0.   0. 128.   4.   0.   0.   0.   0.   0.]
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000003
+vehicle                                                    3
+delay_tolerance                                         42.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 8
+
+>>> [Debug] Attempting to save table. Total rewards: 8
+[[0 0 3 3]
+ [50 50 73.0 3]
+ [50 67 73.0 3]
+ [50 68 74.0 3]
+ ['begin_depot' '3000000000008pickup' '3000000000008delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000008
+vehicle                                                    6
+delay_tolerance                                         85.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 9
+
+>>> [Debug] Attempting to save table. Total rewards: 9
+[[0 0 3 3]
+ [62 62 73.0 3]
+ [62 67 73.0 3]
+ [62 68 74.0 3]
+ ['begin_depot' '3000000000014pickup' '3000000000014delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000014
+vehicle                                                    7
+delay_tolerance                                         75.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 10
+last_segment [1, 0, 0, 0, 1, 0, 0, 0, 1, 1] average_reward, std_reward 0.4 0.4898979485566356
+removal operator, wait action 10 4 removal action 0 0
+insertion operator, insert action 0 0 not insert action 0 0
+
+>>> [Debug] Attempting to save table. Total rewards: 10
+[[0 0 3 3]
+ [74 74 80.0 3]
+ [74 74 80.0 3]
+ [74 75 81.0 3]
+ ['begin_depot' '3000000000009pickup' '3000000000009delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000009
+vehicle                                                    8
+delay_tolerance                                        125.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 11
+
+>>> [Debug] Attempting to save table. Total rewards: 11
+[[0 0 3 3]
+ [98 98 104.0 3]
+ [98 98 104.0 3]
+ [98 99 105.0 3]
+ ['begin_depot' '3000000000007pickup' '3000000000007delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000007
+vehicle                                                   10
+delay_tolerance                                        125.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 12
+
+>>> [Debug] Attempting to save table. Total rewards: 12
+[[0 0 3 3]
+ [110 110 116.0 3]
+ [110 110 116.0 3]
+ [110 111 117.0 3]
+ ['begin_depot' '3000000000000pickup' '3000000000000delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000000
+vehicle                                                   11
+delay_tolerance                                        146.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 13
+
+>>> [Debug] Attempting to save table. Total rewards: 13
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000013
+vehicle                                                   16
+delay_tolerance                                         38.5
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 14
+
+>>> [Debug] Attempting to save table. Total rewards: 14
+[[4.0 4.0 4.0 4.0 4.0 8.0 8.0 8.0 8.0 8.0]
+ [82.0 82.0 138.0 41.5 26.0 27.5 43.0 139.5 83.5 8.0]
+ [82.0 82.0 138.0 41.5 26.0 27.5 43.0 139.5 83.5 8.0]
+ [82.0 82.0 138.0 41.5 26.0 27.5 43.0 139.5 83.5 8.0]
+ ['begin_depot' '3000000000011Tp' '3000000000029Tp' '3000000000020Tp'
+  '3000000000013Tp' '3000000000013delivery' '3000000000020delivery'
+  '3000000000029delivery' '3000000000011delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000011
+vehicle                                                   18
+delay_tolerance                                         74.5
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 15
+
+>>> [Debug] Attempting to save table. Total rewards: 15
+dsf
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000002
+vehicle                                                   18
+delay_tolerance                                         48.1
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 16
+
+>>> [Debug] Attempting to save table. Total rewards: 16
+[[0 0 4 4]
+ [59 59 81.0 4]
+ [59 67 81.0 4]
+ [59 68 82.0 4]
+ ['begin_depot' '3000000000017pickup' '3000000000017delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000017
+vehicle                                                   20
+delay_tolerance                                         73.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 17
+
+>>> [Debug] Attempting to save table. Total rewards: 17
+[[4.0 4.0 5.0 5.0]
+ [134.0 134.0 134.8 5.0]
+ [134.0 134.0 134.8 5.0]
+ [134.0 134.0 134.8 5.0]
+ ['begin_depot' '3000000000006Tp' '3000000000006delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000006
+vehicle                                                   24
+delay_tolerance                                        121.2
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 18
+
+>>> [Debug] Attempting to save table. Total rewards: 18
+[[0 0 0 5 5 5]
+ [101 101 101 118.0 118.0 5]
+ [101 101 101 118.0 118.0 5]
+ [101 102 102 119.0 119.0 5]
+ ['begin_depot' '3000000000004pickup' '3000000000005pickup'
+  '3000000000005Td' '3000000000004delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000004
+vehicle                                                   26
+delay_tolerance                                        103.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 19
+
+>>> [Debug] Attempting to save table. Total rewards: 19
+[[5.0 5.0 7.0 7.0]
+ [119.0 119.0 119.5 7.0]
+ [119.0 119.0 119.5 7.0]
+ [119.0 119.0 119.5 7.0]
+ ['begin_depot' '3000000000005Tp' '3000000000005delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000005
+vehicle                                                   26
+delay_tolerance                                         97.5
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 20
+last_segment [1, 1, 1, 0, 1, 0, 1, 1, 1, 1] average_reward, std_reward 0.8 0.4
+removal operator, wait action 20 12 removal action 0 0
+insertion operator, insert action 0 0 not insert action 0 0
+
+>>> [Debug] Attempting to save table. Total rewards: 20
+[[0 0 6 6]
+ [97 97 109.0 6]
+ [97 97 109.0 6]
+ [97 98 110.0 6]
+ ['begin_depot' '3000000000010pickup' '3000000000010delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                          0
+uncertainty_type                                       begin
+request                                        3000000000010
+vehicle                                                   28
+delay_tolerance                                        128.0
+passed_terminals     [0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                               4
+action                                             -10000000
+reward                                             -10000000
+dtype: object
+implementation times 21
+
+>>> [Debug] Attempting to save table. Total rewards: 21
+obs [90.  4.  0.  0.  0.  0.  0. 90.  4.  0.  0.  0.  0.  0. 90.  4.  0.  0.
+  0.  0.  0. 90.  4.  0.  0.  0.  0.  0.]
+obs [25.  4.  0.  0.  0.  0.  0. 25.  4.  0.  0.  0.  0.  0. 25.  4.  0.  0.
+  0.  0.  0. 25.  4.  0.  0.  0.  0.  0.]
+obs [61.  4.  0.  0.  0.  0.  0. 61.  4.  0.  0.  0.  0.  0. 61.  4.  0.  0.
+  0.  0.  0. 61.  4.  0.  0.  0.  0.  0.]
+obs [81.  4.  0.  0.  0.  0.  0. 81.  4.  0.  0.  0.  0.  0. 81.  4.  0.  0.
+  0.  0.  0. 81.  4.  0.  0.  0.  0.  0.]
+[[4.0 4.0 4.0 4.0 4.0 8.0 8.0 8.0 8.0 8.0]
+ [82.0 82.0 138.0 41.5 26.0 27.5 43.0 139.5 83.5 8.0]
+ [82.0 82.0 138.0 41.5 26.0 27.5 43.0 146.0 83.5 8.0]
+ [82.0 82.0 138.0 41.5 26.0 27.5 43.0 146.0 83.5 8.0]
+ ['begin_depot' '3000000000011Tp' '3000000000029Tp' '3000000000020Tp'
+  '3000000000013Tp' '3000000000013delivery' '3000000000020delivery'
+  '3000000000029delivery' '3000000000011delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                            1
+uncertainty_type                                         begin
+request                                          3000000000029
+vehicle                                                    111
+delay_tolerance                                           90.0
+passed_terminals     [8.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                70
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 22
+
+>>> [Debug] Attempting to save table. Total rewards: 22
+dsf
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                            1
+uncertainty_type                                         begin
+request                                          3000000000011
+vehicle                                                    111
+delay_tolerance                                           25.0
+passed_terminals     [8.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                70
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 23
+
+>>> [Debug] Attempting to save table. Total rewards: 23
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                            1
+uncertainty_type                                         begin
+request                                          3000000000019
+vehicle                                                    114
+delay_tolerance                                           61.0
+passed_terminals     [8.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                70
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 24
+
+>>> [Debug] Attempting to save table. Total rewards: 24
+[[5.0 5.0 5.0 8.0 8.0 8.0]
+ [120.5 120.5 120.5 121.4 121.4 8.0]
+ [120.5 120.5 120.5 121.4 146.0 8.0]
+ [120.5 120.5 120.5 121.4 146.0 8.0]
+ ['begin_depot' '3000000000022Tp' '3000000000019Tp'
+  '3000000000019delivery' '3000000000022delivery' 'end_depot']] action 0 reward 1
+evaluate implementation removal action 0 reward 1 state uncertainty_index                                            1
+uncertainty_type                                         begin
+request                                          3000000000022
+vehicle                                                    114
+delay_tolerance                                           81.0
+passed_terminals     [8.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                70
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 25
+
+>>> [Debug] Attempting to save table. Total rewards: 25
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15
+current_i  3000000000001.0
+left_r 14
+current_i  3000000000025.0
+left_r 13
+current_i  3000000000015.0
+left_r 12
+current_i  3000000000022.0
+left_r 11
+current_i  3000000000013.0
+left_r 10
+current_i  3000000000026.0
+left_r 9
+current_i  3000000000017.0
+left_r 8
+current_i  3000000000019.0
+left_r 7
+current_i  3000000000005.0
+left_r 6
+current_i  3000000000028.0
+left_r 5
+current_i  3000000000002.0
+left_r 4
+current_i  3000000000024.0
+left_r 3
+current_i  3000000000006.0
+left_r 2
+current_i  3000000000018.0
+left_r 1
+current_i  3000000000021.0
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+running time of initial solution:  19.47700659999998
+66326.131 313.82 -17215.8 30
+iteration 1
+random_removal
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+want_to_swap_request  3000000000024
+cost_gap 3312.497000000001
+swap_success
+want_to_swap_request  3000000000013
+cost_gap 2186.0570000000007
+swap_success
+want_to_swap_request  3000000000006
+cost_gap 1106.7040000000002
+swap_success
+want_to_swap_request  3000000000011
+cost_gap 758.9369999999999
+swap_success
+want_to_swap_request  3000000000028
+cost_gap 371.8409999999999
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 352.822000000001
+swap_success
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+Acceptance Probability:1
+Temperature:6566.286969
+66326.131 313.82 -17215.8 30
+Running_Time  20.382912999999974 CPU_Time  20.39888159999998
+times_of_compare_cost_obj 1
+  overall_distance overall_cost  ... overall_delay_penalty iteration_time
+0           4725.0    66326.131  ...                     0      19.477007
+1           4725.0    66326.131  ...                     0       0.892708
+
+[2 rows x 15 columns]
+obs [93.  5.  0.  0.  0.  0.  0. 93.  5.  0.  0.  0.  0.  0. 93.  5.  0.  0.
+  0.  0.  0. 93.  5.  0.  0.  0.  0.  0.]
+False action 0 reward 0
+evaluate implementation removal action 0 reward 0 state uncertainty_index                                            0
+uncertainty_type                                         begin
+request                                          3000000000016
+vehicle                                                     38
+delay_tolerance                                           93.0
+passed_terminals     [7.0, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+current_time                                                 2
+action                                               -10000000
+reward                                               -10000000
+dtype: object
+implementation times 26
+
+>>> [Debug] Attempting to save table. Total rewards: 26
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15
+current_i  3000000000001.0
+left_r 14
+current_i  3000000000025.0
+left_r 13
+current_i  3000000000015.0
+left_r 12
+current_i  3000000000022.0
+left_r 11
+current_i  3000000000013.0
+left_r 10
+current_i  3000000000026.0
+left_r 9
+current_i  3000000000017.0
+left_r 8
+current_i  3000000000019.0
+left_r 7
+current_i  3000000000005.0
+left_r 6
+current_i  3000000000028.0
+left_r 5
+current_i  3000000000002.0
+left_r 4
+current_i  3000000000024.0
+left_r 3
+current_i  3000000000006.0
+left_r 2
+current_i  3000000000018.0
+left_r 1
+current_i  3000000000021.0
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+running time of initial solution:  19.98318180000001
+66326.131 313.82 -17215.8 30
+iteration 1
+random_removal

@@ -1,0 +1,18 @@
+{
+  "status": "ok",
+  "out_dir": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_smoke",
+  "summary_path": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_smoke\\checkpoint_eval_summary.csv",
+  "phase_name": "implement",
+  "hard_stage_family": "removal",
+  "hard_min_severity": 5,
+  "easy_max_severity": 3,
+  "lambda_fp": 0.2,
+  "runs": [
+    {
+      "source_kind": "run_dir",
+      "run_dir": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42",
+      "checkpoint_path": "",
+      "status": "ok"
+    }
+  ]
+}

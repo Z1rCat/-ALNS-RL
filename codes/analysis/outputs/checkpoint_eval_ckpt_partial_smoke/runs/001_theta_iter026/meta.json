@@ -1,0 +1,22 @@
+{
+  "distribution": "O_10_90",
+  "request_number": 30,
+  "generator_workers": 1,
+  "algorithm": "PPO_NEW",
+  "algo_version": "v3",
+  "hat_enabled": 0,
+  "hat_base": "",
+  "seed": 42,
+  "run_name": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_ckpt_partial_smoke\\runs\\001_theta_iter026",
+  "stage_mode": "eval_only",
+  "init_model_path": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\\post_stage\\checkpoints\\theta_iter026.zip",
+  "save_model_path": "",
+  "curriculum_reward_threshold": 0.85,
+  "curriculum_success_required": 3,
+  "stop_flag_file": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_ckpt_partial_smoke\\runs\\001_theta_iter026\\34959.txt",
+  "data_root": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\\data",
+  "run_data_dir": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_ckpt_partial_smoke\\runs\\001_theta_iter026\\data",
+  "alns_output_root": "A:\\MYpython\\34959_RL\\codes\\analysis\\outputs\\checkpoint_eval_ckpt_partial_smoke\\runs\\001_theta_iter026",
+  "skip_generator": 1,
+  "external_data_root": "A:\\MYpython\\34959_RL\\codes\\logs\\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\\data"
+}

@@ -1,0 +1,149 @@
+>>> [stage1] skip generator, using external data root: A:\MYpython\34959_RL\codes\logs\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\data
+
+>>> [阶段2] 正在启动主仿真程序 (ALNS + RL)...
+==================================================
+   线程并行编号: [0, 1]
+Using cpu device
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24
+current_i  3000000000027.0
+left_r 23
+current_i  3000000000029.0
+left_r 22
+current_i  3000000000000.0
+left_r 21
+current_i  3000000000007.0
+left_r 20
+current_i  3000000000003.0
+left_r 19
+current_i  3000000000012.0
+left_r 18
+current_i  3000000000020.0
+left_r 17
+current_i  3000000000016.0
+left_r 16
+current_i  3000000000008.0
+left_r 15
+current_i  3000000000001.0
+left_r 14
+current_i  3000000000025.0
+left_r 13
+current_i  3000000000015.0
+left_r 12
+current_i  3000000000022.0
+left_r 11
+current_i  3000000000013.0
+left_r 10
+current_i  3000000000026.0
+left_r 9
+current_i  3000000000017.0
+left_r 8
+current_i  3000000000019.0
+left_r 7
+current_i  3000000000005.0
+left_r 6
+current_i  3000000000028.0
+left_r 5
+current_i  3000000000002.0
+left_r 4
+current_i  3000000000024.0
+left_r 3
+current_i  3000000000006.0
+left_r 2
+current_i  3000000000018.0
+left_r 1
+current_i  3000000000021.0
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 24.003000000001066
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 19.041000000001077
+swap_success
+swap_cost 66326.131
+running time of initial solution:  19.4367819
+66326.131 313.82 -17215.8 30
+iteration 1
+random_removal
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+greedy_insert
+want_to_swap_request  3000000000024
+cost_gap 3312.497000000001
+swap_success
+want_to_swap_request  3000000000015
+cost_gap 1748.4130000000014
+swap_success
+want_to_swap_request  3000000000004
+cost_gap 1444.7229999999993
+swap_success
+want_to_swap_request  3000000000006
+cost_gap 1106.7039999999997
+swap_success
+want_to_swap_request  3000000000011
+cost_gap 758.9359999999997
+swap_success
+want_to_swap_request  3000000000028
+cost_gap 371.8409999999999
+swap_success
+want_to_swap_request  3000000000005
+cost_gap 352.822000000001
+swap_success
+want_to_swap_request  3000000000019
+cost_gap 28.562000000006265
+swap_success
+want_to_swap_request  3000000000002
+cost_gap 21.004000000003543
+swap_success
+swap_cost 66326.131
+Acceptance Probability:1
+Temperature:6566.286969
+66326.131 313.82 -17215.8 30
+Running_Time  20.313406099999995 CPU_Time  20.3430319
+times_of_compare_cost_obj 1
+  overall_distance overall_cost  ... overall_delay_penalty iteration_time
+0           4725.0    66326.131  ...                     0      19.436782
+1           4725.0    66326.131  ...                     0       0.864228
+
+[2 rows x 15 columns]
+[RL] loaded model parameters from: A:\MYpython\34959_RL\codes\logs\run_20260305_153558_923841_R30_O_10_90_NOVA_EDRL_S42\post_stage\checkpoints\theta_iter026.zip
+left_r 30
+current_i  3000000000004.0
+left_r 29
+current_i  3000000000010.0
+left_r 28
+current_i  3000000000014.0
+left_r 27
+current_i  3000000000023.0
+left_r 26
+current_i  3000000000011.0
+left_r 25
+current_i  3000000000009.0
+left_r 24

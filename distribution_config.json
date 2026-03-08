@@ -47,6 +47,15 @@
       "display": "R_30_90 random mix A=30 B=90"
     },
     {
+      "name": "R_30_80",
+      "pattern": "random_mix",
+      "means": {
+        "A": 30,
+        "B": 80
+      },
+      "display": "R_30_80 random mix A=30 B=80"
+    },
+    {
       "name": "M_10",
       "pattern": "ab",
       "means": {
@@ -155,6 +164,51 @@
       "display": "O_10_90 OOD train A=10 test B=90"
     },
     {
+      "name": "O_90_10",
+      "pattern": "ab",
+      "means": {
+        "A": 90,
+        "B": 10
+      },
+      "display": "O_90_10 OOD train A=90 test B=10"
+    },
+    {
+      "name": "O_30_80",
+      "pattern": "ab",
+      "means": {
+        "A": 30,
+        "B": 80
+      },
+      "display": "O_30_80 OOD train A=30 test B=80"
+    },
+    {
+      "name": "O_60_20",
+      "pattern": "ab",
+      "means": {
+        "A": 60,
+        "B": 20
+      },
+      "display": "O_60_20 OOD train A=60 test B=20"
+    },
+    {
+      "name": "O_10_120",
+      "pattern": "ab",
+      "means": {
+        "A": 10,
+        "B": 120
+      },
+      "display": "O_10_120 OOD train A=10 test B=120"
+    },
+    {
+      "name": "O_120_10",
+      "pattern": "ab",
+      "means": {
+        "A": 120,
+        "B": 10
+      },
+      "display": "O_120_10 OOD train A=120 test B=10"
+    },
+    {
       "name": "O_30_90",
       "pattern": "ab",
       "means": {
@@ -209,6 +263,15 @@
       "display": "F1_10_90 forgetting train A,B test A"
     },
     {
+      "name": "F1_90_10",
+      "pattern": "aba",
+      "means": {
+        "A": 90,
+        "B": 10
+      },
+      "display": "F1_90_10 forgetting train A,B test A"
+    },
+    {
       "name": "F1_30_90",
       "pattern": "aba",
       "means": {
@@ -261,6 +324,15 @@
         "B": 90
       },
       "display": "F2_10_90 forgetting train A,B test A,B"
+    },
+    {
+      "name": "F2_30_80",
+      "pattern": "abba",
+      "means": {
+        "A": 30,
+        "B": 80
+      },
+      "display": "F2_30_80 forgetting train A,B test A,B"
     },
     {
       "name": "F2_30_90",
@@ -319,6 +391,36 @@
         "C": 90
       },
       "display": "G_30_60_90 generalization train A,B test C"
+    },
+    {
+      "name": "G_10_90_50",
+      "pattern": "abc",
+      "means": {
+        "A": 10,
+        "B": 90,
+        "C": 50
+      },
+      "display": "G_10_90_50 generalization train A,B test C"
+    },
+    {
+      "name": "G_10_40_90",
+      "pattern": "abc",
+      "means": {
+        "A": 10,
+        "B": 40,
+        "C": 90
+      },
+      "display": "G_10_40_90 generalization train A,B test C"
+    },
+    {
+      "name": "G_40_80_10",
+      "pattern": "abc",
+      "means": {
+        "A": 40,
+        "B": 80,
+        "C": 10
+      },
+      "display": "G_40_80_10 generalization train A,B test C"
     },
     {
       "name": "G_10_90_60",

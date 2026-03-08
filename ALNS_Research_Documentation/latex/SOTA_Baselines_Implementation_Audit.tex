@@ -1,0 +1,137 @@
+﻿\documentclass[12pt,a4paper]{ctexart}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=1.5em}
+\setlist[enumerate]{leftmargin=1.8em}
+
+\title{NOVA\_EDRL 对比基线实现审计报告\\(RARL / PLR\_UED / CQL\_DQN / CaDM)}
+\author{34959\_RL 项目组}
+\date{2026-03-03}
+
+\begin{document}
+\maketitle
+
+\section{审计目标与范围}
+本报告用于回答两个问题：
+\begin{enumerate}
+  \item 当前代码库中，四个经典论文基线是否已经在 \texttt{master} 链路中可运行；
+  \item 这些实现与论文原始算法之间的一致性、近似程度与局限是什么。
+\end{enumerate}
+
+审计范围仅覆盖项目内已接入代码路径，不覆盖外部仓库二次复现训练。
+
+\section{总体结论（先给结论）}
+\begin{itemize}
+  \item \textbf{RARL}：已接入为 \textbf{外层目标函数近似基线}（非完整双智能体零和训练）。
+  \item \textbf{PLR/UED}：已接入为 \textbf{学习潜力目标近似基线}（非原论文 level replay 全机制）。
+  \item \textbf{CQL\_DQN}：已接入为 \textbf{可训练的离散 CQL 内层算法}（实现完整的 conservative 正则项）。
+  \item \textbf{CaDM}：已接入为 \textbf{上下文增强观测近似基线}（非 model-based dynamics 学习全框架）。
+\end{itemize}
+
+一句话总结：当前实现已经满足“与 NOVA\_EDRL 并列可跑、可对比”的工程目标，但其中 RARL/PLR/CaDM 属于\textbf{工程近似基线}，并非论文原版 1:1 复现。
+
+\section{Master 集成状态}
+\subsection{算法入口}
+在 \texttt{codes/Dynamic\_master34959.py} 中，算法菜单新增：
+\begin{itemize}
+  \item \texttt{18 = RARL}
+  \item \texttt{19 = PLR\_UED}
+  \item \texttt{20 = CQL\_DQN}（支持别名 \texttt{CQL}）
+  \item \texttt{21 = CADM}
+\end{itemize}
+
+\subsection{路由行为}
+\begin{itemize}
+  \item \texttt{RARL / PLR\_UED}：走 \texttt{run\_outer\_reference\_pipeline()}，即 phase1 + 外层 phase2/3 + phase4 复用 master implement。
+  \item \texttt{CQL\_DQN}：走常规 master 路径，进入 \texttt{dynamic\_RL34959.py} 的内层 RL 模型构建分支。
+  \item \texttt{CADM}：映射到 \texttt{PPO\_LSTM} 并开启 \texttt{RL\_CADM\_PROFILE=1}、\texttt{RL\_STAGE\_IN\_OBS=1}、\texttt{RL\_USE\_AUGMENTED\_OBS=1}。
+\end{itemize}
+
+\section{逐算法实现审计}
+\subsection{RARL（ICML 2017）}
+\paragraph{当前实现}
+\begin{itemize}
+  \item 外层策略模式：\texttt{ts}（Thompson Sampling bandit）。
+  \item 目标函数：\( \text{objective} = -J - \lambda_D D \)，在代码中对应 \texttt{objective\_mode=rarl}。
+  \item 不启用 NOVA\_EDRL 的动作塌缩惩罚项（\(B\)、floor soft/hard）。
+\end{itemize}
+
+\paragraph{与论文差异}
+原始 RARL 是主策略与对抗扰动策略的双智能体博弈优化；当前实现是“外层 difficulty 目标”的单策略近似，不含显式 adversary policy network。
+
+\paragraph{可比性评估}
+可用于回答“纯对抗偏难目标”对内层训练稳定性的影响，但不应表述为“完整 RARL 复现”。
+
+\subsection{PLR/UED（ICML 2021）}
+\paragraph{当前实现}
+\begin{itemize}
+  \item 外层策略模式：\texttt{ts}。
+  \item 目标函数：\( w_{\Delta J}|\Delta J| + w_J J - \lambda_D D \)，即 \texttt{objective\_mode=plr}。
+  \item 默认开启课程混合（\texttt{--outer-curriculum-enable}）。
+\end{itemize}
+
+\paragraph{与论文差异}
+原始 PLR/UED 强调 level 缓冲、优先级估计、重放调度；当前实现保留了“学习潜力导向”的核心思想，但不是 level-replay 机制等价实现。
+
+\paragraph{可比性评估}
+适合作为“learning-potential 驱动环境选择”基线，不应宣称为官方 PLR 框架等价复现。
+
+\subsection{CQL\_DQN（NeurIPS 2020）}
+\paragraph{当前实现}
+\begin{itemize}
+  \item 新增 \texttt{codes/robust\_rl/cql\_dqn.py}：\texttt{DiscreteCQLDQN} 继承 SB3 DQN。
+  \item 训练损失：
+  \[
+  L = L_{TD} + \alpha \left(\log\sum_a Q(s,a) - Q(s,a_{data})\right)
+  \]
+  \item 在 \texttt{dynamic\_RL34959.py} 中已接入 \texttt{CQL\_DQN/CQL} 分支并支持实现阶段 deterministic 推理开关。
+\end{itemize}
+
+\paragraph{与论文差异}
+这是离散动作场景下的 CQL 简化实现，未覆盖论文中的全部实验栈（如连续控制、数据集设定、完整超参扫描）。
+
+\paragraph{可比性评估}
+在本项目动作空间下属于“算法级实装基线”，可直接参与主实验矩阵。
+
+\subsection{CaDM（ICML 2020）}
+\paragraph{当前实现}
+\begin{itemize}
+  \item \texttt{CADM} 在 master 中映射为 \texttt{PPO\_LSTM} + 增强观测配置。
+  \item \texttt{dynamic\_RL34959.py} 已支持：阶段信息、上下文比特、历史堆叠、oracle context（phase/mean）注入。
+\end{itemize}
+
+\paragraph{与论文差异}
+原始 CaDM 是 model-based dynamics + latent context 推断框架；当前实现是“上下文感知输入增强”的 model-free 近似，不含显式动力学模型学习器。
+
+\paragraph{可比性评估}
+可用于检验“只增强上下文表征”对 OOD 的帮助，但不应作为原版 CaDM 完整复现结论依据。
+
+\section{本地论文与代码资产状态}
+论文与仓库已下载至：
+\begin{center}
+\texttt{A:\\MYpython\\34959\_RL\\ALNS\_Research\_Documentation\\SOTA\_Baselines}
+\end{center}
+
+目录结构（每个算法均含 \texttt{papers/} 与 \texttt{repos/}）已就绪，可供后续引用与复现实验对照。
+
+\section{可直接用于论文写作的口径建议}
+\begin{itemize}
+  \item RARL、PLR/UED、CaDM 建议统一表述为：\textbf{paper-inspired engineering baselines}。
+  \item CQL\_DQN 可表述为：\textbf{discrete CQL implementation adapted to our environment}。
+  \item 对外比较时，应在实验设置章节明确“复现级别”与“偏差来源”。
+\end{itemize}
+
+\section{下一步建议（面向 SOTA 对比可信度）}
+\begin{enumerate}
+  \item 为 RARL 增加显式 adversary policy（至少扰动策略可学习），提升与论文一致性。
+  \item 为 PLR 增加 level buffer + priority 更新机制，区分 sample difficulty 与 performance gain。
+  \item 为 CaDM 增加 context encoder 与 dynamics predictor 的分离训练，形成真正 model-based 版本。
+  \item 固化统一实验模板（相同 seed、预算、停止准则）后再输出最终对比图表。
+\end{enumerate}
+
+\end{document}

@@ -142,6 +142,95 @@ def _calc_metrics(
     return avg_reward, action0_rate, action1_rate, minority_rate, minority_action
 
 
+def _trace_train_stage_family(row: Dict[str, str]) -> str:
+    family = str(row.get("stage_family", "")).strip().lower()
+    if family:
+        return family
+    stage = str(row.get("stage", "")).strip().lower()
+    if "removal" in stage:
+        return "removal"
+    if "insertion" in stage:
+        return "insertion"
+    return ""
+
+
+def _trace_is_train_finish_row(row: Dict[str, str]) -> bool:
+    phase_val = str(row.get("phase", "")).strip().lower()
+    if phase_val not in {"train", "phase1"}:
+        return False
+    stage = str(row.get("stage", "")).strip().lower()
+    if not stage.startswith("finish_"):
+        return False
+    reward = _safe_float(row.get("reward", ""))
+    if not _is_finite(reward):
+        return False
+    if reward <= -9999999.0:
+        return False
+    action_val = str(row.get("action", "")).strip()
+    if action_val not in {"0", "1"}:
+        return False
+    return True
+
+
+def _calc_saber_v1_trace_metrics(
+    trace_rows: List[Dict[str, str]],
+    hard_threshold: int,
+    easy_threshold: int,
+) -> Dict[str, float]:
+    hard_rewards: List[float] = []
+    hard_action1_reward: List[float] = []
+    hard_action1: List[float] = []
+    hard_wait: List[float] = []
+    easy_wait_reward: List[float] = []
+    easy_action1: List[float] = []
+    removal_rewards: List[float] = []
+    removal_count = 0
+    hard_count = 0
+    easy_count = 0
+    insertion_hard_rewards: List[float] = []
+    insertion_hard_count = 0
+    for row in trace_rows:
+        if not _trace_is_train_finish_row(row):
+            continue
+        family = _trace_train_stage_family(row)
+        reward = _safe_float(row.get("reward", ""))
+        action_val = str(row.get("action", "")).strip()
+        action1 = 1.0 if action_val == "1" else 0.0
+        action0 = 1.0 if action_val == "0" else 0.0
+        severity = _safe_float(row.get("severity", ""))
+        if family == "removal":
+            removal_count += 1
+            removal_rewards.append(float(reward))
+            if _is_finite(severity) and float(severity) >= float(hard_threshold):
+                hard_count += 1
+                hard_rewards.append(float(reward))
+                hard_action1_reward.append(float(action1 * reward))
+                hard_action1.append(float(action1))
+                hard_wait.append(float(action0))
+            if _is_finite(severity) and float(severity) <= float(easy_threshold):
+                easy_count += 1
+                easy_wait_reward.append(float(action0 * reward))
+                easy_action1.append(float(action1))
+        elif family == "insertion":
+            if _is_finite(severity) and float(severity) >= float(hard_threshold):
+                insertion_hard_count += 1
+                insertion_hard_rewards.append(float(reward))
+    return {
+        "removal_count": float(removal_count),
+        "hard_count": float(hard_count),
+        "easy_count": float(easy_count),
+        "insertion_hard_count": float(insertion_hard_count),
+        "avg_reward_removal": _safe_mean(removal_rewards, default=float("nan")),
+        "Q_hard_rem": _safe_mean(hard_rewards, default=float("nan")),
+        "R_hard_rem": _safe_mean(hard_action1_reward, default=float("nan")),
+        "P_easy_wait": _safe_mean(easy_wait_reward, default=float("nan")),
+        "hard_action1_rate": _safe_mean(hard_action1, default=float("nan")),
+        "hard_wait_share": _safe_mean(hard_wait, default=float("nan")),
+        "easy_action1_rate": _safe_mean(easy_action1, default=float("nan")),
+        "M_ins": _safe_mean(insertion_hard_rewards, default=float("nan")),
+    }
+
+
 def _is_finite(x: float) -> bool:
     return (x == x) and math.isfinite(x)
 
@@ -1706,8 +1795,8 @@ def parse_args() -> argparse.Namespace:
         "--objective-mode",
         type=str,
         default="edrl",
-        choices=["edrl", "rarl", "plr", "saber_v0"],
-        help="edrl: +w_a*(1-J_frozen)+w_m*G_minority-D (phase2/phase3); rarl: pure adversarial (-J); plr: learning potential (|dJ|); saber_v0: learnability-gated LP+J+novelty",
+        choices=["edrl", "rarl", "plr", "saber_v0", "saber_v1"],
+        help="edrl: +w_a*(1-J_frozen)+w_m*G_minority-D (phase2/phase3); rarl: pure adversarial (-J); plr: learning potential (|dJ|); saber_v0: learnability-gated LP+J+novelty; saber_v1: hardest-slice gated score over train trace removal rows",
     )
     parser.add_argument(
         "--edrl-version",
@@ -1810,6 +1899,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--saber-v0-novelty-weight", type=float, default=0.15, help="V0 weight on novelty inside gated score")
     parser.add_argument("--saber-v0-j-center", type=float, default=0.55, help="V0 learnability gate center over J_frozen")
     parser.add_argument("--saber-v0-j-sigma", type=float, default=0.18, help="V0 learnability gate sigma over J_frozen")
+    parser.add_argument("--saber-v1-hard-threshold", type=int, default=5, help="V1 hard severity threshold over train trace removal rows")
+    parser.add_argument("--saber-v1-easy-threshold", type=int, default=3, help="V1 easy severity threshold over train trace removal rows")
+    parser.add_argument("--saber-v1-q-weight", type=float, default=0.28, help="V1 weight on Q_hard_rem")
+    parser.add_argument("--saber-v1-r-weight", type=float, default=0.18, help="V1 weight on R_hard_rem")
+    parser.add_argument("--saber-v1-easy-weight", type=float, default=0.15, help="V1 weight on easy wait preservation")
+    parser.add_argument("--saber-v1-dq-weight", type=float, default=0.10, help="V1 weight on |dQ_hard_rem|")
+    parser.add_argument("--saber-v1-novelty-weight", type=float, default=0.05, help="V1 weight on novelty")
+    parser.add_argument("--saber-v1-no-success-weight", type=float, default=0.08, help="V1 light penalty when hard slice is present but yields no successful hard recovery (R_hard<=0)")
+    parser.add_argument("--saber-v1-j-center", type=float, default=0.55, help="V1 learnability gate center over J_frozen")
+    parser.add_argument("--saber-v1-j-sigma", type=float, default=0.18, help="V1 learnability gate sigma over J_frozen")
+    parser.add_argument("--saber-v1-success-r-threshold", type=float, default=0.01, help="V1 success trigger threshold on R_hard_rem for sticky replay exploitation")
+    parser.add_argument("--saber-v1-sticky-replay-iters", type=int, default=3, help="V1 exploitation: force replay the last successful hard candidate for up to this many later phase3 iterations")
+    parser.add_argument("--saber-v1-success-budget-mult", type=float, default=2.0, help="V1 exploitation: when sticky replay is active, multiply the candidate n_files / inner budget by this factor")
+    parser.add_argument("--saber-v1-success-min-num-files", type=int, default=15, help="V1 exploitation: minimum n_files to use when sticky replay is active")
     parser.add_argument(
         "--edrl-v3-dj-weight",
         type=float,
@@ -2117,6 +2220,7 @@ def main() -> None:
 
     training_csv = run_root / "rl_training.csv"
     decision_csv = run_root / "rl_decision.csv"
+    trace_csv = run_root / "rl_trace.csv"
     path_map_csv = post_stage_dir / "outer_path_map.csv"
     generation_csv = post_stage_dir / "outer_generation.csv"
     curriculum_csv = post_stage_dir / "outer_curriculum.csv"
@@ -2209,6 +2313,7 @@ def main() -> None:
     edrl_version = str(args.edrl_version).strip().lower()
     policy_mode = str(args.policy_mode).strip().lower()
     saber_v0_mode = objective_mode == "saber_v0"
+    saber_v1_mode = objective_mode == "saber_v1"
     if policy_mode == "rarl_dqn" and objective_mode != "rarl":
         if int(args.rarl_force_objective) == 1:
             print(
@@ -2223,7 +2328,7 @@ def main() -> None:
             )
     edrl_v3_mode = objective_mode == "edrl" and edrl_version == "v3"
     edrl_v4_mode = objective_mode == "edrl" and edrl_version == "v4"
-    plr_replay_enabled = bool(args.plr_level_replay) and objective_mode in {"plr", "saber_v0"}
+    plr_replay_enabled = bool(args.plr_level_replay) and objective_mode in {"plr", "saber_v0", "saber_v1"}
     edrl_v3_replay_enabled = bool(args.edrl_v3_level_replay) and edrl_v3_mode
     edrl_v4_replay_enabled = bool(args.edrl_v4_level_replay) and edrl_v4_mode
     level_replay_enabled = bool(plr_replay_enabled or edrl_v3_replay_enabled or edrl_v4_replay_enabled)
@@ -2295,6 +2400,8 @@ def main() -> None:
     _buffer_default_name = "outer_policy_plr_buffer.json"
     if saber_v0_mode and (not edrl_v3_replay_enabled) and (not edrl_v4_replay_enabled):
         _buffer_default_name = "outer_policy_saber_v0_buffer.json"
+    if saber_v1_mode and (not edrl_v3_replay_enabled) and (not edrl_v4_replay_enabled):
+        _buffer_default_name = "outer_policy_saber_v1_buffer.json"
     if edrl_v3_replay_enabled and (not plr_replay_enabled):
         _buffer_default_name = "outer_policy_edrl_v3_buffer.json"
     if edrl_v4_replay_enabled and (not plr_replay_enabled) and (not edrl_v3_replay_enabled):
@@ -2379,6 +2486,34 @@ def main() -> None:
             f"ema_alpha={float(plr_priority_ema_alpha):.4f} "
             f"min_weight={float(plr_min_weight):.6f} buffer={plr_buffer_path} "
             f"loaded_levels={int(len(plr_buffer))}"
+        )
+    elif saber_v1_mode:
+        print(
+            f"[OUTER][INIT] objective_mode=saber_v1 formula: "
+            f"I(hard_count>0) * L(J_frozen) * (w_q*Q_hard_rem + w_r*R_hard_rem + "
+            f"w_e*P_easy_wait + w_dq*|dQ_hard_rem| + w_n*novelty) - D - "
+            f"w_ns*I(R_hard<=0)*wait_hard "
+            f"(w_q={float(args.saber_v1_q_weight):.4f},"
+            f"w_r={float(args.saber_v1_r_weight):.4f},"
+            f"w_e={float(args.saber_v1_easy_weight):.4f},"
+            f"w_dq={float(args.saber_v1_dq_weight):.4f},"
+            f"w_n={float(args.saber_v1_novelty_weight):.4f},"
+            f"w_ns={float(args.saber_v1_no_success_weight):.4f},"
+            f"hard>={int(args.saber_v1_hard_threshold)},"
+            f"easy<={int(args.saber_v1_easy_threshold)},"
+            f"j_center={float(args.saber_v1_j_center):.4f},"
+            f"j_sigma={float(args.saber_v1_j_sigma):.4f})"
+        )
+        print(
+            f"[OUTER][INIT] saber_v1_replay={int(plr_replay_enabled)} "
+            f"p_new={float(plr_p_new):.4f} buffer_size={int(plr_buffer_size)} "
+            f"ema_alpha={float(plr_priority_ema_alpha):.4f} "
+            f"min_weight={float(plr_min_weight):.6f} buffer={plr_buffer_path} "
+            f"loaded_levels={int(len(plr_buffer))} "
+            f"success_r>={float(args.saber_v1_success_r_threshold):.4f} "
+            f"sticky_iters={int(args.saber_v1_sticky_replay_iters)} "
+            f"budget_mult={float(args.saber_v1_success_budget_mult):.2f} "
+            f"min_n={int(args.saber_v1_success_min_num_files)}"
         )
     else:
         if edrl_v3_mode:
@@ -2531,6 +2666,7 @@ def main() -> None:
     policy_last_minority_rate = float("nan")
     policy_last_objective = 0.0
     policy_last_entropy = float("nan")
+    policy_last_saber_v1_q_hard = float("nan")
     rarl_window = max(1, int(args.rarl_state_window))
     rarl_recent_j: deque = deque(maxlen=int(rarl_window))
     rarl_recent_action1: deque = deque(maxlen=int(rarl_window))
@@ -2643,6 +2779,10 @@ def main() -> None:
 
     phase3_topk_ids: List[int] = []
     phase3_topk_warm_remaining = 0
+    saber_v1_sticky_action: Optional[Dict[str, object]] = None
+    saber_v1_sticky_signature = ""
+    saber_v1_sticky_remaining = 0
+    saber_v1_sticky_trigger_iter = -1
     if phase_mode == "phase3" and phase_iter_count.get("phase3", 0) <= 0 and phase3_topk_k > 0:
         phase3_topk_ids = _compute_phase2_topk_action_ids(train_rows, phase3_topk_k)
         phase3_topk_warm_remaining = int(phase3_topk_warmup_iters) if phase3_topk_ids else 0
@@ -2676,6 +2816,7 @@ def main() -> None:
                 policy_last_minority_rate = _safe_float(row.get("minority_rate", ""))
                 policy_last_objective = _safe_float(row.get("objective_score", ""))
                 policy_last_entropy = _safe_float(row.get("policy_entropy", ""))
+                policy_last_saber_v1_q_hard = _safe_float(row.get("saber_v1_q_hard", ""))
                 if not _is_finite(policy_last_entropy):
                     policy_last_entropy = _binary_entropy01(policy_last_action1_rate)
                 break
@@ -2750,8 +2891,41 @@ def main() -> None:
                 total_iters=int(args.iterations),
             )
         force_topk_pick = False
+        saber_v1_sticky_active = False
+        saber_v1_success_trigger = 0
+        saber_v1_budget_boost = 1.0
+        saber_v1_budget_num_files = 0
+        saber_v1_sticky_remaining_before = int(saber_v1_sticky_remaining)
         if (
-            str(iter_phase).strip().lower() == "phase3"
+            saber_v1_mode
+            and str(iter_phase).strip().lower() == "phase3"
+            and int(saber_v1_sticky_remaining) > 0
+            and saber_v1_sticky_action is not None
+        ):
+            sticky_sig = str(saber_v1_sticky_signature or _action_signature(saber_v1_sticky_action))
+            sticky_idx = int(action_to_idx.get(sticky_sig, -1))
+            if sticky_idx in allowed_set:
+                action_idx = int(sticky_idx)
+                action = _materialize_action_from_template(dict(saber_v1_sticky_action))
+                n_seen_sticky, entry_score_sticky, n_sampled_sticky = _plr_entry_stats(plr_buffer, action)
+                plr_ctx = {
+                    "source": "sticky_replay",
+                    "buffer_size": int(len(plr_buffer)),
+                    "entry_index": "",
+                    "entry_weight": "",
+                    "entry_score_ema": float(entry_score_sticky),
+                    "sticky_trigger_iter": int(saber_v1_sticky_trigger_iter),
+                    "sticky_remaining_before": int(saber_v1_sticky_remaining),
+                    "sticky_n_seen": int(n_seen_sticky),
+                    "sticky_n_sampled": int(n_sampled_sticky),
+                }
+                iter_action_source = "saber_v1_sticky_replay"
+                saber_v1_sticky_active = True
+                saber_v1_sticky_remaining = max(0, int(saber_v1_sticky_remaining) - 1)
+                force_topk_pick = True
+        if (
+            (not force_topk_pick)
+            and str(iter_phase).strip().lower() == "phase3"
             and int(phase3_topk_warm_remaining) > 0
             and phase3_topk_ids
         ):
@@ -2892,7 +3066,21 @@ def main() -> None:
         action_num_files = int(action["num_files"])
         if str(iter_phase).strip().lower() == "phase2" and int(phase2_fixed_num_files) > 0:
             action_num_files = int(phase2_fixed_num_files)
+        if saber_v1_mode and bool(saber_v1_sticky_active):
+            boosted_n = int(action_num_files)
+            boost_mult = max(1.0, float(args.saber_v1_success_budget_mult))
+            if boost_mult > 1.0:
+                boosted_n = max(boosted_n, int(math.ceil(float(action_num_files) * float(boost_mult))))
+            boosted_n = max(boosted_n, int(max(0, int(args.saber_v1_success_min_num_files))))
+            boosted_n = max(int(min_files), min(int(max_files), int(boosted_n)))
+            saber_v1_budget_boost = float(boost_mult)
+            saber_v1_budget_num_files = int(boosted_n)
+            action_num_files = int(boosted_n)
         inner_budget_n = int(args.inner_fixed_n) if int(args.inner_fixed_n) > 0 else int(action_num_files)
+        if saber_v1_mode and bool(saber_v1_sticky_active):
+            inner_budget_n = max(int(inner_budget_n), int(action_num_files))
+        if int(saber_v1_budget_num_files) <= 0:
+            saber_v1_budget_num_files = int(action_num_files)
         if str(args.inner_stop_mode) == "fixed_n" and inner_budget_n <= 0:
             raise ValueError("inner fixed N budget must be > 0")
         dynamic_table_base = 0 if str(args.inner_stop_mode) == "fixed_n" else int(args.table_base)
@@ -2922,6 +3110,14 @@ def main() -> None:
                 f"buffer_size={int(plr_ctx.get('buffer_size', len(plr_buffer)))} "
                 f"entry_index={plr_ctx.get('entry_index', '')} "
                 f"entry_score_ema={plr_ctx.get('entry_score_ema', '')}"
+            )
+        if saber_v1_mode and bool(saber_v1_sticky_active):
+            print(
+                f"[OUTER][SABER-STICKY] iter={iter_tag} "
+                f"trigger_iter={int(saber_v1_sticky_trigger_iter)} "
+                f"remaining_after_pick={int(saber_v1_sticky_remaining)} "
+                f"boost_n={int(action_num_files)} "
+                f"budget_mult={float(saber_v1_budget_boost):.2f}"
             )
         if policy_mode == "ucb" and not iter_level_replay_enabled:
             print(
@@ -3042,6 +3238,7 @@ def main() -> None:
 
         iter_ckpt = ckpt_dir / f"theta_iter{iter_tag}.zip"
         before_decisions = len(_read_csv_rows(decision_csv))
+        before_trace = len(_read_csv_rows(trace_csv))
         before_training = len(_read_csv_rows(training_csv))
         before_paths = len(_read_csv_rows(path_map_csv))
 
@@ -3104,7 +3301,14 @@ def main() -> None:
 
         all_decisions = _read_csv_rows(decision_csv)
         new_decisions = all_decisions[before_decisions:]
+        all_trace_rows = _read_csv_rows(trace_csv)
+        new_trace_rows = all_trace_rows[before_trace:]
         avg_reward, action0_rate, action1_rate, minority_rate, minority_action = _calc_metrics(new_decisions)
+        saber_v1_metrics = _calc_saber_v1_trace_metrics(
+            new_trace_rows,
+            hard_threshold=int(args.saber_v1_hard_threshold),
+            easy_threshold=int(args.saber_v1_easy_threshold),
+        )
         iter_policy_entropy = _binary_entropy01(action1_rate)
         new_training_rows = len(_read_csv_rows(training_csv)) - before_training
 
@@ -3188,6 +3392,29 @@ def main() -> None:
         saber_v0_term_lp_j = 0.0
         saber_v0_term_novelty = 0.0
         saber_v0_term_feasibility = 0.0
+        saber_v1_learnability = 0.0
+        saber_v1_novelty = 0.0
+        saber_v1_n_seen = 0
+        saber_v1_n_sampled = 0
+        saber_v1_entry_score = 0.0
+        saber_v1_hard_count = 0
+        saber_v1_easy_count = 0
+        saber_v1_q_hard = float("nan")
+        saber_v1_r_hard = float("nan")
+        saber_v1_p_easy = float("nan")
+        saber_v1_m_ins = float("nan")
+        saber_v1_hard_action1_rate = float("nan")
+        saber_v1_hard_wait_share = float("nan")
+        saber_v1_easy_action1_rate = float("nan")
+        saber_v1_dq_hard = 0.0
+        saber_v1_term_q_hard = 0.0
+        saber_v1_term_r_hard = 0.0
+        saber_v1_term_p_easy = 0.0
+        saber_v1_term_dq_hard = 0.0
+        saber_v1_term_novelty = 0.0
+        saber_v1_no_success_flag = 0.0
+        saber_v1_term_no_success = 0.0
+        saber_v1_term_feasibility = 0.0
         phase2_j_frozen_source = "na"
         objective_formula = str(objective_mode)
         if objective_mode == "rarl":
@@ -3261,6 +3488,89 @@ def main() -> None:
             floor_soft_penalty = 0.0
             floor_hard_penalty = 0.0
             objective_formula = "saber_v0"
+        elif objective_mode == "saber_v1":
+            if str(iter_phase).strip().lower() == "phase2":
+                phase2_j_frozen = max(0.0, min(1.0, float(j_val)))
+                phase2_j_frozen_source = "phase2_current_eval"
+            else:
+                fallback_frozen = (
+                    float(phase2_frozen_global_mean)
+                    if _is_finite(float(phase2_frozen_global_mean))
+                    else max(0.0, min(1.0, float(j_val)))
+                )
+                phase2_j_frozen = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(
+                            _lookup_phase2_frozen_mean(
+                                stats=phase2_frozen_stats,
+                                action=action,
+                                fallback=float(fallback_frozen),
+                            )
+                        ),
+                    ),
+                )
+                phase2_j_frozen_source = "phase2_lookup"
+
+            sigma = max(1e-6, float(args.saber_v1_j_sigma))
+            z = (float(phase2_j_frozen) - float(args.saber_v1_j_center)) / sigma
+            saber_v1_learnability = float(math.exp(-0.5 * (z ** 2.0)))
+            n_seen, entry_score, n_sampled = _plr_entry_stats(plr_buffer, action)
+            saber_v1_n_seen = int(n_seen)
+            saber_v1_entry_score = float(entry_score)
+            saber_v1_n_sampled = int(n_sampled)
+            saber_v1_novelty = float(1.0 / math.sqrt(1.0 + float(max(0, n_seen))))
+            saber_v1_hard_count = int(_finite_or(saber_v1_metrics.get("hard_count", 0.0), 0.0))
+            saber_v1_easy_count = int(_finite_or(saber_v1_metrics.get("easy_count", 0.0), 0.0))
+            saber_v1_q_hard = _safe_float(saber_v1_metrics.get("Q_hard_rem", float("nan")))
+            saber_v1_r_hard = _safe_float(saber_v1_metrics.get("R_hard_rem", float("nan")))
+            saber_v1_p_easy = _safe_float(saber_v1_metrics.get("P_easy_wait", float("nan")))
+            saber_v1_m_ins = _safe_float(saber_v1_metrics.get("M_ins", float("nan")))
+            saber_v1_hard_action1_rate = _safe_float(saber_v1_metrics.get("hard_action1_rate", float("nan")))
+            saber_v1_hard_wait_share = _safe_float(saber_v1_metrics.get("hard_wait_share", float("nan")))
+            saber_v1_easy_action1_rate = _safe_float(saber_v1_metrics.get("easy_action1_rate", float("nan")))
+            if _is_finite(saber_v1_q_hard) and _is_finite(policy_last_saber_v1_q_hard):
+                saber_v1_dq_hard = float(saber_v1_q_hard) - float(policy_last_saber_v1_q_hard)
+            else:
+                saber_v1_dq_hard = 0.0
+            saber_v1_term_q_hard = float(args.saber_v1_q_weight) * float(_finite_or(saber_v1_q_hard, 0.0))
+            saber_v1_term_r_hard = float(args.saber_v1_r_weight) * float(_finite_or(saber_v1_r_hard, 0.0))
+            saber_v1_term_p_easy = float(args.saber_v1_easy_weight) * float(_finite_or(saber_v1_p_easy, 0.0))
+            saber_v1_term_dq_hard = float(args.saber_v1_dq_weight) * abs(float(saber_v1_dq_hard))
+            saber_v1_term_novelty = float(args.saber_v1_novelty_weight) * float(saber_v1_novelty)
+            saber_v1_no_success_flag = (
+                1.0
+                if (
+                    int(saber_v1_hard_count) > 0
+                    and float(_finite_or(saber_v1_r_hard, 0.0)) <= 1e-12
+                )
+                else 0.0
+            )
+            saber_v1_term_no_success = (
+                float(args.saber_v1_no_success_weight)
+                * float(saber_v1_no_success_flag)
+                * float(_finite_or(saber_v1_hard_wait_share, 0.0))
+            )
+            saber_v1_term_feasibility = float(d_penalty)
+            hard_gate = 1.0 if int(saber_v1_hard_count) > 0 else 0.0
+            objective = (
+                float(hard_gate)
+                * float(saber_v1_learnability)
+                * (
+                    float(saber_v1_term_q_hard)
+                    + float(saber_v1_term_r_hard)
+                    + float(saber_v1_term_p_easy)
+                    + float(saber_v1_term_dq_hard)
+                    + float(saber_v1_term_novelty)
+                )
+                - float(saber_v1_term_no_success)
+                - float(saber_v1_term_feasibility)
+            )
+            b_val = 0.0
+            floor_soft_penalty = 0.0
+            floor_hard_penalty = 0.0
+            objective_formula = "saber_v1"
         else:
             if phase2_difficulty_objective:
                 # Unified phase2/phase3 objective: challenge + minority gain - feasibility.
@@ -3376,6 +3686,7 @@ def main() -> None:
                 and phase2_difficulty_objective
             )
             or objective_mode == "saber_v0"
+            or objective_mode == "saber_v1"
         ) and str(iter_phase).strip().lower() == "phase2":
             _update_phase2_frozen_stats(
                 stats=phase2_frozen_stats,
@@ -3492,6 +3803,17 @@ def main() -> None:
                 _save_json_state(rarl_dqn_state_path, rarl_dqn_state)
 
         plr_update: Dict[str, object] = {}
+        if (
+            saber_v1_mode
+            and int(saber_v1_hard_count) > 0
+            and float(_finite_or(saber_v1_r_hard, 0.0)) >= float(args.saber_v1_success_r_threshold)
+        ):
+            saber_v1_sticky_action = dict(_action_template(action))
+            saber_v1_sticky_signature = _action_signature(action)
+            saber_v1_sticky_remaining = max(0, int(args.saber_v1_sticky_replay_iters))
+            saber_v1_sticky_trigger_iter = int(iter_idx)
+            saber_v1_success_trigger = 1
+
         if iter_level_replay_enabled:
             plr_update = _update_plr_buffer(
                 replay_entries=plr_buffer,
@@ -3502,13 +3824,13 @@ def main() -> None:
             )
             _save_plr_buffer(plr_buffer_path, plr_buffer)
             src = str(plr_ctx.get("source", "policy")).strip().lower()
-            if src in {"new", "replay"}:
+            if src in {"new", "replay", "sticky_replay"}:
                 plr_total_samples += 1
                 if src == "new":
                     plr_new_samples += 1
                 else:
                     plr_replay_samples += 1
-                plr_recent_sources.append(src)
+                plr_recent_sources.append("replay" if src == "sticky_replay" else src)
             if plr_total_samples > 0:
                 plr_replay_ratio = float(plr_replay_samples) / float(plr_total_samples)
             if len(plr_recent_sources) > 0:
@@ -3634,6 +3956,36 @@ def main() -> None:
                 "saber_v0_term_lp_j",
                 "saber_v0_term_novelty",
                 "saber_v0_term_feasibility",
+                "saber_v1_learnability",
+                "saber_v1_novelty",
+                "saber_v1_n_seen",
+                "saber_v1_n_sampled",
+                "saber_v1_entry_score",
+                "saber_v1_hard_count",
+                "saber_v1_easy_count",
+                "saber_v1_q_hard",
+                "saber_v1_r_hard",
+                "saber_v1_p_easy",
+                "saber_v1_m_ins",
+                "saber_v1_hard_action1_rate",
+                "saber_v1_hard_wait_share",
+                "saber_v1_easy_action1_rate",
+                "saber_v1_dq_hard",
+                "saber_v1_term_q_hard",
+                "saber_v1_term_r_hard",
+                "saber_v1_term_p_easy",
+                "saber_v1_term_dq_hard",
+                "saber_v1_term_novelty",
+                "saber_v1_no_success_flag",
+                "saber_v1_term_no_success",
+                "saber_v1_term_feasibility",
+                "saber_v1_success_trigger",
+                "saber_v1_sticky_active",
+                "saber_v1_sticky_remaining_before",
+                "saber_v1_sticky_remaining_after",
+                "saber_v1_sticky_trigger_iter",
+                "saber_v1_budget_boost",
+                "saber_v1_budget_num_files",
                 "path_missing",
                 "path_total",
                 "path_read_ok",
@@ -3719,6 +4071,36 @@ def main() -> None:
                 "saber_v0_term_lp_j": float(saber_v0_term_lp_j),
                 "saber_v0_term_novelty": float(saber_v0_term_novelty),
                 "saber_v0_term_feasibility": float(saber_v0_term_feasibility),
+                "saber_v1_learnability": float(saber_v1_learnability),
+                "saber_v1_novelty": float(saber_v1_novelty),
+                "saber_v1_n_seen": int(saber_v1_n_seen),
+                "saber_v1_n_sampled": int(saber_v1_n_sampled),
+                "saber_v1_entry_score": float(saber_v1_entry_score),
+                "saber_v1_hard_count": int(saber_v1_hard_count),
+                "saber_v1_easy_count": int(saber_v1_easy_count),
+                "saber_v1_q_hard": "" if _is_nan(saber_v1_q_hard) else float(saber_v1_q_hard),
+                "saber_v1_r_hard": "" if _is_nan(saber_v1_r_hard) else float(saber_v1_r_hard),
+                "saber_v1_p_easy": "" if _is_nan(saber_v1_p_easy) else float(saber_v1_p_easy),
+                "saber_v1_m_ins": "" if _is_nan(saber_v1_m_ins) else float(saber_v1_m_ins),
+                "saber_v1_hard_action1_rate": "" if _is_nan(saber_v1_hard_action1_rate) else float(saber_v1_hard_action1_rate),
+                "saber_v1_hard_wait_share": "" if _is_nan(saber_v1_hard_wait_share) else float(saber_v1_hard_wait_share),
+                "saber_v1_easy_action1_rate": "" if _is_nan(saber_v1_easy_action1_rate) else float(saber_v1_easy_action1_rate),
+                "saber_v1_dq_hard": float(saber_v1_dq_hard),
+                "saber_v1_term_q_hard": float(saber_v1_term_q_hard),
+                "saber_v1_term_r_hard": float(saber_v1_term_r_hard),
+                "saber_v1_term_p_easy": float(saber_v1_term_p_easy),
+                "saber_v1_term_dq_hard": float(saber_v1_term_dq_hard),
+                "saber_v1_term_novelty": float(saber_v1_term_novelty),
+                "saber_v1_no_success_flag": float(saber_v1_no_success_flag),
+                "saber_v1_term_no_success": float(saber_v1_term_no_success),
+                "saber_v1_term_feasibility": float(saber_v1_term_feasibility),
+                "saber_v1_success_trigger": int(saber_v1_success_trigger),
+                "saber_v1_sticky_active": int(saber_v1_sticky_active),
+                "saber_v1_sticky_remaining_before": int(saber_v1_sticky_remaining_before),
+                "saber_v1_sticky_remaining_after": int(saber_v1_sticky_remaining),
+                "saber_v1_sticky_trigger_iter": int(saber_v1_sticky_trigger_iter),
+                "saber_v1_budget_boost": float(saber_v1_budget_boost),
+                "saber_v1_budget_num_files": int(saber_v1_budget_num_files),
                 "path_missing": int(missing_paths),
                 "path_total": int(len(new_path_rows)),
                 "path_read_ok": int(read_ok_paths),
@@ -3850,6 +4232,36 @@ def main() -> None:
                 "saber_v0_term_lp_j": float(saber_v0_term_lp_j),
                 "saber_v0_term_novelty": float(saber_v0_term_novelty),
                 "saber_v0_term_feasibility": float(saber_v0_term_feasibility),
+                "saber_v1_learnability": float(saber_v1_learnability),
+                "saber_v1_novelty": float(saber_v1_novelty),
+                "saber_v1_n_seen": int(saber_v1_n_seen),
+                "saber_v1_n_sampled": int(saber_v1_n_sampled),
+                "saber_v1_entry_score": float(saber_v1_entry_score),
+                "saber_v1_hard_count": int(saber_v1_hard_count),
+                "saber_v1_easy_count": int(saber_v1_easy_count),
+                "saber_v1_q_hard": "" if _is_nan(saber_v1_q_hard) else float(saber_v1_q_hard),
+                "saber_v1_r_hard": "" if _is_nan(saber_v1_r_hard) else float(saber_v1_r_hard),
+                "saber_v1_p_easy": "" if _is_nan(saber_v1_p_easy) else float(saber_v1_p_easy),
+                "saber_v1_m_ins": "" if _is_nan(saber_v1_m_ins) else float(saber_v1_m_ins),
+                "saber_v1_hard_action1_rate": "" if _is_nan(saber_v1_hard_action1_rate) else float(saber_v1_hard_action1_rate),
+                "saber_v1_hard_wait_share": "" if _is_nan(saber_v1_hard_wait_share) else float(saber_v1_hard_wait_share),
+                "saber_v1_easy_action1_rate": "" if _is_nan(saber_v1_easy_action1_rate) else float(saber_v1_easy_action1_rate),
+                "saber_v1_dq_hard": float(saber_v1_dq_hard),
+                "saber_v1_term_q_hard": float(saber_v1_term_q_hard),
+                "saber_v1_term_r_hard": float(saber_v1_term_r_hard),
+                "saber_v1_term_p_easy": float(saber_v1_term_p_easy),
+                "saber_v1_term_dq_hard": float(saber_v1_term_dq_hard),
+                "saber_v1_term_novelty": float(saber_v1_term_novelty),
+                "saber_v1_no_success_flag": float(saber_v1_no_success_flag),
+                "saber_v1_term_no_success": float(saber_v1_term_no_success),
+                "saber_v1_term_feasibility": float(saber_v1_term_feasibility),
+                "saber_v1_success_trigger": int(saber_v1_success_trigger),
+                "saber_v1_sticky_active": int(saber_v1_sticky_active),
+                "saber_v1_sticky_remaining_before": int(saber_v1_sticky_remaining_before),
+                "saber_v1_sticky_remaining_after": int(saber_v1_sticky_remaining),
+                "saber_v1_sticky_trigger_iter": int(saber_v1_sticky_trigger_iter),
+                "saber_v1_budget_boost": float(saber_v1_budget_boost),
+                "saber_v1_budget_num_files": int(saber_v1_budget_num_files),
                 "inner_ppo_new_ent_coef": float(inner_ppo_new_ent_coef),
             },
         )
@@ -3862,7 +4274,7 @@ def main() -> None:
             f"processed_tables={processed_tables} processed_tables_dynamic={processed_tables_dynamic} "
             f"stop_reason={stop_reason}"
         )
-        if objective_formula in {"phase23_difficulty_minor_v1", "phase23_difficulty_minor_v3_lp", "phase23_plr_ued_v4", "saber_v0"}:
+        if objective_formula in {"phase23_difficulty_minor_v1", "phase23_difficulty_minor_v3_lp", "phase23_plr_ued_v4", "saber_v0", "saber_v1"}:
             if objective_formula == "phase23_plr_ued_v4":
                 print(
                     f"[OUTER][CHECK] iter={iter_tag} objective={objective:.6f} "
@@ -3891,6 +4303,18 @@ def main() -> None:
                     f"path_missing={missing_paths}/{len(new_path_rows)} "
                     f"path_read_ok={read_ok_paths}/{len(new_path_rows)}"
                 )
+            elif objective_formula == "saber_v1":
+                print(
+                    f"[OUTER][CHECK] iter={iter_tag} objective={objective:.6f} "
+                    f"(J_frozen={phase2_j_frozen:.6f},L={saber_v1_learnability:.6f},"
+                    f"Q_hard={_finite_or(saber_v1_q_hard, float('nan')):.6f},"
+                    f"R_hard={_finite_or(saber_v1_r_hard, float('nan')):.6f},"
+                    f"P_easy={_finite_or(saber_v1_p_easy, float('nan')):.6f},"
+                    f"|dQ|={abs(float(saber_v1_dq_hard)):.6f},"
+                    f"novelty={saber_v1_novelty:.6f},hard_n={saber_v1_hard_count},D={saber_v1_term_feasibility:.6f}) "
+                    f"path_missing={missing_paths}/{len(new_path_rows)} "
+                    f"path_read_ok={read_ok_paths}/{len(new_path_rows)}"
+                )
             else:
                 print(
                     f"[OUTER][CHECK] iter={iter_tag} objective={objective:.6f} "
@@ -3911,7 +4335,14 @@ def main() -> None:
                 f"path_missing={missing_paths}/{len(new_path_rows)} "
                 f"path_read_ok={read_ok_paths}/{len(new_path_rows)}"
             )
-        if objective_formula in {"phase23_difficulty_minor_v1", "phase23_difficulty_minor_v3_lp", "phase23_plr_ued_v4", "saber_v0"}:
+        if saber_v1_mode and int(saber_v1_success_trigger) == 1:
+            print(
+                f"[OUTER][SABER-SUCCESS] iter={iter_tag} "
+                f"R_hard={float(_finite_or(saber_v1_r_hard, 0.0)):.6f} "
+                f"sticky_iters={int(saber_v1_sticky_remaining)} "
+                f"signature={saber_v1_sticky_signature}"
+            )
+        if objective_formula in {"phase23_difficulty_minor_v1", "phase23_difficulty_minor_v3_lp", "phase23_plr_ued_v4", "saber_v0", "saber_v1"}:
             if objective_formula == "phase23_plr_ued_v4":
                 print(
                     f"[OUTER][OBJ] iter={iter_tag} phase={iter_phase} "
@@ -3972,6 +4403,37 @@ def main() -> None:
                     f"w_n={float(args.saber_v0_novelty_weight):.4f} "
                     f"j_center={float(args.saber_v0_j_center):.4f} "
                     f"j_sigma={float(args.saber_v0_j_sigma):.4f} "
+                    f"p_new_iter={float(plr_p_new_iter):.4f}"
+                )
+            elif objective_formula == "saber_v1":
+                print(
+                    f"[OUTER][OBJ] iter={iter_tag} phase={iter_phase} "
+                    f"objective = I(hard_n>0) * L(J_frozen) * (w_q*Q_hard + w_r*R_hard + "
+                    f"w_e*P_easy + w_dq*|dQ_hard| + w_n*novelty) - w_ns*I(no_success)*wait_hard - D | "
+                    f"J_frozen={phase2_j_frozen:.6f} source={phase2_j_frozen_source} "
+                    f"L={saber_v1_learnability:.6f} hard_n={int(saber_v1_hard_count)} easy_n={int(saber_v1_easy_count)} "
+                    f"Q_hard={_finite_or(saber_v1_q_hard, float('nan')):.6f} "
+                    f"R_hard={_finite_or(saber_v1_r_hard, float('nan')):.6f} "
+                    f"P_easy={_finite_or(saber_v1_p_easy, float('nan')):.6f} "
+                    f"wait_hard={_finite_or(saber_v1_hard_wait_share, float('nan')):.6f} "
+                    f"no_success={float(saber_v1_no_success_flag):.0f} "
+                    f"|dQ_hard|={abs(float(saber_v1_dq_hard)):.6f} "
+                    f"novelty={saber_v1_novelty:.6f}(n_seen={saber_v1_n_seen},n_sampled={saber_v1_n_sampled}) "
+                    f"term_no_success={saber_v1_term_no_success:.6f} "
+                    f"D={saber_v1_term_feasibility:.6f} "
+                    f"term_q={saber_v1_term_q_hard:.6f} "
+                    f"term_r={saber_v1_term_r_hard:.6f} "
+                    f"term_easy={saber_v1_term_p_easy:.6f} "
+                    f"term_dq={saber_v1_term_dq_hard:.6f} "
+                    f"term_novelty={saber_v1_term_novelty:.6f} "
+                    f"w_q={float(args.saber_v1_q_weight):.4f} "
+                    f"w_r={float(args.saber_v1_r_weight):.4f} "
+                    f"w_e={float(args.saber_v1_easy_weight):.4f} "
+                    f"w_dq={float(args.saber_v1_dq_weight):.4f} "
+                    f"w_n={float(args.saber_v1_novelty_weight):.4f} "
+                    f"w_ns={float(args.saber_v1_no_success_weight):.4f} "
+                    f"hard>={int(args.saber_v1_hard_threshold)} "
+                    f"easy<={int(args.saber_v1_easy_threshold)} "
                     f"p_new_iter={float(plr_p_new_iter):.4f}"
                 )
             else:
@@ -4037,6 +4499,8 @@ def main() -> None:
         policy_last_minority_rate = float(rho_eff)
         policy_last_objective = float(objective)
         policy_last_entropy = float(iter_policy_entropy)
+        if _is_finite(saber_v1_q_hard):
+            policy_last_saber_v1_q_hard = float(saber_v1_q_hard)
         if _is_finite(j_val):
             rarl_recent_j.append(float(j_val))
         if _is_finite(action1_rate):

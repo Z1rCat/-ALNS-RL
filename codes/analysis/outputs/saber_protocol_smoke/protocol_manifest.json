@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "hard_threshold": 5,
+  "easy_threshold": 3,
+  "lambda_fp": 0.2,
+  "primary_metrics": {
+    "Q_hard_rem": "mean reward on implement rows where stage_family=removal and severity>=hard_threshold",
+    "R_hard_rem": "mean of action1*reward on implement rows where stage_family=removal and severity>=hard_threshold",
+    "P_easy_action0": "mean of action0*reward on implement rows where severity<=easy_threshold",
+    "P_easy_waitlike": "mean of wait_like*reward on implement rows where severity<=easy_threshold",
+    "M_ins": "mean reward on implement rows where stage_family=insertion and severity>=hard_threshold",
+    "C_sel_tilde": "R_hard_rem - lambda_fp * easy_action1_rate"
+  }
+}

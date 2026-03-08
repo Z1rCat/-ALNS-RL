@@ -1,0 +1,539 @@
+% !TEX program = xelatex
+\documentclass[UTF8,11pt,a4paper]{ctexart}
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}
+
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlist[itemize]{topsep=2pt,itemsep=2pt,parsep=0pt,leftmargin=1.6em}
+\setlist[enumerate]{topsep=2pt,itemsep=2pt,parsep=0pt,leftmargin=1.8em}
+
+\title{NOVA\_EDRL：面向非平稳联运调度的双层环境设计强化学习\\论文初稿（中文）}
+\author{34959\_RL 项目组}
+\date{2026-03-03}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+针对非平稳联运调度中“训练分布与部署分布错位”导致的动作塌缩与泛化退化问题，本文提出一体化双层框架 NOVA\_EDRL。该框架在既有内层 RL+ALNS 求解器之外引入外层环境设计器，以“生成训练分布参数”作为显式决策变量，形成 Phase1 基线预训练、Phase2 冻结内层训练外层、Phase3 外内联合课程、Phase4 复用 Master implement 测试的四阶段闭环。方法上，本文的关键技术包括：1）外层动作空间严格参数化并移除 seed 动作维，避免伪相关优化；2）面向 Phase2 设计 hard-but-learnable 目标函数，在对抗强度、反塌缩增益与可学习性护栏之间实现可控平衡；3）保持 Phase3 原 EDRL 目标不变，保证与既有工程系统兼容；4）构建与 RARL、PLR/UED、CQL、CaDM 并列的多 SOTA 对照矩阵，并给出公式级映射与实现口径。本文给出完整数学定义、目标函数、动作空间、收敛切换规则及工程实现映射。最终结论留空，待正式实验填充。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{引言与研究问题}
+\subsection{背景}
+联运调度系统在真实部署中面临多源非平稳扰动：拥堵强度、订单到达节奏、突发约束和结构性缺失同时变化。若仅在单一静态分布训练，策略在 OOD（out-of-distribution）条件下常出现：
+\begin{itemize}
+\item \textbf{动作塌缩}：二值动作长期退化为单一动作；
+\item \textbf{策略脆弱}：测试回报对分布轻微漂移高度敏感；
+\item \textbf{训练-测试错配}：训练样本覆盖不足，部署失败难以被训练目标直接纠正。
+\end{itemize}
+
+\subsection{问题形式化}
+定义内层调度环境为马尔可夫决策过程
+\begin{equation}
+\mathcal{M}(E)=\langle \mathcal{S},\mathcal{A},P_E,r,\gamma \rangle,
+\end{equation}
+其中 \(E\) 为事件文件集合（由外层生成），\(\mathcal{A}=\{0,1\}\) 为二值动作空间。给定内层策略 \(\pi_\theta\)，其回报定义为
+\begin{equation}
+J(\theta;E)=\mathbb{E}_{\tau\sim (\pi_\theta,\mathcal{M}(E))}\!\left[\frac{1}{T}\sum_{t=1}^{T} r_t\right],\quad r_t\in\{0,1\}.
+\end{equation}
+
+外层策略 \(\pi_\psi\) 不直接控制运输动作，而是选择环境参数动作 \(a_g\)，并通过生成器 \(G\) 产生训练分布：
+\begin{equation}
+a_g \sim \pi_\psi(\cdot|s_t^g), \qquad E_t = G(a_g).
+\end{equation}
+目标是在可学习前提下最大化内层在多分布测试上的稳健性。
+
+\subsection{本文贡献}
+\begin{enumerate}
+\item 提出 NOVA\_EDRL 四阶段一体化链路，并在 Master 中作为独立算法入口实现。
+\item 给出 Phase2 新目标函数：外层在固定 \(\theta_{\text{phase1}}\) 下寻找“难但可学”的分布参数。
+\item 保持 Phase3 目标函数与既有 EDRL 一致，确保历史对照与工程兼容性。
+\item 建立多 SOTA 矩阵（RARL/PLR-UED/CQL/CaDM），形成可复现实验比较框架。
+\end{enumerate}
+
+\section{NOVA\_EDRL 总体框架}
+\subsection{四阶段主流程}
+当算法选择 \texttt{NOVA\_EDRL} 时，系统固定执行：
+\begin{enumerate}
+\item \textbf{Phase1（内层基线预训练）}：\texttt{stage-mode=train\_only}，训练得到 \(\theta_{\text{phase1}}\)；
+\item \textbf{Phase2（外层训练，内层冻结）}：每轮内层都从同一 \(\theta_{\text{phase1}}\) 启动，外层更新；
+\item \textbf{Phase3（联合训练）}：恢复内层跨轮继承更新（\(\theta_t\rightarrow\theta_{t+1}\)），外内课程协同；
+\item \textbf{Phase4（实现复用测试）}：回到 Master implement，\texttt{stage-mode=eval\_only} 做统一评估。
+\end{enumerate}
+
+该流程对应实现：
+\begin{itemize}
+\item \texttt{codes/Dynamic\_master34959.py}
+\item \texttt{codes/outer\_rl/run\_edrl\_pipeline.py}
+\item \texttt{codes/outer\_rl/run\_edrl\_phase2.py}
+\end{itemize}
+
+\subsection{外层动作空间}
+外层动作定义为
+\begin{equation}
+a_g=(\mu_A,\mu_B,p,n,\mathrm{pattern}).
+\end{equation}
+默认候选集合（可配置）：
+\begin{align}
+\mu_A,\mu_B &\in \mathcal{M}=\{10,30,60,90\},\ \mu_A\neq\mu_B, \\
+p &\in \mathcal{P}=\{0.2,0.3,0.5,0.7,0.8\}, \\
+n &\in \mathcal{N}=\{5,10,15,20,25,30\},\quad 3\le n\le 200, \\
+\mathrm{pattern} &\in \mathcal{T}=\{\texttt{ab},\texttt{random\_mix}\}.
+\end{align}
+离散动作总数为
+\begin{equation}
+|\mathcal{A}_g| = |\mathcal{M}|(|\mathcal{M}|-1)|\mathcal{P}||\mathcal{N}||\mathcal{T}|.
+\end{equation}
+
+\subsection{seed 去动作化}
+外层不再学习 seed。每轮 seed 由基础随机种子和迭代号确定性映射：
+\begin{equation}
+\mathrm{seed}_t = h(\mathrm{base\_seed},t),
+\end{equation}
+其中 \(h\) 为固定哈希映射。该策略减少无效搜索维度，避免“外层学习随机标签”的伪优化行为。
+
+\subsection{外层策略实现族}
+当前代码支持：
+\begin{equation}
+\texttt{policy\_mode}\in\{\texttt{random},\texttt{ucb},\texttt{ts},\texttt{pg},\texttt{rarl\_dqn}\}.
+\end{equation}
+关键更新规则如下。
+\paragraph{UCB}
+\begin{equation}
+i_t=\arg\max_i\left(\bar Q_i + c\sqrt{\frac{\ln(1+N_t)}{1+n_i}}\right).
+\end{equation}
+\paragraph{Thompson Sampling}
+\begin{equation}
+\tilde Q_i \sim \mathcal{N}(\mu_i,\sigma_i^2),\qquad i_t=\arg\max_i \tilde Q_i.
+\end{equation}
+\paragraph{Policy-Gradient Bandit}
+\begin{align}
+\pi_\psi(i) &= \frac{\exp(z_i)}{\sum_j \exp(z_j)},\\
+z_i &\leftarrow z_i + \alpha (R_t-b_t)\left(\mathbb{I}[i=i_t]-\pi_\psi(i)\right).
+\end{align}
+\paragraph{RARL-DQN 外层}
+\begin{align}
+Q_\psi(s_t^g,a_t^g) &\leftarrow Q_\psi(s_t^g,a_t^g) + \eta \delta_t,\\
+\delta_t &= r_t^g + \gamma\max_a Q_{\bar\psi}(s_{t+1}^g,a)-Q_\psi(s_t^g,a_t^g).
+\end{align}
+
+\section{非稳态与 OOD 机理补充（结合既有研究稿）}
+\subsection{从平稳 MDP 到上下文驱动非平稳过程}
+标准平稳 MDP 写作：
+\begin{equation}
+\mathcal{M}=\langle \mathcal{S},\mathcal{A},P,R,\gamma\rangle.
+\end{equation}
+本系统存在事件阶段切换与分布漂移，转移与奖励更接近时变混合：
+\begin{equation}
+P_t(s'|s,a)=\sum_z P(s'|s,a,z)p_t(z|h_t),\qquad
+R_t(s,a)=\sum_z R(s,a,z)p_t(z|h_t),
+\end{equation}
+其中 \(z_t\) 为潜在上下文（例如 phase、拥堵强度、事件生命周期），\(h_t\) 为历史。若 agent 仅看到压缩观测 \(o_t=\psi(s_t,z_t)\)，则问题本质上是 POMDP。
+
+\subsection{Bellman 失配与 bootstrap 方差放大}
+平稳情形下有
+\begin{equation}
+Q^\pi(s,a)=\mathbb{E}[r_t+\gamma \mathbb{E}_{a'\sim\pi}Q^\pi(s_{t+1},a')].
+\end{equation}
+非平稳下应写为时变版本
+\begin{equation}
+Q_t^\pi(s,a)=\mathbb{E}[r_t+\gamma \mathbb{E}_{a'\sim\pi}Q_{t+1}^\pi(s_{t+1},a')].
+\end{equation}
+单一参数网络拟合时变目标将导致目标噪声上升：
+\begin{equation}
+\mathrm{Var}[y_t]
+=\mathrm{Var}[r_t]+\gamma^2\mathrm{Var}[V(s_{t+1})]+2\gamma\mathrm{Cov}(r_t,V(s_{t+1})).
+\end{equation}
+这直接解释了非稳态下值函数训练慢、抖动大、策略更新不稳定。
+
+\subsection{训练-部署分布偏移的梯度失配}
+策略梯度在训练分布 \(d_{\text{train}}^\pi\) 上优化：
+\begin{equation}
+\nabla_\theta J_{\text{train}}(\pi_\theta)=
+\mathbb{E}_{(s,a)\sim d_{\text{train}}^\pi}
+\left[\nabla_\theta\log\pi_\theta(a|s)\hat A_{\text{train}}(s,a)\right].
+\end{equation}
+若部署分布变为 \(d_{\text{test}}^\pi\)，则训练方向不再对应测试目标。常见上界为
+\begin{equation}
+|J_{\text{test}}(\pi)-J_{\text{train}}(\pi)|
+\le
+\frac{2R_{\max}}{(1-\gamma)^2}\mathrm{TV}(d_{\text{test}}^\pi,d_{\text{train}}^\pi).
+\end{equation}
+因此 OOD 场景中“训练分高、测试掉崖”在理论上是可预期现象。
+
+\subsection{动作塌缩的梯度机制}
+对二值动作策略 \(\pi_\theta(a=1|s)=\sigma(u_\theta(s))\)，有近似梯度形式
+\begin{equation}
+\frac{\partial J}{\partial u}
+\propto
+\mathbb{E}\left[\hat A(s,1)(1-\pi)-\hat A(s,0)\pi\right].
+\end{equation}
+若大量状态上 \(\hat A(s,1)\) 长期偏低，则 \(u\) 会被持续压低，导致 \(\pi(a=1|s)\to 0\)，进入自强化塌缩环。NOVA\_EDRL 的 minority 激励正是针对该机制进行反向补偿。
+
+\subsection{阈值失配与“高 AUC 低收益”现象}
+二分类决策通常写为
+\begin{equation}
+\hat y=\mathbf{1}[\hat p\ge \tau].
+\end{equation}
+在严重类别不平衡时，即使排序能力（AUC）不差，固定阈值也会导致召回崩塌，最终行为收益提升有限。该现象在 OOD 二值决策场景尤为常见。
+
+\section{系统机理与数据协议（结合既有研究稿）}
+\subsection{ALNS-RL 异步握手与共享表语义}
+系统并非标准同步 Gym，而是通过共享表 \texttt{state\_reward\_pairs} 异步交互。关键哨兵值：
+\begin{equation}
+\texttt{action}=-10^7,\qquad \texttt{reward}=-10^7
+\end{equation}
+分别表示“动作未写入”和“奖励未回传”。典型流程：
+\begin{enumerate}
+\item ALNS 写入事件行并置空动作/奖励；
+\item RL 轮询读取并写入动作；
+\item ALNS 执行后回填奖励；
+\item RL 在下一步读取奖励并更新。
+\end{enumerate}
+该异步协议导致 credit assignment 具有消息延迟特征，是本任务区别于常规 benchmark 的关键工程属性。
+
+\subsection{阶段依赖动作语义}
+动作集合虽为 \(\{0,1\}\)，但语义由阶段位 \(b_t\) 决定：
+\begin{equation}
+\mathrm{meaning}(a_t|b_t)=
+\begin{cases}
+\text{等待/保持},&a_t=0,b_t=0,\\
+\text{重规划/移除},&a_t=1,b_t=0,\\
+\text{接受插入},&a_t=0,b_t=1,\\
+\text{拒绝插入},&a_t=1,b_t=1.
+\end{cases}
+\end{equation}
+若不显式编码阶段上下文，会把同一动作编号的异义样本混叠，导致优势估计方向被污染。
+
+\subsection{奖励机制的匹配本质}
+默认奖励本质是“动作-可行性匹配”：
+\begin{equation}
+r_t=\mathbf{1}\left[(a_t=1\land \neg\mathcal{F}_t)\ \lor\ (a_t=0\land \mathcal{F}_t)\right],
+\end{equation}
+其中 \(\mathcal{F}_t\) 表示“当前无需重规划仍可行”。该近二值、稀疏信号会放大不平衡动作学习难度。
+
+\subsection{分布协议：800/200 切分与模式定义}
+项目中通常采用 1000 文件协议：
+\begin{equation}
+N=1000,\quad N_{\text{train}}=800,\quad N_{\text{impl}}=200.
+\end{equation}
+四类典型 pattern：
+\begin{align}
+\texttt{ab}:&\ A_{0:799},\ B_{800:999},\\
+\texttt{aba}:&\ A_{0:399},\ B_{400:799},\ A_{800:999},\\
+\texttt{abba}:&\ A_{0:399},\ B_{400:799},\ B_{800:899},\ A_{900:999},\\
+\texttt{abc}:&\ A_{0:399},\ B_{400:799},\ C_{800:999}.
+\end{align}
+这一定义确保分布切换是“受控变量”，可用于严格比较 OOD、遗忘与泛化。
+
+\subsection{从分布参数到策略输入的传播链}
+分布影响路径可表示为：
+\begin{equation}
+(\text{pattern},\mu_A,\mu_B,\mu_C)
+\rightarrow
+\text{duration samples}
+\rightarrow
+\text{severity/context}
+\rightarrow
+o_t
+\rightarrow
+\pi_\theta(a_t|o_t).
+\end{equation}
+当上游漂移幅度大而观测压缩强时，策略输入层会出现“同观测异后果”现象，导致 OOD 误判率上升。
+
+\section{阶段目标函数与数学定义}
+\subsection{Phase1：内层预训练}
+Phase1 的目标是得到稳定初始参数 \(\theta_{\text{phase1}}\)：
+\begin{equation}
+\theta_{\text{phase1}}=\arg\max_\theta J(\theta;E_{\text{base}}).
+\end{equation}
+
+\subsection{Phase2：固定内层，训练外层}
+\subsubsection{冻结机制}
+在第 \(t\) 轮，内层参数重置为同一 \(\theta_{\text{phase1}}\)，不做跨轮继承：
+\begin{equation}
+\theta_t \equiv \theta_{\text{phase1}},\quad \forall t\in \text{Phase2}.
+\end{equation}
+因此 Phase2 学到的是“如何给既有内层出有效难题”，而不是“如何继续训练内层”。
+
+\subsubsection{Phase2 目标函数（当前实现）}
+定义冻结内层回报 \(J_{\text{frozen}}(a_g)\in[0,1]\)，少数动作增益 \(G_{\text{minority}}(a_g)\)，可学习性护栏阈值 \(J_{low}\)，可行性惩罚 \(D(a_g)\ge 0\)。外层优化目标：
+\begin{equation}
+\mathcal{O}_{\text{P2}}(a_g)=
+w_a\!\left(1-J_{\text{frozen}}(a_g)\right)
++w_m G_{\text{minority}}(a_g)
+-w_{too}\!\left[\max\!\big(0,J_{low}-J_{\text{frozen}}(a_g)\big)\right]^2
+-\lambda_D D(a_g).
+\end{equation}
+
+\paragraph{少数动作增益定义}
+设 Phase1 内层动作占比为 \((\rho_0^{(1)},\rho_1^{(1)})\)，少数动作索引为
+\begin{equation}
+m = \arg\min_{k\in\{0,1\}}\rho_k^{(1)}.
+\end{equation}
+在给定 \(a_g\) 的冻结训练/评估中，动作占比为 \(\hat\rho_m(a_g)\)。定义
+\begin{equation}
+G_{\text{minority}}(a_g)=\max\left(0,\hat\rho_m(a_g)-\rho_m^{(1)}\right).
+\end{equation}
+直观上，若 Phase1 少数动作是 \(1\)，那么能让动作 \(1\) 占比提升的分布将得到额外奖励。
+
+\paragraph{默认参数（代码）}
+\begin{equation}
+w_a=0.55,\quad w_m=0.35,\quad w_{too}=0.25,\quad J_{low}=0.15.
+\end{equation}
+
+\subsubsection{Phase2 稳定性解释}
+对 \(J_{\text{frozen}}\) 求偏导（忽略不可导点的次梯度）：
+\begin{equation}
+\frac{\partial \mathcal{O}_{\text{P2}}}{\partial J_{\text{frozen}}}
+=
+-w_a
++2w_{too}\big(J_{low}-J_{\text{frozen}}\big)\mathbf{1}[J_{\text{frozen}}<J_{low}]
++w_m\frac{\partial G_{\text{minority}}}{\partial J_{\text{frozen}}}.
+\end{equation}
+当 \(J_{\text{frozen}}\ll J_{low}\) 时，二次护栏项增大，抑制“无限加难”；当 \(J_{\text{frozen}}>J_{low}\) 时，对抗项主导，持续寻找更具区分性的困难样本。
+
+\subsection{Phase3：联合课程训练（保持不变）}
+Phase3 恢复内层跨轮继承并保持既有 EDRL 目标：
+\begin{equation}
+\mathcal{O}_{\text{P3}}=
+J
++\lambda_{\Delta J}\Delta J
++B(\rho_{\min})
+-\lambda_D D
+-\lambda_f \max(0,\rho_{floor}-\rho_{\min})
+-\lambda_{fh}\max(0,\rho_{floor}-\rho_{\min})^2,
+\end{equation}
+其中
+\begin{equation}
+B(\rho_{\min})=-\eta\max(0,\rho_{target}-\rho_{\min})^{p_c}.
+\end{equation}
+符号说明：
+\begin{itemize}
+\item \(J\)：当前轮内层均值回报；
+\item \(\Delta J\)：跨轮增益（相对上一轮）；
+\item \(\rho_{\min}=\min(\rho_0,\rho_1)\)：动作最小占比；
+\item \(D\)：路径/数据不一致惩罚；
+\item \(B(\cdot)\)：偏科惩罚（低于目标占比时触发）。
+\end{itemize}
+
+\subsection{Phase4：复用 Master implement}
+Phase4 不单独设计测试器，直接复用已有 implement：
+\begin{equation}
+\texttt{stage-mode=eval\_only},
+\quad
+\texttt{init-model-path}=\theta_{\text{phase3,last}},
+\quad
+\texttt{external-data-root}=E_{\text{phase1}}.
+\end{equation}
+确保与历史算法的测试口径完全一致。
+
+\section{相位切换与收敛规则}
+\subsection{Phase2 到 Phase3}
+记窗口长度为 \(K\)（\texttt{converge-patience}），在最近 \(K\) 个有效轮上满足：
+\begin{align}
+\max_{i\in\mathcal{W}}|\Delta J_i| &\le \epsilon_{\Delta J},\\
+\max_{i\in\mathcal{W}}\mathcal{O}_i-\min_{i\in\mathcal{W}}\mathcal{O}_i &\le \epsilon_O,\\
+\min_{i\in\mathcal{W}}\rho_{\min,i} &\ge \rho_{\text{floor,conv}}.
+\end{align}
+且已达到最小迭代数 \(T_{\min}^{(2)}\) 后，切换到 Phase3；若达到 \(T_{\max}^{(2)}\) 则强制切换。
+
+\subsection{Phase3 到 Phase4}
+采用双阈值与边界控制：
+\begin{itemize}
+\item 连续满足稳定条件 3 次；
+\item 有效迭代数满足 \(T_{\min}^{(3)}\le t \le T_{\max}^{(3)}\)；
+\item 若 \(t=T_{\max}^{(3)}\) 仍未满足稳定窗，则强制切换进入 Phase4。
+\end{itemize}
+当前默认：\(T_{\min}^{(2)}=10, T_{\max}^{(2)}=80, T_{\min}^{(3)}=30, T_{\max}^{(3)}=200\)。
+
+\section{外层状态、日志分解与可解释性}
+\subsection{外层状态摘要}
+对 \texttt{rarl\_dqn} 等策略，外层状态可由历史统计构成：
+\begin{equation}
+s_t^g=[J_{t-1},\Delta J_{t-1},\rho_{0,t-1},\rho_{1,t-1},\rho_{\min,t-1},\mathcal{O}_{t-1},H_{t-1},\bar J,\bar \rho_1,\bar H,\mathrm{phase},\mathrm{progress}],
+\end{equation}
+其中 \(H\) 为动作熵，\(\bar{\cdot}\) 为窗口均值。
+
+\subsection{目标分解落盘}
+系统会在 \texttt{outer\_actions.csv} 和 \texttt{outer\_train\_round.csv} 写入：
+\begin{itemize}
+\item 总目标值 \texttt{objective\_score}；
+\item Phase2 分解项（如 \texttt{phase2\_term\_challenge}, \texttt{phase2\_term\_minority}, \texttt{phase2\_term\_too\_hard}, \texttt{phase2\_term\_feasibility}）；
+\item 动作占比、路径读通率、样本预算使用率、停止原因等。
+\end{itemize}
+该机制可直接回答“外层策略在优化哪一项收益”。
+
+\section{多 SOTA 基线矩阵与公式映射}
+\subsection{RARL（ICML 2017）}
+\paragraph{经典目标}
+\begin{equation}
+\max_{\theta}\min_{\phi}\ \mathbb{E}_{\tau\sim (\pi_\theta,\nu_\phi)}\!\left[\sum_t r_t\right].
+\end{equation}
+\paragraph{本系统映射}
+外层作为对抗者，使用 \texttt{rarl\_dqn} 或 bandit 近似，目标口径为
+\begin{equation}
+\mathcal{O}_{\text{RARL}}=-J-\lambda_DD,
+\end{equation}
+严格零和模式下外层即时奖励 \(r_t^g=-J_t\)。
+
+\subsection{PLR/UED（ICML 2021）}
+\paragraph{核心思想}
+优先重放“学习潜力高”的 level。
+\paragraph{本系统映射}
+定义 level 分数
+\begin{equation}
+s_t=w_{\Delta J}|\Delta J_t|+w_JJ_t-\lambda_DD_t.
+\end{equation}
+维护优先级 EMA：
+\begin{equation}
+\bar s_i\leftarrow (1-\alpha)\bar s_i+\alpha s_t.
+\end{equation}
+重放采样概率：
+\begin{equation}
+P(i)=\frac{\max(\varepsilon,\bar s_i-\min_j \bar s_j+\varepsilon)}{\sum_k \max(\varepsilon,\bar s_k-\min_j \bar s_j+\varepsilon)}.
+\end{equation}
+并采用 \texttt{new/replay} 双轨采样。
+
+\subsection{CQL（NeurIPS 2020）}
+\paragraph{经典目标}
+\begin{equation}
+\mathcal{L}_{\text{CQL}}
+=
+\mathcal{L}_{\text{TD}}
++\alpha_{\text{cql}}
+\left(
+\mathbb{E}_{s\sim\mathcal{D}}\left[\log\sum_a e^{Q(s,a)}\right]
+-\mathbb{E}_{(s,a)\sim\mathcal{D}}[Q(s,a)]
+\right).
+\end{equation}
+\paragraph{本系统映射}
+在离散动作内层实现 \texttt{CQL\_DQN}，并输出 OOD Q 漂移相关监控量（如 \texttt{cql\_ood\_q\_gap}）。
+
+\subsection{CaDM（ICML 2020）}
+\paragraph{经典思想}
+学习上下文变量 \(z\) 与动力学模型 \(p(s'|s,a,z)\) 提升跨环境泛化。
+\paragraph{本系统适配}
+考虑 ALNS 状态强压缩与不可微特性，采用工程化近似：在 PPO 主干增加辅助前向预测头，
+\begin{equation}
+\mathcal{L}_{\text{total}}
+=
+\mathcal{L}_{\text{PPO}}
++\beta\left(
+\lambda_{\text{next}}\cdot \mathrm{MSE}(\hat y_{\text{nextsev}},y_{\text{nextsev}})
++\lambda_{\text{rew}}\cdot \mathrm{MSE}(\hat r,r)
+\right).
+\end{equation}
+该适配保留“上下文驱动预测”思想并兼顾可训练性。
+
+\subsection{SOTA 资源本地化路径}
+论文与代码已下载至：
+\begin{itemize}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/RARL}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/PLR\_UED}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/CQL}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/CADM}
+\end{itemize}
+
+\section{评测协议与关键指标}
+\subsection{分布矩阵}
+主评测覆盖 OOD、Generalization、Forgetting、Random Mix 四组。建议主文采用 16 个黄金分布作为报告主矩阵。
+
+\subsection{Normalized Policy Score（NPS）}
+对测试分布 \(\mathcal{D}\)，定义
+\begin{equation}
+\mathrm{NPS}(\pi_{RL},\mathcal{D})
+=
+\frac{J(\pi_{RL},\mathcal{D})-J(\pi_{rand},\mathcal{D})}
+{\max\!\left(J(\pi_{a=0},\mathcal{D}),J(\pi_{a=1},\mathcal{D})\right)-J(\pi_{rand},\mathcal{D})}.
+\end{equation}
+其中 \(J(\cdot,\mathcal{D})\) 使用 implement 阶段样本均值估计。
+
+NPS 的解释：
+\begin{itemize}
+\item \(\mathrm{NPS}\le 0\)：不优于随机策略；
+\item \(0<\mathrm{NPS}<1\)：优于随机但未超越最佳静态规则；
+\item \(\mathrm{NPS}=1\)：达到最佳静态规则水平；
+\item \(\mathrm{NPS}>1\)：实现上下文自适应超越。
+\end{itemize}
+
+\section{算法流程（可复现实验口径）}
+\begin{algorithm}[H]
+\caption{NOVA\_EDRL 四阶段训练与评测}
+\begin{algorithmic}[1]
+\State 输入：基础分布配置、\(\texttt{run\_id}\)、\(\texttt{base\_seed}\)、预算与收敛阈值
+\State \textbf{Phase1}：训练内层，得到 \(\theta_{\text{phase1}}\)
+\State 初始化外层策略参数 \(\psi\)
+\For{\(t=1,2,\dots\)}
+  \State 依据 \(s_t^g\) 选择外层动作 \(a_{g,t}\)
+  \State 由 \(h(\texttt{base\_seed},t)\) 生成确定性 seed，并生成小批量事件文件
+  \If{当前为 Phase2}
+    \State 内层从 \(\theta_{\text{phase1}}\) 启动并运行预算步
+    \State 计算 \(\mathcal{O}_{\text{P2}}\)，更新 \(\psi\)
+    \If{满足 Phase2 收敛或达到上限} \State 切换至 Phase3 \EndIf
+  \Else
+    \State 内层跨轮继承更新，计算 \(\mathcal{O}_{\text{P3}}\)，更新 \(\psi\)
+    \If{满足 Phase3 收敛或达到上限} \State \textbf{break} \EndIf
+  \EndIf
+\EndFor
+\State \textbf{Phase4}：调用 Master implement（\texttt{eval\_only}）输出最终评测
+\end{algorithmic}
+\end{algorithm}
+
+\section{工程实现映射}
+\begin{table}[H]
+\centering
+\caption{NOVA\_EDRL 与 SOTA 矩阵的关键实现模块}
+\begin{tabular}{p{4.9cm}p{9.5cm}}
+\toprule
+模块 & 作用 \\
+\midrule
+\texttt{codes/Dynamic\_master34959.py} & 算法入口；支持 NOVA\_EDRL、RARL、PLR\_UED、CQL\_DQN、CADM \\
+\texttt{codes/outer\_rl/run\_edrl\_pipeline.py} & 四阶段总编排；Phase4 复用 Master implement \\
+\texttt{codes/outer\_rl/run\_edrl\_phase2.py} & 外层动作采样、目标计算、切换判据、日志分解 \\
+\texttt{codes/generation/generate\_outer\_small\_batch.py} & 外层动作到事件文件批次的映射生成 \\
+\texttt{codes/core/dynamic\_RL34959.py} & 内层 RL 主循环与 ALNS 联动 \\
+\texttt{codes/robust\_rl/cql\_dqn.py} & CQL\_DQN 离散保守学习 \\
+\texttt{codes/robust\_rl/ppo\_new/v6\_cadm.py} & CaDM 适配版 PPO（辅助预测损失） \\
+\texttt{codes/analysis/compute\_metrics.py} & 汇总指标计算（含 NPS） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{实验结果（待填写）}
+\textcolor{gray}{本节保留用于填入正式实验结果：主结果表、消融、收敛曲线、跨分布泛化、NPS 统计显著性分析。}
+
+\section{结论（待填写）}
+\textcolor{gray}{本节暂不写结论，待全部实验完成后统一撰写。}
+
+\section*{附录 A：当前默认超参数}
+\begin{itemize}
+\item 外层默认策略：\texttt{policy-mode=ts}，目标模式 \texttt{objective-mode=edrl}
+\item Phase2 迭代窗：\([10,80]\)；Phase3 迭代窗：\([30,200]\)
+\item Phase2 权重：\(w_a=0.55,\ w_m=0.35,\ w_{too}=0.25,\ J_{low}=0.15\)
+\item 路径惩罚系数：\(\lambda_D=2.0\)
+\item 收敛窗口：\(\texttt{patience}=3,\ \epsilon_{\Delta J}=0.05,\ \epsilon_O=0.20\)
+\end{itemize}
+
+\section*{附录 B：SOTA 对照的本地索引}
+\begin{itemize}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/RARL/papers}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/PLR\_UED/papers}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/CQL/papers}
+\item \texttt{ALNS\_Research\_Documentation/SOTA\_Baselines/CADM/papers}
+\end{itemize}
+
+\end{document}
