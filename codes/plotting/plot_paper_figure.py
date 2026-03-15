@@ -42,7 +42,10 @@ def _has_chinese_font() -> bool:
     return any(name in available for name in CHINESE_FONT_CANDIDATES)
 
 
-USE_CHINESE = _has_chinese_font()
+USE_CHINESE = (
+    str(os.environ.get("PLOT_LANG", "en")).strip().lower() in {"zh", "cn", "chinese"}
+    and _has_chinese_font()
+)
 
 TEXT_CN = {
     "phase_train": "\u8bad\u7ec3",
@@ -93,6 +96,30 @@ TEXT_CN = {
     "legend_rand": "\u968f\u673a",
     "legend_best_static": "\u6700\u4f73\u9759\u6001\u7b56\u7565",
     "phase_overall": "\u6574\u4f53",
+    "na_short": "NA",
+    "response_title": "\u7b56\u7565\u54cd\u5e94\u77e9\u9635",
+    "response_share": "\u5404\u9636\u6bb5\u51b3\u7b56\u7ec4\u6210(%)",
+    "response_reward": "\u6309\u51b3\u7b56\u5212\u5206\u7684\u5b9e\u73b0\u5956\u52b1",
+    "response_volume": "\u51b3\u7b56\u66b4\u9732\u4e0e\u8986\u76d6",
+    "wait_keep": "\u7b49\u5f85/\u4fdd\u6301\u65b9\u6848",
+    "replan": "\u91cd\u89c4\u5212",
+    "replan_remove": "\u91cd\u89c4\u5212/\u79fb\u9664",
+    "insert_accept": "\u63d2\u5165/\u63a5\u53d7",
+    "insert_reject": "\u62d2\u7edd\u63d2\u5165",
+    "decision_count": "\u51b3\u7b56\u6570",
+    "matched_rate": "\u5339\u914d\u7387(%)",
+    "response_note": "\u6ce8\uff1a\u79fb\u9664\u9636\u6bb5\u7684\u52a8\u4f5c 0/1 \u8868\u793a\u7b49\u5f85/\u91cd\u89c4\u5212\uff1b\u63d2\u5165\u9636\u6bb5\u7684\u52a8\u4f5c 0/1 \u8868\u793a\u63a5\u53d7\u63d2\u5165/\u62d2\u7edd\u63d2\u5165\u3002",
+    "ops_title": "\u8fd0\u8425\u8f6c\u6362\u5256\u9762",
+    "ops_cost": "Panel A: \u6210\u672c\u5206\u89e3",
+    "ops_index": "Panel B: \u5b9e\u65bd/\u8bad\u7ec3\u6307\u6570",
+    "ops_kpi": "Panel C: \u90e8\u7f72\u8bca\u65ad",
+    "train_stage": "\u8bad\u7ec3",
+    "implement_stage": "\u5b9e\u65bd",
+    "index_ratio": "\u5b9e\u65bd / \u8bad\u7ec3",
+    "kpi_matched": "\u5339\u914d\u7387",
+    "kpi_replan": "\u91cd\u89c4\u5212\u5360\u6bd4",
+    "kpi_latency": "\u51b3\u7b56\u8017\u65f6",
+    "kpi_served": "\u5df2\u670d\u52a1\u8bf7\u6c42",
 }
 
 TEXT_EN = {
@@ -144,6 +171,30 @@ TEXT_EN = {
     "legend_rand": "Random",
     "legend_best_static": "Best Static",
     "phase_overall": "Overall",
+    "na_short": "NA",
+    "response_title": "Policy Response Matrix",
+    "response_share": "Decision Mix within Regime (%)",
+    "response_reward": "Realized Reward by Decision",
+    "response_volume": "Decision Exposure and Coverage",
+    "wait_keep": "Wait / Keep Plan",
+    "replan": "Replan",
+    "replan_remove": "Replan / Remove",
+    "insert_accept": "Insert / Accept",
+    "insert_reject": "Reject Insert",
+    "decision_count": "Decision Count",
+    "matched_rate": "Matched Decisions (%)",
+    "response_note": "Removal action 0/1 denotes wait/replan, while insertion action 0/1 denotes accept/reject insertion.",
+    "ops_title": "Operational Transition Profile",
+    "ops_cost": "Panel A: Cost Decomposition",
+    "ops_index": "Panel B: Implementation / Training Index",
+    "ops_kpi": "Panel C: Deployment Diagnostics",
+    "train_stage": "Training",
+    "implement_stage": "Implementation",
+    "index_ratio": "Implement / Train",
+    "kpi_matched": "Matched Rate",
+    "kpi_replan": "Replan Share",
+    "kpi_latency": "Decision Latency",
+    "kpi_served": "Served Requests",
 }
 
 TEXT = TEXT_CN if USE_CHINESE else TEXT_EN
@@ -173,6 +224,42 @@ PHASE_LABELS = {
 PHASE_LABEL_TITLES = {"phase": TEXT["phase_title"], "phase_label": TEXT["phase_label_title"]}
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DIST_CONFIG_PATH = ROOT_DIR / "distribution_config.json"
+PHASE_SPAN_COLORS = {
+    "train": "#E4EEF6",
+    "implement": "#F7E6DE",
+    "eval": "#ECECEC",
+}
+PHASE_BAR_COLORS = {
+    "train": "#6E8FA8",
+    "implement": "#C47A5A",
+    "eval": "#8E8E8E",
+}
+ACTION_COLORS = {
+    "wait": "#5B7B95",
+    "replan": "#C46E52",
+    "insert": "#6F9C74",
+    "reject": "#8E6BAE",
+}
+COMPONENT_COLORS = {
+    "overall_request_cost": "#8FB6C9",
+    "overall_transshipment_cost": "#D8C3A5",
+    "overall_un_load_cost": "#A8C5A0",
+    "overall_storage_cost": "#9A8FB3",
+    "overall_wait_cost": "#E9A867",
+    "overall_delay_penalty": "#C75C5C",
+    "overall_emission_cost": "#7EA37F",
+    "overall_vehicle_cost": "#8B8B8B",
+}
+COMPONENT_LABELS = {
+    "overall_request_cost": "Request",
+    "overall_transshipment_cost": "Transshipment",
+    "overall_un_load_cost": "Loading/Unloading",
+    "overall_storage_cost": "Storage",
+    "overall_wait_cost": "Wait",
+    "overall_delay_penalty": "Delay",
+    "overall_emission_cost": "Emission",
+    "overall_vehicle_cost": "Vehicle",
+}
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -180,6 +267,29 @@ def _read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path)
     except UnicodeDecodeError:
         return pd.read_csv(path, encoding="utf-8-sig")
+    except Exception:
+        for enc in ("utf-8-sig", "utf-8", "gbk"):
+            try:
+                return pd.read_csv(path, encoding=enc, engine="python", on_bad_lines="skip")
+            except Exception:
+                continue
+        raise
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _save_figure_bundle(fig: plt.Figure, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path = out_path if out_path.suffix.lower() == ".pdf" else out_path.with_suffix(".pdf")
+    svg_path = pdf_path.with_suffix(".svg")
+    save_kwargs = {"bbox_inches": "tight", "facecolor": "white"}
+    fig.savefig(pdf_path, dpi=DEFAULT_DPI, **save_kwargs)
+    fig.savefig(svg_path, **save_kwargs)
 
 
 def _coerce_numeric(df: pd.DataFrame, columns) -> None:
@@ -206,6 +316,31 @@ def _safe_nanmean(arr: np.ndarray) -> float:
     if not mask.any():
         return float("nan")
     return float(arr[mask].mean())
+
+
+def _safe_float(value: object) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float("nan")
+    return out if np.isfinite(out) else float("nan")
+
+
+def _phase_display_name(phase: object) -> str:
+    phase_str = str(phase).strip().lower()
+    return PHASE_LABELS.get(phase_str, str(phase))
+
+
+def _format_display_value(value: float, unit: str = "", digits: int = 1) -> str:
+    if not np.isfinite(value):
+        return TEXT["na_short"]
+    if unit == "%":
+        return f"{value:.1f}%"
+    if unit == "s":
+        return f"{value:.1f} s"
+    if unit == "count":
+        return f"{int(round(value))}"
+    return f"{value:,.{digits}f}{unit}"
 
 
 def _choose_group_key(df: pd.DataFrame) -> Optional[str]:
@@ -565,6 +700,41 @@ def _load_rl_training(run_dir: Path) -> pd.DataFrame:
     return df
 
 
+def _load_rl_decisions(run_dir: Path) -> pd.DataFrame:
+    decision_path = run_dir / "rl_decision.csv"
+    if not decision_path.exists():
+        return pd.DataFrame()
+    df = _read_csv(decision_path)
+    required = {"phase", "action", "reward"}
+    if not required.issubset(df.columns):
+        print(f"Warning: rl_decision.csv missing required columns: {decision_path}", file=sys.stderr)
+        return pd.DataFrame()
+    _coerce_numeric(
+        df,
+        [
+            "reward",
+            "action",
+            "table_number",
+            "gt_mean",
+            "p_action1",
+            "matched",
+            "decision_seq",
+            "ts_decision",
+            "ts_reward",
+        ],
+    )
+    df["phase"] = df["phase"].astype(str).str.lower()
+    if "stage" in df.columns:
+        stage = df["stage"].astype(str).str.lower()
+        if (stage == "receive_reward").any():
+            df = df[stage == "receive_reward"]
+    df = df[df["reward"].notna()]
+    df = df[df["reward"] != -10000000]
+    if df.empty:
+        return pd.DataFrame()
+    return _sort_by_phase_table(df.reset_index(drop=True))
+
+
 def _load_baseline_events(path: Path, label: str) -> pd.DataFrame:
     if not path.exists():
         print(f"Warning: baseline file not found for {label}: {path}", file=sys.stderr)
@@ -582,7 +752,13 @@ def _load_baseline_events(path: Path, label: str) -> pd.DataFrame:
     if "source" in df.columns and (df["source"] == "BASELINE").any():
         df = df[df["source"] == "BASELINE"]
     elif "stage" in df.columns:
-        df = df[df["stage"] == "finish_removal"]
+        stage = df["stage"].astype(str).str.lower()
+        if (stage == "receive_reward").any():
+            df = df[stage == "receive_reward"]
+        elif stage.isin(["finish_removal", "finish_insertion"]).any():
+            df = df[stage.isin(["finish_removal", "finish_insertion"])]
+        elif (stage == "begin_insertion").any():
+            df = df[stage == "begin_insertion"]
     df["phase"] = df["phase"].astype(str).str.lower()
     return df.reset_index(drop=True)
 
@@ -591,10 +767,13 @@ def _sort_by_phase_table(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
     if "phase" in data.columns:
         data["phase"] = data["phase"].astype(str).str.lower()
-    _coerce_numeric(data, ["table_number", "ts"])
-    data = data[data["table_number"].notna()]
+    _coerce_numeric(data, ["table_number", "ts", "decision_seq", "ts_decision", "ts_reward"])
     data["phase_order"] = data["phase"].map(PHASE_ORDER).fillna(99)
-    data = data.sort_values(["phase_order", "table_number", "ts"], na_position="last")
+    sort_cols = ["phase_order"]
+    for col in ("decision_seq", "table_number", "ts_decision", "ts_reward", "ts"):
+        if col in data.columns and data[col].notna().any():
+            sort_cols.append(col)
+    data = data.sort_values(sort_cols, na_position="last")
     return data
 
 
@@ -641,7 +820,13 @@ def _align_rewards_to_decisions(decisions: pd.DataFrame, training: pd.DataFrame)
 def _prepare_aligned_decisions(trace: pd.DataFrame, training: pd.DataFrame) -> pd.DataFrame:
     decisions = trace.copy()
     if "stage" in decisions.columns:
-        decisions = decisions[decisions["stage"] == "send_action"]
+        stage = decisions["stage"].astype(str).str.lower()
+        if (stage == "send_action").any():
+            decisions = decisions[stage == "send_action"]
+        elif (stage == "finish_removal").any():
+            decisions = decisions[stage == "finish_removal"]
+        else:
+            decisions = decisions[stage.isin(["finish_removal", "begin_removal"])]
     if decisions.empty or training.empty:
         return pd.DataFrame()
     _coerce_numeric(decisions, ["ts"])
@@ -764,7 +949,7 @@ def _plot_environment_shift(run_dir: Path, out_path: Path) -> None:
 
     sns.despine(fig=fig)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI)
+    _save_figure_bundle(fig, out_path)
     plt.close(fig)
 
 
@@ -952,7 +1137,7 @@ def _plot_adaptation_curve(
             ax_right.text(
                 0.02,
                 0.95,
-                f"均值恒定: {const_mean:.1f}",
+                f"{TEXT['mean_fixed']}: {const_mean:.1f}",
                 transform=ax_right.transAxes,
                 ha="left",
                 va="top",
@@ -977,139 +1162,249 @@ def _plot_adaptation_curve(
 
     sns.despine(fig=fig)
     fig.tight_layout(rect=[0, 0, 1, 0.92])
-    fig.savefig(out_path, dpi=DEFAULT_DPI)
+    _save_figure_bundle(fig, out_path)
     plt.close(fig)
 
 
-def _plot_policy_heatmap(trace: pd.DataFrame, aligned: pd.DataFrame, out_path: Path) -> None:
-    data = trace.copy()
+def _build_decision_regime_labels(data: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List[str]]:
+    if data.empty:
+        return data.copy(), [], []
+    panel = data.copy()
+    panel["phase"] = panel["phase"].astype(str).str.lower()
+    labels: List[str] = []
+    order: List[str] = []
+    seen = set()
+    for _, row in panel.iterrows():
+        phase_name = _phase_display_name(row.get("phase", ""))
+        phase_label = str(row.get("phase_label", "")).strip()
+        display = phase_name
+        if phase_label and phase_label.lower() != "nan":
+            display = f"{phase_name} / {phase_label}"
+        labels.append(display)
+        if display not in seen:
+            order.append(display)
+            seen.add(display)
+    panel["_panel_group"] = labels
+    return panel, order, order
+
+
+def _semantic_action_label(row: pd.Series) -> str:
+    semantic = str(row.get("semantic_action", "") or row.get("action_meaning", "")).strip().lower()
+    stage_family = str(row.get("stage_family", "")).strip().lower()
+    if semantic == "wait":
+        return TEXT["wait_keep"]
+    if semantic == "remove":
+        return TEXT["replan_remove"]
+    if semantic == "insert":
+        return TEXT["insert_accept"]
+    if semantic == "non_insert":
+        return TEXT["insert_reject"]
+    try:
+        action_val = int(row.get("action", -999))
+    except Exception:
+        action_val = -999
+    if stage_family == "insertion":
+        if action_val == 0:
+            return TEXT["insert_accept"]
+        if action_val == 1:
+            return TEXT["insert_reject"]
+    if stage_family == "removal":
+        if action_val == 0:
+            return TEXT["wait_keep"]
+        if action_val == 1:
+            return TEXT["replan_remove"]
+    if semantic == "action0":
+        return TEXT["wait_keep"]
+    if semantic == "action1":
+        return TEXT["replan_remove"]
+    if action_val == 0:
+        return TEXT["wait_keep"]
+    if action_val == 1:
+        return TEXT["replan_remove"]
+    return TEXT["wait_keep"]
+
+
+def _annotate_heatmap_missing(ax: plt.Axes, frame: pd.DataFrame) -> None:
+    for i in range(frame.shape[0]):
+        for j in range(frame.shape[1]):
+            if pd.isna(frame.iloc[i, j]):
+                ax.text(
+                    j + 0.5,
+                    i + 0.5,
+                    TEXT["na_short"],
+                    ha="center",
+                    va="center",
+                    color="#7E7E7E",
+                    fontsize=9.3,
+                    fontstyle="italic",
+                )
+
+
+def _plot_policy_heatmap(aligned: pd.DataFrame, out_path: Path) -> None:
+    if aligned.empty:
+        raise ValueError("No aligned decision-level data available for policy response matrix.")
+
+    data = aligned.copy()
     if "phase" not in data.columns:
-        raise ValueError("rl_trace.csv missing phase column for heatmap.")
+        raise ValueError("Aligned decisions missing phase column.")
     data["phase"] = data["phase"].astype(str).str.lower()
-    data = data[data["phase"].isin(["train", "implement"])]
-    _coerce_numeric(data, ["action"])
+    data = data[data["phase"].isin(["train", "implement", "eval"])]
+    _coerce_numeric(data, ["action", "reward", "matched"])
+    data = data[data["action"].isin([0, 1])]
+    if data.empty:
+        raise ValueError("Aligned decisions contain no valid binary actions.")
 
-    removal = data[data["stage"].isin(["send_action", "begin_removal"])]
-    removal = removal[removal["action"].isin([0, 1])]
-    insertion_finish = data[data["stage"] == "finish_insertion"]
-    insertion_begin = data[data["stage"] == "begin_insertion"]
-    insertion_finish = insertion_finish[insertion_finish["action"].isin([0, 1])]
-    insertion_begin = insertion_begin[insertion_begin["action"].isin([0, 1])]
-
-    phases = [p for p in ["train", "implement", "eval"] if p in data["phase"].dropna().unique()]
-    if not phases:
-        phases = sorted(data["phase"].dropna().unique())
+    data["action_label"] = data.apply(_semantic_action_label, axis=1)
+    data, row_order, row_labels = _build_decision_regime_labels(data)
     columns = [
-        TEXT["removal_wait"],
-        TEXT["removal_reroute"],
+        TEXT["wait_keep"],
+        TEXT["replan_remove"],
         TEXT["insert_accept"],
         TEXT["insert_reject"],
     ]
-    counts = pd.DataFrame(0, index=phases, columns=columns, dtype=float)
 
-    for phase in phases:
-        rem_phase = removal[removal["phase"] == phase]
-        ins_phase = insertion_finish[insertion_finish["phase"] == phase]
-        if ins_phase.empty:
-            ins_phase = insertion_begin[insertion_begin["phase"] == phase]
-        counts.loc[phase, TEXT["removal_wait"]] = (rem_phase["action"] == 0).sum()
-        counts.loc[phase, TEXT["removal_reroute"]] = (rem_phase["action"] == 1).sum()
-        counts.loc[phase, TEXT["insert_accept"]] = (ins_phase["action"] == 0).sum()
-        counts.loc[phase, TEXT["insert_reject"]] = (ins_phase["action"] == 1).sum()
-
+    counts = (
+        data.groupby(["_panel_group", "action_label"], dropna=False)
+        .size()
+        .unstack(fill_value=0)
+        .reindex(index=row_order, columns=columns, fill_value=0)
+        .astype(float)
+    )
     totals = counts.sum(axis=1).replace(0, np.nan)
-    freq = counts.div(totals, axis=0) * 100
-    freq.index = [PHASE_LABELS.get(p, p.title()) for p in freq.index]
+    shares = counts.div(totals, axis=0) * 100.0
 
-    reward_columns = columns
-    reward_means = pd.DataFrame(np.nan, index=phases, columns=reward_columns, dtype=float)
-    if not aligned.empty and "reward" in aligned.columns:
-        removal_rewards = aligned[aligned["action"].isin([0, 1])]
-        for phase in phases:
-            sub = removal_rewards[removal_rewards["phase"] == phase]
-            if sub.empty:
-                continue
-            reward_means.loc[phase, TEXT["removal_wait"]] = sub.loc[sub["action"] == 0, "reward"].mean()
-            reward_means.loc[phase, TEXT["removal_reroute"]] = sub.loc[sub["action"] == 1, "reward"].mean()
+    rewards = (
+        data.groupby(["_panel_group", "action_label"], dropna=False)["reward"]
+        .mean()
+        .unstack()
+        .reindex(index=row_order, columns=columns)
+    )
+    matched_rate = None
+    if "matched" in data.columns and data["matched"].notna().any():
+        matched_rate = (
+            data.groupby("_panel_group", dropna=False)["matched"]
+            .mean()
+            .reindex(row_order)
+            .astype(float)
+            * 100.0
+        )
 
-    insertion_reward = data[data["stage"].isin(["finish_insertion", "begin_insertion"])]
-    insertion_reward = insertion_reward[insertion_reward["action"].isin([0, 1])]
-    insertion_reward = insertion_reward[insertion_reward["reward"].notna()]
-    insertion_reward = insertion_reward[insertion_reward["reward"] != -10000000]
-    if not insertion_reward.empty:
-        for phase in phases:
-            sub = insertion_reward[insertion_reward["phase"] == phase]
-            if sub.empty:
-                continue
-            reward_means.loc[phase, TEXT["insert_accept"]] = sub.loc[sub["action"] == 0, "reward"].mean()
-            reward_means.loc[phase, TEXT["insert_reject"]] = sub.loc[sub["action"] == 1, "reward"].mean()
+    share_annot = shares.apply(lambda col: col.map(lambda x: "" if pd.isna(x) else f"{x:.0f}"))
+    reward_annot = rewards.apply(lambda col: col.map(lambda x: "" if pd.isna(x) else f"{x:.2f}"))
 
-    # Fill sparse cells with robust shrinkage estimate to avoid visually empty (gray) blocks.
-    reward_filled = reward_means.copy()
-    global_mean = _safe_nanmean(reward_filled.to_numpy(dtype=float))
-    if not np.isfinite(global_mean):
-        global_mean = 0.5
-    for ridx in reward_filled.index:
-        for cidx in reward_filled.columns:
-            val = reward_filled.loc[ridx, cidx]
-            if pd.notna(val):
-                continue
-            row_vals = pd.to_numeric(reward_filled.loc[ridx, :], errors="coerce").to_numpy(dtype=float)
-            col_vals = pd.to_numeric(reward_filled.loc[:, cidx], errors="coerce").to_numpy(dtype=float)
-            row_mean = _safe_nanmean(row_vals)
-            col_mean = _safe_nanmean(col_vals)
-            parts = []
-            if np.isfinite(row_mean):
-                parts.append((0.5, row_mean))
-            if np.isfinite(col_mean):
-                parts.append((0.3, col_mean))
-            parts.append((0.2, global_mean))
-            wsum = sum(w for w, _ in parts)
-            fill_val = sum(w * x for w, x in parts) / max(1e-12, wsum)
-            reward_filled.loc[ridx, cidx] = fill_val
+    reward_vals = rewards.to_numpy(dtype=float)
+    reward_vals = reward_vals[np.isfinite(reward_vals)]
+    if reward_vals.size:
+        if reward_vals.size >= 4:
+            reward_min = float(np.percentile(reward_vals, 5))
+            reward_max = float(np.percentile(reward_vals, 95))
+        else:
+            reward_min = float(np.nanmin(reward_vals))
+            reward_max = float(np.nanmax(reward_vals))
+        if abs(reward_max - reward_min) < 1e-9:
+            reward_min -= 0.5
+            reward_max += 0.5
+        reward_center = float(np.median(reward_vals))
+    else:
+        reward_min, reward_max, reward_center = 0.0, 1.0, 0.5
 
-    reward_filled = reward_filled.clip(lower=0.0, upper=1.0)
+    fig = plt.figure(figsize=(17.4, 5.8), dpi=DEFAULT_DPI)
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.34, 1.34, 1.22], wspace=0.34)
+    ax_share = fig.add_subplot(gs[0, 0])
+    ax_reward = fig.add_subplot(gs[0, 1])
+    ax_volume = fig.add_subplot(gs[0, 2])
 
-    reward_means.index = [PHASE_LABELS.get(p, p.title()) for p in reward_means.index]
-    reward_filled.index = [PHASE_LABELS.get(p, p.title()) for p in reward_filled.index]
-
-    fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.6), dpi=DEFAULT_DPI)
-    ax_left, ax_right = axes
+    share_cmap = sns.light_palette(ACTION_COLORS["wait"], as_cmap=True)
+    reward_cmap = sns.diverging_palette(20, 150, s=85, l=50, as_cmap=True)
 
     sns.heatmap(
-        freq,
-        ax=ax_left,
-        cmap="YlGnBu",
+        shares,
+        ax=ax_share,
+        cmap=share_cmap,
         vmin=0,
         vmax=100,
-        annot=True,
-        fmt=".1f",
-        linewidths=0.5,
+        annot=share_annot,
+        fmt="",
+        linewidths=0.8,
         linecolor="white",
-        cbar_kws={"label": f"{TEXT['heatmap_freq_title']}(%)"},
+        cbar_kws={"label": TEXT["response_share"], "shrink": 0.86},
     )
-    ax_left.set_title(TEXT["heatmap_freq_title"])
-    ax_left.set_xlabel(TEXT["heatmap_x"])
-    ax_left.set_ylabel(TEXT["heatmap_y"])
+    _annotate_heatmap_missing(ax_share, shares)
+    ax_share.set_title(TEXT["response_share"], pad=10)
+    ax_share.set_xlabel("")
+    ax_share.set_ylabel("")
+    ax_share.set_yticklabels(row_labels, rotation=0)
 
     sns.heatmap(
-        reward_filled,
-        ax=ax_right,
-        cmap="RdYlGn",
-        vmin=0,
-        vmax=1,
-        annot=True,
-        fmt=".2f",
-        linewidths=0.5,
+        rewards,
+        ax=ax_reward,
+        cmap=reward_cmap,
+        vmin=reward_min,
+        vmax=reward_max,
+        center=reward_center,
+        annot=reward_annot,
+        fmt="",
+        linewidths=0.8,
         linecolor="white",
-        cbar_kws={"label": TEXT["heatmap_reward_title"]},
+        cbar_kws={"label": TEXT["response_reward"], "shrink": 0.86},
     )
-    ax_right.set_title(TEXT["heatmap_reward_title"])
-    ax_right.set_xlabel(TEXT["heatmap_x"])
-    ax_right.set_ylabel("")
+    _annotate_heatmap_missing(ax_reward, rewards)
+    ax_reward.set_title(TEXT["response_reward"], pad=10)
+    ax_reward.set_xlabel("")
+    ax_reward.set_ylabel("")
+    ax_reward.set_yticklabels([])
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI)
+    for ax in (ax_share, ax_reward):
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=18, ha="right", rotation_mode="anchor")
+
+    y_pos = np.arange(len(row_order), dtype=float)
+    volume = counts.sum(axis=1).reindex(row_order).to_numpy(dtype=float)
+    volume_max = float(np.nanmax(volume)) if volume.size else 0.0
+    count_pad = max(volume_max * 0.18, 2.0)
+    bar_colors = []
+    for name in row_order:
+        lower = name.lower()
+        if "implement" in lower:
+            bar_colors.append(PHASE_BAR_COLORS["implement"])
+        elif "eval" in lower:
+            bar_colors.append(PHASE_BAR_COLORS["eval"])
+        else:
+            bar_colors.append(PHASE_BAR_COLORS["train"])
+    ax_volume.barh(y_pos, volume, color=bar_colors, edgecolor="white", height=0.58)
+    for y, val in zip(y_pos, volume):
+        ax_volume.text(val + max(volume_max * 0.06, 1.2), y, f"{int(val)}", va="center", ha="left", fontsize=10.2)
+    ax_volume.set_yticks(y_pos)
+    ax_volume.set_yticklabels([])
+    ax_volume.invert_yaxis()
+    ax_volume.set_xlabel(TEXT["decision_count"])
+    ax_volume.set_title(TEXT["response_volume"], pad=10)
+    ax_volume.grid(True, axis="x", linestyle="--", alpha=0.26)
+    ax_volume.set_xlim(0.0, max(volume_max + count_pad * 1.55, 10.0))
+
+    if matched_rate is not None and matched_rate.notna().any():
+        ax_match = ax_volume.twiny()
+        ax_match.scatter(
+            matched_rate.to_numpy(dtype=float),
+            y_pos,
+            s=44,
+            marker="D",
+            color=ACTION_COLORS["replan"],
+            edgecolor="white",
+            linewidth=0.7,
+            zorder=4,
+        )
+        for y, val in zip(y_pos, matched_rate.to_numpy(dtype=float)):
+            if np.isfinite(val):
+                ax_match.text(min(val + 3.8, 112.0), y, f"{val:.0f}%", va="center", ha="left", fontsize=9.5, color="#444444")
+        ax_match.set_xlim(-6.0, 116.0)
+        ax_match.set_xlabel(TEXT["matched_rate"])
+        ax_match.grid(False)
+
+    fig.suptitle(TEXT["response_title"], y=1.02, fontsize=14.2)
+    fig.text(0.5, 0.03, TEXT["response_note"], ha="center", va="center", fontsize=10.1, color="#4B4B4B")
+    sns.despine(fig=fig, left=False, bottom=False)
+    fig.subplots_adjust(left=0.055, right=0.988, top=0.86, bottom=0.18)
+    _save_figure_bundle(fig, out_path)
     plt.close(fig)
 
 
@@ -1163,212 +1458,161 @@ def _bootstrap_nps_ci(
     return float(np.quantile(s, 0.025)), float(np.quantile(s, 0.975))
 
 
-def _plot_nps_superiority(
-    aligned: pd.DataFrame,
-    baseline_wait: pd.DataFrame,
-    baseline_reroute: pd.DataFrame,
-    baseline_random: pd.DataFrame,
-    out_path: Path,
-) -> None:
-    fig, axes = plt.subplots(
-        1,
-        2,
-        figsize=(15.2, 5.2),
-        dpi=DEFAULT_DPI,
-        gridspec_kw={"width_ratios": [1.05, 1.35]},
-        sharey=True,
-    )
-    ax_a, ax_b = axes
+def _plot_operational_profile(run_summary: dict, out_path: Path) -> None:
+    transport = run_summary.get("transport_metrics", {}) if isinstance(run_summary, dict) else {}
+    action_metrics = run_summary.get("action_metrics", {}) if isinstance(run_summary, dict) else {}
+    train_metrics = transport.get("train", {}) if isinstance(transport, dict) else {}
+    implement_metrics = transport.get("implement", {}) if isinstance(transport, dict) else {}
+    if not train_metrics and not implement_metrics:
+        raise ValueError("run_summary.json missing transport_metrics for operational profile.")
 
-    if aligned.empty or baseline_random.empty or (baseline_wait.empty and baseline_reroute.empty):
-        ax_a.text(0.5, 0.5, TEXT["missing_baseline"], ha="center", va="center", fontsize=12)
-        ax_a.axis("off")
-        ax_b.axis("off")
-        fig.tight_layout()
-        fig.savefig(out_path, dpi=DEFAULT_DPI)
-        plt.close(fig)
-        return
-
-    phase_seq = [
-        p
-        for p in ["train", "implement", "eval"]
-        if p in aligned.get("phase", pd.Series(dtype=str)).astype(str).str.lower().unique()
+    component_order = [
+        "overall_request_cost",
+        "overall_transshipment_cost",
+        "overall_un_load_cost",
+        "overall_storage_cost",
+        "overall_wait_cost",
+        "overall_delay_penalty",
+        "overall_emission_cost",
+        "overall_vehicle_cost",
     ]
-    if not phase_seq:
-        phase_seq = ["overall"]
-    else:
-        phase_seq = phase_seq + ["overall"]
-
-    rows = []
-    for phase in phase_seq:
-        rl_arr = _phase_reward_array(aligned, phase)
-        wait_arr = _phase_reward_array(baseline_wait, phase)
-        reroute_arr = _phase_reward_array(baseline_reroute, phase)
-        rand_arr = _phase_reward_array(baseline_random, phase)
-
-        j_rl = float(rl_arr.mean()) if rl_arr.size else float("nan")
-        j_w = float(wait_arr.mean()) if wait_arr.size else float("nan")
-        j_r = float(reroute_arr.mean()) if reroute_arr.size else float("nan")
-        j_rand = float(rand_arr.mean()) if rand_arr.size else float("nan")
-
-        if np.isfinite(j_w) and (not np.isfinite(j_r) or j_w >= j_r):
-            static_arr = wait_arr
-            j_static = j_w
-            static_policy = "wait"
-        elif np.isfinite(j_r):
-            static_arr = reroute_arr
-            j_static = j_r
-            static_policy = "reroute"
-        else:
-            static_arr = np.array([], dtype=float)
-            j_static = float("nan")
-            static_policy = ""
-
-        denom = j_static - j_rand if np.isfinite(j_static) and np.isfinite(j_rand) else float("nan")
-        if np.isfinite(denom) and abs(float(denom)) > 1e-9 and np.isfinite(j_rl):
-            nps = (j_rl - j_rand) / denom
-        else:
-            nps = float("nan")
-
-        ci_low, ci_high = _bootstrap_nps_ci(
-            rl_arr=rl_arr,
-            rand_arr=rand_arr,
-            static_arr=static_arr,
-            n_boot=800,
-            seed=42,
-        )
-        rows.append(
-            {
-                "phase": phase,
-                "phase_label": PHASE_LABELS.get(
-                    phase, TEXT["phase_overall"] if phase == "overall" else phase.title()
-                ),
-                "j_rl": j_rl,
-                "j_wait": j_w,
-                "j_reroute": j_r,
-                "j_rand": j_rand,
-                "j_static": j_static,
-                "static_policy": static_policy,
-                "nps": nps,
-                "nps_ci_low": ci_low,
-                "nps_ci_high": ci_high,
-            }
-        )
-
-    nps_df = pd.DataFrame(rows)
-    nps_df = nps_df[nps_df["nps"].notna()].copy().reset_index(drop=True)
-    if nps_df.empty:
-        ax_a.text(0.5, 0.5, TEXT["missing_baseline"], ha="center", va="center", fontsize=12)
-        ax_a.axis("off")
-        ax_b.axis("off")
-        fig.tight_layout()
-        fig.savefig(out_path, dpi=DEFAULT_DPI)
-        plt.close(fig)
-        return
-
-    y_pos = np.arange(len(nps_df), dtype=float)
-
-    # Panel A: horizontal point-range (NPS + CI), replacing thick bars
-    nps_vals = nps_df["nps"].to_numpy(dtype=float)
-    ci_lo = nps_df["nps_ci_low"].to_numpy(dtype=float)
-    ci_hi = nps_df["nps_ci_high"].to_numpy(dtype=float)
-    err_low = np.maximum(0.0, nps_vals - np.where(np.isfinite(ci_lo), ci_lo, nps_vals))
-    err_hi = np.maximum(0.0, np.where(np.isfinite(ci_hi), ci_hi, nps_vals) - nps_vals)
-
-    x_max = max(1.25, float(np.nanmax(nps_vals)) + 0.22)
-    x_min = min(-0.25, float(np.nanmin(nps_vals)) - 0.12)
-    ax_a.axvspan(1.0, x_max, color="#EAF6EA", alpha=0.75, zorder=0)
-    ax_a.axvline(0.0, color="#6C6C6C", linestyle=(0, (4, 3)), linewidth=1.1, zorder=1, label=TEXT["nps_ref_zero"])
-    ax_a.axvline(1.0, color="#2E7D32", linestyle=(0, (2, 2)), linewidth=1.3, zorder=1, label=TEXT["nps_ref_one"])
-    ax_a.hlines(y_pos, xmin=np.minimum(0.0, nps_vals), xmax=np.maximum(0.0, nps_vals), color="#D0D0D0", linewidth=1.2, zorder=1)
-    ax_a.errorbar(
-        nps_vals,
-        y_pos,
-        xerr=np.vstack([err_low, err_hi]),
-        fmt="o",
-        markersize=7.2,
-        markerfacecolor="#1F77B4",
-        markeredgecolor="#1A1A1A",
-        markeredgewidth=0.6,
-        ecolor="#3A3A3A",
-        elinewidth=1.2,
-        capsize=3.5,
-        zorder=3,
-    )
-    for x, y in zip(nps_vals, y_pos):
-        ax_a.text(x + 0.03, y, f"{x:.2f}", va="center", ha="left", fontsize=10.2, color="#1F1F1F")
-    ax_a.set_xlim(x_min, x_max)
-    ax_a.set_yticks(y_pos)
-    ax_a.set_yticklabels(nps_df["phase_label"].tolist())
-    ax_a.set_xlabel(TEXT["nps_ylabel"])
-    ax_a.set_title(TEXT["nps_panel_a"])
-    ax_a.grid(True, axis="x", linestyle="--", alpha=0.22)
-    ax_a.legend(loc="lower right", frameon=False, fontsize=9.2)
-
-    # Panel B: richer horizontal dumbbell (Random/Wait/Reroute/RL)
-    for i, row in nps_df.iterrows():
-        y = y_pos[i]
-        j_rand = float(row["j_rand"])
-        j_wait = float(row["j_wait"])
-        j_rer = float(row["j_reroute"])
-        j_rl = float(row["j_rl"])
-        j_static = float(row["j_static"])
-
-        if np.isfinite(j_rand) and np.isfinite(j_static):
-            ax_b.plot([j_rand, j_static], [y, y], color="#C7C7C7", linewidth=1.2, linestyle=(0, (2, 2)), zorder=1)
-        if np.isfinite(j_static) and np.isfinite(j_rl):
-            gain_color = "#1F77B4" if j_rl >= j_static else "#C23B22"
-            ax_b.plot([j_static, j_rl], [y, y], color=gain_color, linewidth=3.0, solid_capstyle="round", zorder=2)
-            denom = max(1e-9, abs(j_static))
-            gain_pct = (j_rl - j_static) / denom * 100.0
-            ax_b.text(
-                (j_static + j_rl) / 2.0,
-                y - 0.19,
-                f"{gain_pct:+.1f}%",
-                ha="center",
-                va="bottom",
-                fontsize=9.0,
-                color=gain_color,
-                fontweight="semibold",
-            )
-
-        if np.isfinite(j_rand):
-            ax_b.scatter(j_rand, y, color="#B3B3B3", alpha=0.65, s=28, marker="o", zorder=3)
-        if np.isfinite(j_wait):
-            ax_b.scatter(j_wait, y, color="#5A5A5A", s=42, marker="^", zorder=4)
-        if np.isfinite(j_rer):
-            ax_b.scatter(j_rer, y, color="#4D4D4D", s=44, marker="s", zorder=4)
-        if np.isfinite(j_rl):
-            ax_b.scatter(j_rl, y, color="#1F77B4", s=66, marker="D", zorder=5)
-
-    # legend handles
-    ax_b.scatter([], [], color="#B3B3B3", alpha=0.65, s=28, marker="o", label=TEXT["legend_rand"])
-    ax_b.scatter([], [], color="#5A5A5A", s=42, marker="^", label=TEXT["always_wait"])
-    ax_b.scatter([], [], color="#4D4D4D", s=44, marker="s", label=TEXT["always_reroute"])
-    ax_b.scatter([], [], color="#1F77B4", s=66, marker="D", label=TEXT["legend_rl"])
-    ax_b.set_yticks(y_pos)
-    ax_b.set_yticklabels(nps_df["phase_label"].tolist())
-    ax_b.set_title(TEXT["nps_panel_b"])
-    ax_b.set_xlabel(TEXT["reward_axis"])
-    all_x = np.concatenate(
-        [
-            nps_df["j_rand"].to_numpy(dtype=float),
-            nps_df["j_wait"].to_numpy(dtype=float),
-            nps_df["j_reroute"].to_numpy(dtype=float),
-            nps_df["j_rl"].to_numpy(dtype=float),
+    component_rows = []
+    for stage_name, payload in [(TEXT["train_stage"], train_metrics), (TEXT["implement_stage"], implement_metrics)]:
+        row = {"stage": stage_name}
+        for key in component_order:
+            row[key] = _safe_float(payload.get(key))
+        component_rows.append(row)
+    comp_df = pd.DataFrame(component_rows).set_index("stage")
+    keep_components = [
+        key
+        for key in component_order
+        if np.isfinite(comp_df[key]).any() and comp_df[key].fillna(0).abs().sum() > 0
+    ]
+    if not keep_components:
+        keep_components = ["overall_cost"]
+        comp_df["overall_cost"] = [
+            _safe_float(train_metrics.get("overall_cost")),
+            _safe_float(implement_metrics.get("overall_cost")),
         ]
-    )
-    all_x = all_x[np.isfinite(all_x)]
-    xmax_b = max(1.02, float(all_x.max()) + 0.03) if all_x.size else 1.02
-    ax_b.set_xlim(0.0, xmax_b)
-    ax_b.grid(True, axis="x", linestyle="--", alpha=0.22)
-    ax_b.legend(loc="lower right", frameon=False, fontsize=8.8, ncol=2)
 
-    ax_a.invert_yaxis()
-    fig.suptitle(TEXT["nps_title"], y=1.02, fontsize=14)
-    sns.despine(fig=fig)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI)
+    index_specs = [
+        ("overall_cost", "Generalized Cost"),
+        ("overall_time", "Transit Time"),
+        ("overall_emission", "Emissions"),
+        ("overall_storage_cost", "Storage Cost"),
+    ]
+    index_rows = []
+    for key, label in index_specs:
+        train_val = _safe_float(train_metrics.get(key))
+        impl_val = _safe_float(implement_metrics.get(key))
+        if not np.isfinite(train_val) or not np.isfinite(impl_val) or abs(train_val) <= 1e-9:
+            continue
+        index_rows.append({"metric": label, "ratio": impl_val / train_val})
+    index_df = pd.DataFrame(index_rows)
+
+    kpis = [
+        (TEXT["kpi_matched"], _safe_float(action_metrics.get("implement_matched_rate")) * 100.0, "%"),
+        (TEXT["kpi_replan"], _safe_float(action_metrics.get("implement_action1_rate")) * 100.0, "%"),
+        (TEXT["kpi_latency"], _safe_float(action_metrics.get("decision_latency_ms_mean")) / 1000.0, "s"),
+        (TEXT["kpi_served"], _safe_float(implement_metrics.get("served_requests")), "count"),
+    ]
+
+    fig = plt.figure(figsize=(15.2, 7.6), dpi=DEFAULT_DPI)
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.5, 1.0], height_ratios=[1.0, 0.90], wspace=0.28, hspace=0.38)
+    ax_cost = fig.add_subplot(gs[:, 0])
+    ax_index = fig.add_subplot(gs[0, 1])
+    ax_kpi = fig.add_subplot(gs[1, 1])
+
+    left = np.zeros(len(comp_df), dtype=float)
+    y_cost = np.arange(len(comp_df), dtype=float)
+    for key in keep_components:
+        values = comp_df[key].fillna(0.0).to_numpy(dtype=float)
+        ax_cost.barh(
+            y_cost,
+            values,
+            left=left,
+            color=COMPONENT_COLORS.get(key, "#B0B0B0"),
+            edgecolor="white",
+            height=0.58,
+            label=COMPONENT_LABELS.get(key, key.replace("overall_", "").replace("_", " ").title()),
+        )
+        left = left + values
+    max_total = float(np.nanmax(left)) if left.size else 0.0
+    total_costs = [
+        _safe_float(train_metrics.get("overall_cost")),
+        _safe_float(implement_metrics.get("overall_cost")),
+    ]
+    for y, total in zip(y_cost, total_costs):
+        if np.isfinite(total):
+            ax_cost.text(total + max(max_total * 0.015, 250.0), y, f"{total:,.0f}", va="center", ha="left", fontsize=10.2)
+    ax_cost.set_yticks(y_cost)
+    ax_cost.set_yticklabels(comp_df.index.tolist())
+    ax_cost.invert_yaxis()
+    ax_cost.set_xlabel("Cost Components", labelpad=4)
+    ax_cost.set_title(TEXT["ops_cost"], pad=10)
+    ax_cost.grid(True, axis="x", linestyle="--", alpha=0.22)
+    ax_cost.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.27),
+        ncol=2,
+        frameon=False,
+        fontsize=9.4,
+        columnspacing=1.8,
+        handletextpad=0.6,
+    )
+
+    if not index_df.empty:
+        y_idx = np.arange(len(index_df), dtype=float)
+        ax_index.axvline(1.0, color="#7A7A7A", linestyle=(0, (3, 3)), linewidth=1.1, zorder=1)
+        for i, row in index_df.iterrows():
+            y = y_idx[i]
+            ratio = float(row["ratio"])
+            ax_index.plot([1.0, ratio], [y, y], color="#BDBDBD", linewidth=1.4, zorder=1)
+            ax_index.scatter(1.0, y, s=46, color="#5B7B95", edgecolor="white", linewidth=0.7, zorder=3)
+            ax_index.scatter(ratio, y, s=64, color="#C46E52", edgecolor="white", linewidth=0.7, zorder=4)
+            ax_index.text(ratio + 0.03, y, f"x{ratio:.2f}", va="center", ha="left", fontsize=10.0)
+        ax_index.set_yticks(y_idx)
+        ax_index.set_yticklabels(index_df["metric"].tolist())
+        ax_index.invert_yaxis()
+        xmax = max(1.1, float(index_df["ratio"].max()) * 1.18)
+        ax_index.set_xlim(0.75, xmax)
+    else:
+        ax_index.text(0.5, 0.5, TEXT["na_short"], ha="center", va="center", fontsize=11.5)
+        ax_index.set_yticks([])
+    ax_index.set_xlabel(TEXT["index_ratio"])
+    ax_index.set_title(TEXT["ops_index"], pad=10)
+    ax_index.grid(True, axis="x", linestyle="--", alpha=0.22)
+
+    ax_kpi.axis("off")
+    ax_kpi.set_title(TEXT["ops_kpi"], pad=2, y=0.90)
+    card_positions = [(0.02, 0.49), (0.52, 0.49), (0.02, 0.03), (0.52, 0.03)]
+    for (label, value, unit), (x0, y0) in zip(kpis, card_positions):
+        ax_kpi.add_patch(
+            plt.Rectangle(
+                (x0, y0),
+                0.44,
+                0.30,
+                transform=ax_kpi.transAxes,
+                facecolor="#F8F6F3",
+                edgecolor="#D5CEC6",
+                linewidth=0.9,
+            )
+        )
+        ax_kpi.text(x0 + 0.03, y0 + 0.20, label, transform=ax_kpi.transAxes, fontsize=10.2, color="#5A5A5A")
+        ax_kpi.text(
+            x0 + 0.03,
+            y0 + 0.07,
+            _format_display_value(value, unit=unit),
+            transform=ax_kpi.transAxes,
+            fontsize=15.4,
+            fontweight="semibold",
+            color="#1E1E1E",
+        )
+
+    fig.suptitle(TEXT["ops_title"], y=1.01, fontsize=14.2)
+    sns.despine(fig=fig, left=False, bottom=False)
+    fig.subplots_adjust(left=0.07, right=0.985, top=0.88, bottom=0.17)
+    _save_figure_bundle(fig, out_path)
     plt.close(fig)
 
 
@@ -1389,30 +1633,34 @@ def main() -> None:
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
 
     trace_path = run_dir / "rl_trace.csv"
-    if not trace_path.exists():
-        raise FileNotFoundError(f"rl_trace.csv not found: {trace_path}")
-
-    trace = _read_csv(trace_path)
-    _coerce_numeric(trace, ["table_number", "gt_mean", "severity", "action", "reward", "ts"])
+    trace = pd.DataFrame()
+    if trace_path.exists():
+        trace = _read_csv(trace_path)
+        _coerce_numeric(trace, ["table_number", "gt_mean", "severity", "action", "reward", "ts"])
 
     dist_name: Optional[str] = None
     meta_path = run_dir / "meta.json"
     if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except UnicodeDecodeError:
-            meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+        meta = _read_json(meta_path)
         value = meta.get("distribution")
         if value:
             dist_name = str(value)
 
     training = _load_rl_training(run_dir)
+    decisions = _load_rl_decisions(run_dir)
     baseline_wait = _load_baseline_events(run_dir / "baseline_wait.csv", "wait")
     baseline_reroute = _load_baseline_events(run_dir / "baseline_reroute.csv", "reroute")
     baseline_random = _load_baseline_events(run_dir / "baseline_random.csv", "random")
-    aligned = _prepare_aligned_decisions(trace, training)
+    aligned = decisions if not decisions.empty else _prepare_aligned_decisions(trace, training)
+    if aligned.empty:
+        raise ValueError("Unable to build aligned decision-level data from rl_decision.csv or rl_trace.csv.")
 
-    sns.set_theme(style="whitegrid", context="paper", font_scale=1.35)
+    run_summary = {}
+    run_summary_path = run_dir / "run_summary.json"
+    if run_summary_path.exists():
+        run_summary = _read_json(run_summary_path)
+
+    sns.set_theme(style="ticks", context="paper", font_scale=1.22)
     plt.rcParams["figure.dpi"] = DEFAULT_DPI
     plt.rcParams["savefig.dpi"] = DEFAULT_DPI
     if not USE_CHINESE:
@@ -1434,6 +1682,10 @@ def main() -> None:
     plt.rcParams["axes.labelsize"] = 13
     plt.rcParams["xtick.labelsize"] = 11.5
     plt.rcParams["ytick.labelsize"] = 11.5
+    plt.rcParams["axes.edgecolor"] = "#585858"
+    plt.rcParams["axes.linewidth"] = 0.85
+    plt.rcParams["grid.color"] = "#D8D8D8"
+    plt.rcParams["grid.linewidth"] = 0.7
 
     out_dir = run_dir / "paper_figures"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1449,20 +1701,16 @@ def main() -> None:
         dist_name,
         risk_q=args.risk_q,
     )
-    _plot_policy_heatmap(trace, aligned, out_dir / "fig3_policy_heatmap.pdf")
-    _plot_nps_superiority(
-        aligned,
-        baseline_wait,
-        baseline_reroute,
-        baseline_random,
-        out_dir / "fig4_nps_superiority.pdf",
-    )
+    _plot_policy_heatmap(aligned, out_dir / "fig3_policy_heatmap.pdf")
+    if run_summary:
+        _plot_operational_profile(run_summary, out_dir / "fig4_operational_profile.pdf")
 
     print("Saved figures to:", out_dir)
-    print("  fig1_environment.pdf")
-    print("  fig2_adaptation.pdf")
-    print("  fig3_policy_heatmap.pdf")
-    print("  fig4_nps_superiority.pdf")
+    print("  fig1_environment.pdf / .svg")
+    print("  fig2_adaptation.pdf / .svg")
+    print("  fig3_policy_heatmap.pdf / .svg")
+    if run_summary:
+        print("  fig4_operational_profile.pdf / .svg")
 
 
 if __name__ == "__main__":

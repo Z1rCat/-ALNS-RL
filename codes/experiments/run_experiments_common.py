@@ -663,16 +663,23 @@ class NotificationManager:
     def enabled(self) -> bool:
         return bool(self.channels)
 
-    def send(self, event: str, title: str, message: str, payload: Optional[Dict[str, Any]] = None) -> bool:
+    def send(
+        self,
+        event: str,
+        title: str,
+        message: str,
+        payload: Optional[Dict[str, Any]] = None,
+        html_message: Optional[str] = None,
+    ) -> bool:
         if not self.enabled:
             return False
         payload_dict = dict(payload or {})
         key = self._make_cooldown_key(event, title, payload_dict)
 
         body_lines = [
-            f"event={event}",
-            f"host={self.hostname}",
-            f"time={datetime.datetime.now().isoformat(timespec='seconds')}",
+            f"事件={event}",
+            f"主机={self.hostname}",
+            f"时间={datetime.datetime.now().isoformat(timespec='seconds')}",
             "",
             message,
         ]
@@ -685,7 +692,7 @@ class NotificationManager:
             if self.webhook_url:
                 ok = self._send_webhook(event, title, body, payload_dict) or ok
             if self.smtp_host and self.smtp_to and self.smtp_from:
-                ok = self._send_email(title, body) or ok
+                ok = self._send_email(title, body, html_body=html_message) or ok
             if self.twilio_sid and self.twilio_token and self.twilio_from and self.twilio_to:
                 sms_body = f"{title}\n{message}"
                 if len(sms_body) > 1400:
@@ -749,13 +756,15 @@ class NotificationManager:
             print(f"{_c('[notify]', 'red', True)} webhook failed: {exc}")
             return False
 
-    def _send_email(self, subject: str, body: str) -> bool:
+    def _send_email(self, subject: str, body: str, *, html_body: Optional[str] = None) -> bool:
         try:
             msg = EmailMessage()
             msg["Subject"] = subject
             msg["From"] = self.smtp_from
             msg["To"] = self.smtp_to
             msg.set_content(body)
+            if str(html_body or "").strip():
+                msg.add_alternative(str(html_body), subtype="html")
 
             if self.smtp_use_ssl:
                 server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=20)
@@ -1796,6 +1805,8 @@ def run_task(
             metrics_complete = False
             plot_complete = False
             _safe_unlink(run_dir / "metrics.json")
+            _safe_unlink(run_dir / "run_summary.json")
+            _safe_unlink(run_dir / "run_summary_flat.csv")
             _safe_rmtree(run_dir / "paper_figures")
 
         if config.run_baseline and not baseline_complete:
@@ -1902,6 +1913,8 @@ def run_task(
                 metrics_complete = False
                 plot_complete = False
                 _safe_unlink(run_dir / "metrics.json")
+                _safe_unlink(run_dir / "run_summary.json")
+                _safe_unlink(run_dir / "run_summary_flat.csv")
                 _safe_rmtree(run_dir / "paper_figures")
 
         if config.run_metrics and not metrics_complete:
@@ -1912,6 +1925,8 @@ def run_task(
             while True:
                 attempt += 1
                 _safe_unlink(run_dir / "metrics.json")
+                _safe_unlink(run_dir / "run_summary.json")
+                _safe_unlink(run_dir / "run_summary_flat.csv")
                 t0 = time.monotonic()
                 code = run_command(metrics_cmd, cwd=ROOT_DIR, timeout_s=metrics_timeout_s)
                 stage_times[f"metrics_sec_attempt_{attempt}"] = time.monotonic() - t0

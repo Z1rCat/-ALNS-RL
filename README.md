@@ -75,6 +75,224 @@ python codes/experiments/run_experiments_server_ppo.py --run-folder ppo_batch_YY
 - `--no-resume-existing`: 不续跑，强制新建 run。
 - `--no-skip-completed`: 已完成任务也不跳过。
 
+### 推荐：Transport 主实验调度脚本（Adaptive，无 baseline）
+```bash
+python codes/experiments/run_server_transport_main_suite.py \
+  --run-folder transport_main_adaptive_notify \
+  --wave smoke \
+  --seed 42 \
+  --request-number 30 \
+  --max-workers 4 \
+  --generator-workers 1 \
+  --run-metrics \
+  --run-plots \
+  --cleanup-after-run
+```
+说明：
+- 默认后端已切换为 `adaptive`，会根据历史运行时间在线调整任务调度顺序。
+- 默认不跑 `baseline`，避免旧版回放阶段长期卡住。
+- 成功 run 可自动清理 `data/` 与 `alns_outputs/`，但保留 `metrics.json`、`run_summary.json`、`paper_figures/` 等结果文件。
+- `optimal_hybrid` 现在支持 `auto / gurobi / mp_bnb / serial_bnb` 四种求解路径：默认 `auto`，优先尝试 Gurobi，其次多进程分支定界，最后回退到串行分支定界。
+- `transport_scheduler_warmstart_smoke_v1.json` 会作为默认 warm-start 模板；adaptive 运行中每完成一个任务，都会更新当前 `run_root` 下的状态文件，并可同步刷新模板供后续批次复用。
+
+## 邮件通知系统（服务器运行提醒）
+项目已经内置调度层通知系统，优先推荐用邮箱；短信通道复用 Twilio，QQ 推荐直接使用 QQ 邮箱 SMTP。
+
+### 触发时机
+- 启动通知：任务池建立后发送一次。
+- 定时状态：默认每天 `08:00`、`12:00`、`16:00`、`20:00` 发送一次状态简报。
+- 批次进展：默认每完成 `5` 个任务发送一次。
+- 异常/重排：任务触发 timeout/stall/lock/unknown-retry 并被重排时发送。
+- 完成通知：整批任务结束后发送。
+- 单 run 失败：原有失败通知仍保留。
+
+### 通知内容
+邮件会同时发送：
+- 中文纯文本简报
+- 中文 HTML 表格版简报
+
+内容包括：
+- 运行目录、当前阶段、启动时间、当前时间、累计运行时间
+- 总任务数、完成数、运行中、剩余、deferred、失败数、成功率
+- CPU、内存、swap、可用内存、load/core
+- ETA、预计完成时间、平均完成耗时、当前最长运行任务
+- 按算法统计、按分布统计
+- 当前运行中的任务
+- 最近完成任务
+- 最近重排/异常任务
+- 最终失败任务
+- 关键文件路径（events / summary / coef_state / live_status）
+- 诊断提示（当前资源压力、是否存在长尾、当前调度求解模式等）
+
+### 推荐依赖
+邮件发送使用 Python 标准库 `smtplib`，不需要额外邮件库。  
+建议安装 `psutil`，否则 CPU/内存/Swap 等资源指标会不完整：
+
+```bash
+python -m pip install psutil
+```
+
+若希望启用 Gurobi 作为调度器精确求解后端，还需要额外安装 `gurobipy`，并确保本机具备有效的 Gurobi License：
+
+```bash
+python -m pip install gurobipy
+```
+
+注意：`gurobipy` 不是默认必需依赖；未安装时，调度器会自动回退到 `mp_bnb` 或 `serial_bnb`。
+
+### SMTP 环境变量
+运行前设置以下环境变量即可启用邮箱通知：
+
+- `EXP_NOTIFY_SMTP_HOST`
+- `EXP_NOTIFY_SMTP_PORT`
+- `EXP_NOTIFY_SMTP_USER`
+- `EXP_NOTIFY_SMTP_PASSWORD`
+- `EXP_NOTIFY_SMTP_FROM`
+- `EXP_NOTIFY_SMTP_TO`
+- `EXP_NOTIFY_SMTP_SSL`
+- `EXP_NOTIFY_SMTP_TLS`
+- `EXP_NOTIFY_COOLDOWN_S`
+
+#### QQ 邮箱示例（PowerShell）
+```powershell
+$env:EXP_NOTIFY_SMTP_HOST="smtp.qq.com"
+$env:EXP_NOTIFY_SMTP_PORT="465"
+$env:EXP_NOTIFY_SMTP_USER="your_mail@qq.com"
+$env:EXP_NOTIFY_SMTP_PASSWORD="你的SMTP授权码"
+$env:EXP_NOTIFY_SMTP_FROM="your_mail@qq.com"
+$env:EXP_NOTIFY_SMTP_TO="recv1@qq.com,recv2@outlook.com"
+$env:EXP_NOTIFY_SMTP_SSL="1"
+$env:EXP_NOTIFY_SMTP_TLS="0"
+$env:EXP_NOTIFY_COOLDOWN_S="300"
+```
+
+注意：
+- QQ 邮箱这里使用的是 SMTP 授权码，不是网页登录密码。
+- `EXP_NOTIFY_SMTP_TO` 可以写多个收件人，用英文逗号分隔。
+- 若测试时不希望“发送失败也进入 cooldown”，可临时设置：
+
+```powershell
+$env:EXP_NOTIFY_COOLDOWN_ON_SEND_FAIL="0"
+```
+
+### Twilio 短信通道（可选）
+如需短信，设置：
+- `EXP_NOTIFY_TWILIO_ACCOUNT_SID`
+- `EXP_NOTIFY_TWILIO_AUTH_TOKEN`
+- `EXP_NOTIFY_TWILIO_FROM`
+- `EXP_NOTIFY_TWILIO_TO`
+
+### 通知相关命令参数
+`run_server_transport_main_suite.py` 会透传以下参数到 adaptive 调度器：
+
+- `--notify-scheduler / --no-notify-scheduler`
+- `--notify-schedule-times 08:00,12:00,16:00,20:00`
+- `--notify-batch-size 5`
+- `--notify-on-start / --no-notify-on-start`
+- `--notify-on-requeue / --no-notify-on-requeue`
+- `--notify-on-finish / --no-notify-on-finish`
+- `--notify-live-status-interval-s 30`
+- `--notify-success`
+- `--no-notify-failure`
+
+### 启用邮件通知的推荐命令
+```powershell
+& A:\MYpython\34959_RL\codes\env\python.exe A:\MYpython\34959_RL\codes\experiments\run_server_transport_main_suite.py `
+  --run-folder transport_main_adaptive_notify `
+  --wave smoke `
+  --seed 42 `
+  --request-number 30 `
+  --max-workers 4 `
+  --generator-workers 1 `
+  --run-metrics `
+  --run-plots `
+  --cleanup-after-run `
+  --notify-scheduler `
+  --notify-schedule-times 08:00,12:00,16:00,20:00 `
+  --notify-batch-size 5 `
+  --notify-on-start `
+  --notify-on-requeue `
+  --notify-on-finish
+```
+
+### 仅测试邮件与调度器通知
+如果只是想测试 QQ 邮箱和 adaptive 通知，不想真正训练，请直接运行 adaptive 后端自己的 `--dry-run`。  
+注意：`run_server_transport_main_suite.py --dry-run` 只会打印后端命令，不会真正进入 adaptive 调度器，因此不会触发邮件发送。
+
+```powershell
+& A:\MYpython\34959_RL\codes\env\python.exe A:\MYpython\34959_RL\codes\experiments\run_experiments_server_adaptive.py `
+  --run-folder transport_mail_test_direct `
+  --variant PPO `
+  --variant A2C `
+  --dist-name M_60 `
+  --dist-name R_10_120 `
+  --request-number 30 `
+  --seed 42 `
+  --max-workers 2 `
+  --generator-workers 1 `
+  --scheduler-policy optimal_hybrid `
+  --scheduler-opt-solver mp_bnb `
+  --scheduler-opt-max-solver-workers 2 `
+  --no-run-baseline `
+  --no-run-plots `
+  --no-run-metrics `
+  --notify-scheduler `
+  --notify-batch-size 1 `
+  --notify-on-start `
+  --notify-on-requeue `
+  --notify-on-finish `
+  --dry-run
+```
+
+### 最小真实调度测试命令
+下面这条命令会真实运行 `PPO` 和 `A2C`，只覆盖两个分布，适合验证：
+- 调度器是否按 `optimal_hybrid + mp_bnb` 工作
+- 中文邮件是否正常
+- 状态文件和模板是否会在运行中更新
+
+```powershell
+& A:\MYpython\34959_RL\codes\env\python.exe A:\MYpython\34959_RL\codes\experiments\run_experiments_server_adaptive.py `
+  --run-folder ppo_a2c_mail_sched_test `
+  --variant PPO `
+  --variant A2C `
+  --dist-name M_60 `
+  --dist-name R_10_120 `
+  --request-number 30 `
+  --seed 42 `
+  --max-workers 2 `
+  --generator-workers 1 `
+  --scheduler-policy optimal_hybrid `
+  --scheduler-opt-solver mp_bnb `
+  --scheduler-opt-max-solver-workers 2 `
+  --template-state-path .\codes\experiments\transport_scheduler_warmstart_smoke_v1.json `
+  --no-run-baseline `
+  --run-metrics `
+  --no-run-plots `
+  --cleanup-after-run `
+  --notify-scheduler `
+  --notify-schedule-times "" `
+  --notify-batch-size 2 `
+  --notify-on-start `
+  --notify-on-requeue `
+  --notify-on-finish
+```
+
+### 运行中的状态文件
+调度层会持续写出以下文件，便于邮件之外的人工排查：
+- `codes/nexus/<run_folder>/adaptive_scheduler_events.csv`
+- `codes/nexus/<run_folder>/adaptive_scheduler_coef_state.json`
+- `codes/nexus/<run_folder>/adaptive_scheduler_summary.json`
+- `codes/nexus/<run_folder>/adaptive_scheduler_live_status.json`
+- `codes/nexus/<run_folder>/adaptive_scheduler_notify_state.json`
+
+### 排错建议
+- 若没有收到邮件，先检查 SMTP 环境变量是否在同一个终端会话中设置。
+- 若资源指标显示 `n/a`，通常是未安装 `psutil`。
+- 若邮件过于频繁，可调大 `EXP_NOTIFY_COOLDOWN_S` 或增大 `--notify-batch-size`。
+- 若只想保留定时状态和结束通知，可关闭 `--notify-on-requeue`。
+- 若运行在晚上首次启动，默认 `08:00,12:00,16:00,20:00` 的定时播报可能会在启动后集中补发；测试 QQ 邮箱时，建议把 `--notify-schedule-times ""` 置空，先只测启动/批次/完成邮件。
+- 若出现 `email failed: Connection unexpectedly closed`，实验会继续运行，通知失败不会中断调度；当前版本不会自动补发失败的那一封邮件。
+
 ### 本地版本（调试用）
 ```bash
 python codes/run_experiments_local.py

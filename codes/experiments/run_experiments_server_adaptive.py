@@ -4,6 +4,7 @@ import argparse
 import concurrent.futures
 import csv
 import datetime
+import html
 import json
 import math
 import os
@@ -97,6 +98,560 @@ class TaskResult:
     status: str
     elapsed_seconds: float
     error: str = ""
+
+
+@dataclass(frozen=True)
+class PredictedPendingJob:
+    job: ScheduledJob
+    predicted_seconds: float
+
+
+@dataclass
+class SchedulerPlan:
+    policy: str
+    mode: str
+    total_pending_jobs: int
+    optimized_jobs: int
+    slot_sequences: Dict[int, List[ScheduledJob]]
+    best_makespan_seconds: float
+    lower_bound_seconds: float
+    upper_bound_seconds: float
+    exact_nodes: int = 0
+    exact_time_seconds: float = 0.0
+    time_limit_hit: bool = False
+    used_fallback: bool = False
+
+    def summary_dict(self) -> Dict[str, object]:
+        return {
+            "policy": str(self.policy),
+            "mode": str(self.mode),
+            "total_pending_jobs": int(self.total_pending_jobs),
+            "optimized_jobs": int(self.optimized_jobs),
+            "best_makespan_seconds": float(self.best_makespan_seconds),
+            "best_makespan_human": _format_eta(float(self.best_makespan_seconds)),
+            "lower_bound_seconds": float(self.lower_bound_seconds),
+            "lower_bound_human": _format_eta(float(self.lower_bound_seconds)),
+            "upper_bound_seconds": float(self.upper_bound_seconds),
+            "upper_bound_human": _format_eta(float(self.upper_bound_seconds)),
+            "exact_nodes": int(self.exact_nodes),
+            "exact_time_seconds": float(self.exact_time_seconds),
+            "exact_time_human": _format_eta(float(self.exact_time_seconds)),
+            "time_limit_hit": bool(self.time_limit_hit),
+            "used_fallback": bool(self.used_fallback),
+            "dispatchable_slots": [
+                int(slot_id)
+                for slot_id, seq in sorted(self.slot_sequences.items(), key=lambda kv: kv[0])
+                if seq
+            ],
+        }
+
+
+def _predict_pending_jobs(
+    pending_by_dist: Dict[str, List[ScheduledJob]],
+    model: "AdaptiveDurationModel",
+) -> List[PredictedPendingJob]:
+    out: List[PredictedPendingJob] = []
+    for items in pending_by_dist.values():
+        for job in items:
+            out.append(
+                PredictedPendingJob(
+                    job=job,
+                    predicted_seconds=float(
+                        model.predict(
+                            algo_key=job.algorithm_key,
+                            dist_name=job.dist_name,
+                            request_number=int(job.request_number),
+                        )
+                    ),
+                )
+            )
+    out.sort(key=lambda item: (-float(item.predicted_seconds), str(item.job.job_key)))
+    return out
+
+
+def _greedy_lpt_schedule(
+    *,
+    base_loads: List[float],
+    jobs: List[PredictedPendingJob],
+) -> Tuple[Dict[int, List[ScheduledJob]], List[float], float]:
+    loads = [float(x) for x in base_loads]
+    sequences: Dict[int, List[ScheduledJob]] = {idx: [] for idx in range(len(loads))}
+    ordered_jobs = sorted(jobs, key=lambda item: (-float(item.predicted_seconds), str(item.job.job_key)))
+    for item in ordered_jobs:
+        slot_id = min(range(len(loads)), key=lambda idx: (loads[idx], idx))
+        sequences[slot_id].append(item.job)
+        loads[slot_id] += float(item.predicted_seconds)
+    makespan = max(loads) if loads else 0.0
+    return sequences, loads, float(makespan)
+
+
+def _pop_specific_pending_job(
+    pending_by_dist: Dict[str, List[ScheduledJob]],
+    target: ScheduledJob,
+) -> Optional[ScheduledJob]:
+    dist_key = str(target.dist_name)
+    queue = pending_by_dist.get(dist_key, [])
+    for idx, job in enumerate(queue):
+        if job is target or str(job.job_key) == str(target.job_key):
+            return queue.pop(idx)
+    return None
+
+
+def _exact_branch_and_bound_schedule(
+    *,
+    base_loads: List[float],
+    jobs: List[PredictedPendingJob],
+    time_limit_s: float,
+    load_round_seconds: float,
+) -> Tuple[Dict[int, List[ScheduledJob]], List[float], float, float, int, bool, float]:
+    if not jobs:
+        empty = {idx: [] for idx in range(len(base_loads))}
+        makespan = max(base_loads) if base_loads else 0.0
+        return empty, [float(x) for x in base_loads], float(makespan), float(makespan), 0, False, 0.0
+
+    seed_sequences, seed_loads, seed_makespan = _greedy_lpt_schedule(base_loads=base_loads, jobs=jobs)
+    best_sequences = {idx: list(items) for idx, items in seed_sequences.items()}
+    best_loads = [float(x) for x in seed_loads]
+    best_makespan = float(seed_makespan)
+
+    ordered_jobs = sorted(jobs, key=lambda item: (-float(item.predicted_seconds), str(item.job.job_key)))
+    m = len(base_loads)
+    suffix_sum: List[float] = [0.0 for _ in range(len(ordered_jobs) + 1)]
+    for idx in range(len(ordered_jobs) - 1, -1, -1):
+        suffix_sum[idx] = suffix_sum[idx + 1] + float(ordered_jobs[idx].predicted_seconds)
+
+    round_unit = max(1.0, float(load_round_seconds))
+    visited = set()
+    start_ts = time.monotonic()
+    exact_nodes = 0
+    time_limit_hit = False
+    work_sequences: Dict[int, List[ScheduledJob]] = {idx: [] for idx in range(m)}
+
+    def _round_load(x: float) -> int:
+        return int(round(float(x) / round_unit))
+
+    def _lower_bound(idx: int, loads: List[float], assigned_sum: float) -> float:
+        rem_sum = float(suffix_sum[idx])
+        lb = max(max(loads), (float(sum(base_loads)) + float(assigned_sum) + rem_sum) / float(max(1, m)))
+        if idx < len(ordered_jobs):
+            lb = max(lb, min(loads) + float(ordered_jobs[idx].predicted_seconds))
+        return float(lb)
+
+    def _dfs(idx: int, loads: List[float], assigned_sum: float) -> None:
+        nonlocal best_sequences, best_loads, best_makespan, exact_nodes, time_limit_hit
+        if time.monotonic() - start_ts > float(time_limit_s):
+            time_limit_hit = True
+            return
+        exact_nodes += 1
+        lb = _lower_bound(idx, loads, assigned_sum)
+        if lb >= float(best_makespan) - 1e-9:
+            return
+        if idx >= len(ordered_jobs):
+            candidate = max(loads) if loads else 0.0
+            if candidate < float(best_makespan) - 1e-9:
+                best_makespan = float(candidate)
+                best_loads = [float(x) for x in loads]
+                best_sequences = {slot_id: list(items) for slot_id, items in work_sequences.items()}
+            return
+        key = (idx, tuple(sorted(_round_load(x) for x in loads)))
+        if key in visited:
+            return
+        visited.add(key)
+
+        item = ordered_jobs[idx]
+        duration = float(item.predicted_seconds)
+        seen_loads = set()
+        for slot_id in sorted(range(m), key=lambda s: (loads[s], s)):
+            rounded = _round_load(loads[slot_id])
+            if rounded in seen_loads:
+                continue
+            seen_loads.add(rounded)
+            new_load = float(loads[slot_id]) + duration
+            if new_load >= float(best_makespan) - 1e-9:
+                continue
+            loads[slot_id] = new_load
+            work_sequences[slot_id].append(item.job)
+            _dfs(idx + 1, loads, float(assigned_sum) + duration)
+            work_sequences[slot_id].pop()
+            loads[slot_id] = float(loads[slot_id]) - duration
+            if time_limit_hit:
+                return
+
+    start_loads = [float(x) for x in base_loads]
+    _dfs(0, start_loads, 0.0)
+    lower_bound = _lower_bound(0, [float(x) for x in base_loads], 0.0)
+    elapsed = max(0.0, float(time.monotonic() - start_ts))
+    return (
+        best_sequences,
+        best_loads,
+        float(best_makespan),
+        float(lower_bound),
+        int(exact_nodes),
+        bool(time_limit_hit),
+        float(elapsed),
+    )
+
+
+def _try_import_gurobi():
+    try:
+        import gurobipy as gp  # type: ignore
+        return gp
+    except Exception:
+        return None
+
+
+def _calc_solver_parallel_workers(args: argparse.Namespace, *, running_count: int) -> int:
+    max_cap = max(1, int(getattr(args, "scheduler_opt_max_solver_workers", 2)))
+    logical, physical = _detect_cpu_counts()
+    pressure = _sample_system_pressure()
+    cpu_now = float(pressure.get("cpu_percent", float("nan")))
+    if _is_finite(cpu_now) and cpu_now >= 88.0:
+        return 1
+    # Be conservative: active experiment runs already consume the machine.
+    assumed_busy_cores = max(2, int(running_count) * 2)
+    headroom = max(1, int(physical) - int(assumed_busy_cores) - 1)
+    return max(1, min(int(max_cap), int(headroom), int(logical)))
+
+
+def _gurobi_assignment_schedule(
+    *,
+    base_loads: List[float],
+    jobs: List[PredictedPendingJob],
+    time_limit_s: float,
+    threads: int,
+    mip_gap: float,
+) -> Optional[Tuple[Dict[int, List[ScheduledJob]], List[float], float, float, bool, float]]:
+    gp = _try_import_gurobi()
+    if gp is None or not jobs:
+        return None
+    try:
+        ordered_jobs = sorted(jobs, key=lambda item: (-float(item.predicted_seconds), str(item.job.job_key)))
+        m = len(base_loads)
+        n = len(ordered_jobs)
+        model = gp.Model("transport_scheduler_assignment")
+        model.Params.OutputFlag = 0
+        model.Params.TimeLimit = max(0.1, float(time_limit_s))
+        model.Params.Threads = max(1, int(threads))
+        model.Params.MIPGap = max(0.0, float(mip_gap))
+
+        x = model.addVars(n, m, vtype=gp.GRB.BINARY, name="x")
+        z = model.addVar(lb=max(base_loads) if base_loads else 0.0, vtype=gp.GRB.CONTINUOUS, name="z")
+        for j in range(n):
+            model.addConstr(gp.quicksum(x[j, s] for s in range(m)) == 1, name=f"assign_{j}")
+        for s in range(m):
+            model.addConstr(
+                float(base_loads[s]) + gp.quicksum(float(ordered_jobs[j].predicted_seconds) * x[j, s] for j in range(n)) <= z,
+                name=f"load_{s}",
+            )
+        model.setObjective(z, gp.GRB.MINIMIZE)
+        start_ts = time.monotonic()
+        model.optimize()
+        elapsed = max(0.0, float(time.monotonic() - start_ts))
+        status = int(model.Status)
+        if status not in {
+            int(gp.GRB.OPTIMAL),
+            int(gp.GRB.TIME_LIMIT),
+            int(gp.GRB.SUBOPTIMAL),
+        }:
+            model.dispose()
+            return None
+
+        sequences: Dict[int, List[ScheduledJob]] = {idx: [] for idx in range(m)}
+        final_loads = [float(x) for x in base_loads]
+        for j, item in enumerate(ordered_jobs):
+            assigned_slot = None
+            for s in range(m):
+                try:
+                    val = float(x[j, s].X)
+                except Exception:
+                    val = 0.0
+                if val >= 0.5:
+                    assigned_slot = s
+                    break
+            if assigned_slot is None:
+                assigned_slot = min(range(m), key=lambda idx: (final_loads[idx], idx))
+            sequences[int(assigned_slot)].append(item.job)
+            final_loads[int(assigned_slot)] += float(item.predicted_seconds)
+        for slot_id in list(sequences.keys()):
+            sequences[slot_id].sort(
+                key=lambda job: (
+                    -float(next((it.predicted_seconds for it in ordered_jobs if it.job is job or it.job.job_key == job.job_key), 0.0)),
+                    str(job.job_key),
+                )
+            )
+        makespan = float(model.ObjVal) if model.SolCount > 0 else float(max(final_loads) if final_loads else 0.0)
+        lower_bound = float(model.ObjBound) if hasattr(model, "ObjBound") else makespan
+        time_limit_hit = status == int(gp.GRB.TIME_LIMIT)
+        model.dispose()
+        return sequences, final_loads, makespan, lower_bound, bool(time_limit_hit), float(elapsed)
+    except Exception:
+        return None
+
+
+def _exact_branch_worker(payload: Tuple[List[float], List[PredictedPendingJob], float, float, int]) -> Tuple[Dict[int, List[ScheduledJob]], List[float], float, float, int, bool, float]:
+    base_loads, jobs, time_limit_s, load_round_seconds, fixed_slot = payload
+    if not jobs:
+        empty = {idx: [] for idx in range(len(base_loads))}
+        makespan = max(base_loads) if base_loads else 0.0
+        return empty, list(base_loads), float(makespan), float(makespan), 0, False, 0.0
+    first = jobs[0]
+    if len(jobs) == 1:
+        sequences = {idx: [] for idx in range(len(base_loads))}
+        loads = [float(x) for x in base_loads]
+        sequences[int(fixed_slot)] = [first.job]
+        loads[int(fixed_slot)] += float(first.predicted_seconds)
+        makespan = max(loads) if loads else 0.0
+        return sequences, loads, float(makespan), float(makespan), 1, False, 0.0
+    branch_loads = [float(x) for x in base_loads]
+    branch_loads[int(fixed_slot)] += float(first.predicted_seconds)
+    sequences, loads, makespan, lower_bound, nodes, timed_out, elapsed = _exact_branch_and_bound_schedule(
+        base_loads=branch_loads,
+        jobs=jobs[1:],
+        time_limit_s=float(time_limit_s),
+        load_round_seconds=float(load_round_seconds),
+    )
+    sequences = {idx: list(items) for idx, items in sequences.items()}
+    sequences.setdefault(int(fixed_slot), [])
+    sequences[int(fixed_slot)] = [first.job] + list(sequences[int(fixed_slot)])
+    return sequences, loads, float(makespan), float(lower_bound), int(nodes), bool(timed_out), float(elapsed)
+
+
+def _parallel_exact_branch_and_bound_schedule(
+    *,
+    base_loads: List[float],
+    jobs: List[PredictedPendingJob],
+    time_limit_s: float,
+    load_round_seconds: float,
+    max_workers: int,
+) -> Tuple[Dict[int, List[ScheduledJob]], List[float], float, float, int, bool, float]:
+    if max_workers <= 1 or len(jobs) <= 1:
+        return _exact_branch_and_bound_schedule(
+            base_loads=base_loads,
+            jobs=jobs,
+            time_limit_s=time_limit_s,
+            load_round_seconds=load_round_seconds,
+        )
+    unique_slots: List[int] = []
+    seen = set()
+    for slot_id in sorted(range(len(base_loads)), key=lambda idx: (base_loads[idx], idx)):
+        rounded = int(round(float(base_loads[slot_id]) / max(1.0, float(load_round_seconds))))
+        if rounded in seen:
+            continue
+        seen.add(rounded)
+        unique_slots.append(int(slot_id))
+    if len(unique_slots) <= 1:
+        return _exact_branch_and_bound_schedule(
+            base_loads=base_loads,
+            jobs=jobs,
+            time_limit_s=time_limit_s,
+            load_round_seconds=load_round_seconds,
+        )
+
+    effective_workers = max(1, min(int(max_workers), len(unique_slots)))
+    batches = max(1, int(math.ceil(len(unique_slots) / float(effective_workers))))
+    per_branch_limit = max(0.25, float(time_limit_s) / float(batches))
+    payloads = [
+        ([float(x) for x in base_loads], list(jobs), float(per_branch_limit), float(load_round_seconds), int(slot_id))
+        for slot_id in unique_slots
+    ]
+    best_result = _exact_branch_and_bound_schedule(
+        base_loads=base_loads,
+        jobs=jobs,
+        time_limit_s=min(float(time_limit_s), 0.75),
+        load_round_seconds=load_round_seconds,
+    )
+    best_makespan = float(best_result[2])
+    best_lower = float(best_result[3])
+    total_nodes = int(best_result[4])
+    any_timeout = bool(best_result[5])
+    wall_start = time.monotonic()
+    with concurrent.futures.ProcessPoolExecutor(max_workers=effective_workers) as pool:
+        futures = [pool.submit(_exact_branch_worker, payload) for payload in payloads]
+        for fut in concurrent.futures.as_completed(futures, timeout=max(1.0, float(time_limit_s) * 1.25)):
+            try:
+                result = fut.result()
+            except Exception:
+                continue
+            total_nodes += int(result[4])
+            any_timeout = bool(any_timeout or result[5])
+            best_lower = min(float(best_lower), float(result[3]))
+            if float(result[2]) < float(best_makespan) - 1e-9:
+                best_result = result
+                best_makespan = float(result[2])
+    elapsed = max(0.0, float(time.monotonic() - wall_start))
+    return (
+        best_result[0],
+        best_result[1],
+        float(best_result[2]),
+        float(best_lower),
+        int(total_nodes),
+        bool(any_timeout),
+        float(elapsed),
+    )
+
+
+def _build_optimal_scheduler_plan(
+    *,
+    policy: str,
+    pending_by_dist: Dict[str, List[ScheduledJob]],
+    slot_pred_loads: List[float],
+    model: "AdaptiveDurationModel",
+    args: argparse.Namespace,
+    running_count: int = 0,
+) -> SchedulerPlan:
+    pending_jobs = _predict_pending_jobs(pending_by_dist, model)
+    base_loads = [float(x) for x in slot_pred_loads]
+    empty_sequences = {idx: [] for idx in range(len(base_loads))}
+    if not pending_jobs:
+        makespan = max(base_loads) if base_loads else 0.0
+        return SchedulerPlan(
+            policy=str(policy),
+            mode="empty",
+            total_pending_jobs=0,
+            optimized_jobs=0,
+            slot_sequences=empty_sequences,
+            best_makespan_seconds=float(makespan),
+            lower_bound_seconds=float(makespan),
+            upper_bound_seconds=float(makespan),
+        )
+
+    total_pending = len(pending_jobs)
+    exact_cap = max(1, int(getattr(args, "scheduler_opt_max_exact_jobs", 18)))
+    frontier_jobs = max(1, int(getattr(args, "scheduler_opt_frontier_jobs", 14)))
+    frontier_jobs = min(frontier_jobs, total_pending)
+    time_limit_s = max(0.1, float(getattr(args, "scheduler_opt_time_limit_sec", 3.0)))
+    round_seconds = max(1.0, float(getattr(args, "scheduler_opt_load_round_sec", 1.0)))
+    solver_pref = str(getattr(args, "scheduler_opt_solver", "auto")).strip().lower() or "auto"
+    solver_workers = _calc_solver_parallel_workers(args, running_count=running_count)
+    gurobi_gap = max(0.0, float(getattr(args, "scheduler_opt_gurobi_mip_gap", 0.0)))
+
+    def _solve_exact_jobs(
+        jobs_for_exact: List[PredictedPendingJob],
+        *,
+        mode_suffix: str,
+    ) -> Tuple[Dict[int, List[ScheduledJob]], List[float], float, float, int, bool, float, str, bool]:
+        fallback_used = False
+        gurobi_res = None
+        if solver_pref in {"auto", "gurobi"}:
+            try:
+                gurobi_res = _gurobi_assignment_schedule(
+                    base_loads=base_loads,
+                    jobs=jobs_for_exact,
+                    time_limit_s=time_limit_s,
+                    threads=max(1, int(solver_workers)),
+                    mip_gap=gurobi_gap,
+                )
+            except Exception:
+                gurobi_res = None
+                fallback_used = True
+            if gurobi_res is not None:
+                sequences, loads, makespan, lower_bound, timed_out, elapsed = gurobi_res
+                return (
+                    sequences,
+                    loads,
+                    float(makespan),
+                    float(lower_bound),
+                    0,
+                    bool(timed_out),
+                    float(elapsed),
+                    f"gurobi_{mode_suffix}",
+                    bool(fallback_used),
+                )
+            if solver_pref == "gurobi":
+                fallback_used = True
+
+        if solver_pref in {"auto", "mp_bnb"} and int(solver_workers) > 1:
+            try:
+                sequences, loads, makespan, lower_bound, exact_nodes, timed_out, elapsed = _parallel_exact_branch_and_bound_schedule(
+                    base_loads=base_loads,
+                    jobs=jobs_for_exact,
+                    time_limit_s=time_limit_s,
+                    load_round_seconds=round_seconds,
+                    max_workers=int(solver_workers),
+                )
+                return (
+                    sequences,
+                    loads,
+                    float(makespan),
+                    float(lower_bound),
+                    int(exact_nodes),
+                    bool(timed_out),
+                    float(elapsed),
+                    f"mp_{mode_suffix}",
+                    bool(fallback_used),
+                )
+            except Exception:
+                fallback_used = True
+        elif solver_pref == "mp_bnb":
+            fallback_used = True
+
+        sequences, loads, makespan, lower_bound, exact_nodes, timed_out, elapsed = _exact_branch_and_bound_schedule(
+            base_loads=base_loads,
+            jobs=jobs_for_exact,
+            time_limit_s=time_limit_s,
+            load_round_seconds=round_seconds,
+        )
+        return (
+            sequences,
+            loads,
+            float(makespan),
+            float(lower_bound),
+            int(exact_nodes),
+            bool(timed_out),
+            float(elapsed),
+            f"serial_{mode_suffix}",
+            True if fallback_used else solver_pref not in {"serial_bnb", "auto"},
+        )
+
+    force_exact = str(policy).strip().lower() == "optimal_exact"
+    if total_pending <= exact_cap or force_exact:
+        exact_sequences, exact_loads, exact_makespan, lower_bound, exact_nodes, timed_out, exact_elapsed, solve_mode, solve_fallback = _solve_exact_jobs(
+            pending_jobs,
+            mode_suffix="full",
+        )
+        return SchedulerPlan(
+            policy=str(policy),
+            mode=str(solve_mode),
+            total_pending_jobs=int(total_pending),
+            optimized_jobs=int(total_pending),
+            slot_sequences=exact_sequences,
+            best_makespan_seconds=float(exact_makespan),
+            lower_bound_seconds=float(lower_bound),
+            upper_bound_seconds=float(exact_makespan),
+            exact_nodes=int(exact_nodes),
+            exact_time_seconds=float(exact_elapsed),
+            time_limit_hit=bool(timed_out),
+            used_fallback=bool(solve_fallback),
+        )
+
+    prefix_jobs = pending_jobs[:frontier_jobs]
+    tail_jobs = pending_jobs[frontier_jobs:]
+    prefix_sequences, prefix_loads, prefix_makespan, lower_bound, exact_nodes, timed_out, exact_elapsed, solve_mode, solve_fallback = _solve_exact_jobs(
+        prefix_jobs,
+        mode_suffix="frontier",
+    )
+    tail_sequences, final_loads, final_makespan = _greedy_lpt_schedule(
+        base_loads=prefix_loads,
+        jobs=tail_jobs,
+    )
+    merged_sequences = {
+        slot_id: list(prefix_sequences.get(slot_id, [])) + list(tail_sequences.get(slot_id, []))
+        for slot_id in range(len(base_loads))
+    }
+    return SchedulerPlan(
+        policy=str(policy),
+        mode=f"{solve_mode}_greedy_tail",
+        total_pending_jobs=int(total_pending),
+        optimized_jobs=int(frontier_jobs),
+        slot_sequences=merged_sequences,
+        best_makespan_seconds=float(final_makespan),
+        lower_bound_seconds=float(lower_bound),
+        upper_bound_seconds=float(final_makespan),
+        exact_nodes=int(exact_nodes),
+        exact_time_seconds=float(exact_elapsed),
+        time_limit_hit=bool(timed_out),
+        used_fallback=bool(tail_jobs) or bool(solve_fallback),
+    )
 
 
 def _dedupe_keep_order(values: List[str]) -> List[str]:
@@ -675,6 +1230,628 @@ def _execute_one_job(
         )
 
 
+def _parse_clock_slots(raw: str) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for part in [str(x).strip() for x in str(raw or "").split(",") if str(x).strip()]:
+        if ":" not in part:
+            continue
+        hh_raw, mm_raw = part.split(":", 1)
+        try:
+            hh = int(hh_raw)
+            mm = int(mm_raw)
+        except Exception:
+            continue
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            continue
+        key = f"{hh:02d}:{mm:02d}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return sorted(out)
+
+
+def _format_float(x: object, digits: int = 1, suffix: str = "") -> str:
+    try:
+        val = float(x)
+    except Exception:
+        return "n/a"
+    if not math.isfinite(val):
+        return "n/a"
+    return f"{val:.{int(digits)}f}{suffix}"
+
+
+def _format_eta(seconds: float) -> str:
+    try:
+        sec = float(seconds)
+    except Exception:
+        return "n/a"
+    if not math.isfinite(sec) or sec < 0:
+        return "n/a"
+    total = int(round(sec))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _trim_mapping(mapping: Dict[str, object], limit: int = 12) -> Dict[str, object]:
+    items = list(mapping.items())
+    items.sort(key=lambda kv: str(kv[0]))
+    return {str(k): v for k, v in items[: max(1, int(limit))]}
+
+
+def _severity_cn(severity: str) -> str:
+    mapping = {
+        "INFO": "信息",
+        "WARN": "告警",
+        "ERROR": "错误",
+        "DONE": "完成",
+    }
+    return mapping.get(str(severity or "INFO").upper(), "信息")
+
+
+def _planner_mode_cn(mode: str) -> str:
+    raw = str(mode or "").strip().lower()
+    mapping = {
+        "startup": "启动前状态",
+        "empty": "无待调度任务",
+        "legacy_greedy": "传统贪心派单",
+        "serial_full": "串行精确分支定界",
+        "mp_full": "多进程精确分支定界",
+        "gurobi_full": "Gurobi 精确派单",
+        "serial_frontier_greedy_tail": "串行前沿精确 + 贪心尾部",
+        "mp_frontier_greedy_tail": "多进程前沿精确 + 贪心尾部",
+        "gurobi_frontier_greedy_tail": "Gurobi 前沿精确 + 贪心尾部",
+    }
+    return mapping.get(raw, raw or "未知")
+
+
+def _build_scheduler_diagnosis(snapshot: Dict[str, object]) -> List[str]:
+    pressure = snapshot.get("pressure", {}) if isinstance(snapshot.get("pressure"), dict) else {}
+    planner = snapshot.get("planner", {}) if isinstance(snapshot.get("planner"), dict) else {}
+    failed_jobs = int(snapshot.get("failed_jobs", 0) or 0)
+    remaining_jobs = int(snapshot.get("remaining_jobs", 0) or 0)
+    running_jobs_count = int(snapshot.get("running_jobs_count", 0) or 0)
+    requeued_total = int(snapshot.get("requeued_total", 0) or 0)
+    cpu = float(pressure.get("cpu_percent", float("nan")))
+    mem = float(pressure.get("mem_percent", float("nan")))
+    load_pc = float(pressure.get("load_per_core", float("nan")))
+    mode = str(planner.get("mode", "")).strip()
+    lines: List[str] = []
+    if failed_jobs > 0:
+        lines.append("存在失败任务，建议优先查看“最终失败任务”和“最近异常”两节。")
+    elif remaining_jobs == 0 and running_jobs_count == 0:
+        lines.append("当前批次已全部完成，没有剩余任务。")
+    else:
+        lines.append("当前批次仍在推进，建议结合运行中任务和剩余任务分布判断是否存在长尾。")
+    if requeued_total > 0:
+        lines.append(f"累计发生 {requeued_total} 次重排/回队，说明部分任务曾触发超时、停滞或锁冲突。")
+    if _is_finite(cpu) and cpu >= 88.0:
+        lines.append(f"CPU 使用率约 {_format_float(cpu, 1, '%')}，资源压力偏高，可考虑降低 max_workers 或 solver worker 数。")
+    elif _is_finite(cpu):
+        lines.append(f"CPU 使用率约 {_format_float(cpu, 1, '%')}，当前资源压力总体可控。")
+    if _is_finite(mem) and mem >= 88.0:
+        lines.append(f"内存占用约 {_format_float(mem, 1, '%')}，建议关注内存抖动和交换区使用。")
+    if _is_finite(load_pc) and load_pc >= 1.1:
+        lines.append(f"每核负载约 {_format_float(load_pc, 2)}，说明机器已接近满载。")
+    if mode:
+        lines.append(f"当前调度求解模式为“{_planner_mode_cn(mode)}”。")
+    return lines
+
+
+def _format_scheduler_message(snapshot: Dict[str, object]) -> str:
+    pressure = snapshot.get("pressure", {}) if isinstance(snapshot.get("pressure"), dict) else {}
+    running_jobs = snapshot.get("running_jobs", []) if isinstance(snapshot.get("running_jobs"), list) else []
+    recent_completions = snapshot.get("recent_completions", []) if isinstance(snapshot.get("recent_completions"), list) else []
+    recent_issues = snapshot.get("recent_issues", []) if isinstance(snapshot.get("recent_issues"), list) else []
+    pending_by_dist = snapshot.get("pending_by_dist", {}) if isinstance(snapshot.get("pending_by_dist"), dict) else {}
+    failures = snapshot.get("failures", {}) if isinstance(snapshot.get("failures"), dict) else {}
+    status_counter = snapshot.get("status_counter", {}) if isinstance(snapshot.get("status_counter"), dict) else {}
+    variants = snapshot.get("variants", []) if isinstance(snapshot.get("variants"), list) else []
+    distributions = snapshot.get("distributions", []) if isinstance(snapshot.get("distributions"), list) else []
+    request_numbers = snapshot.get("request_numbers", []) if isinstance(snapshot.get("request_numbers"), list) else []
+    seeds = snapshot.get("seeds", []) if isinstance(snapshot.get("seeds"), list) else []
+    settings = snapshot.get("settings", {}) if isinstance(snapshot.get("settings"), dict) else {}
+    paths = snapshot.get("paths", {}) if isinstance(snapshot.get("paths"), dict) else {}
+    by_variant = snapshot.get("by_variant", []) if isinstance(snapshot.get("by_variant"), list) else []
+    by_dist = snapshot.get("by_dist", []) if isinstance(snapshot.get("by_dist"), list) else []
+    slot_pred_loads = snapshot.get("slot_pred_loads", []) if isinstance(snapshot.get("slot_pred_loads"), list) else []
+    slot_actual_loads = snapshot.get("slot_actual_loads", []) if isinstance(snapshot.get("slot_actual_loads"), list) else []
+    planner = snapshot.get("planner", {}) if isinstance(snapshot.get("planner"), dict) else {}
+
+    started_at_iso = str(snapshot.get("started_at_iso", "")).strip()
+    timestamp = str(snapshot.get("timestamp", "")).strip()
+    diagnosis = _build_scheduler_diagnosis(snapshot)
+
+    lines = [
+        "调度运行简报",
+        f"运行目录：{snapshot.get('run_root', '')}",
+        f"当前阶段：{snapshot.get('phase', '')}",
+        f"当前时间：{timestamp}",
+        f"启动时间：{started_at_iso}",
+        f"累计运行：{snapshot.get('elapsed_total_human', 'n/a')}",
+        "",
+        "一、总体进展",
+        (
+            f"总任务={snapshot.get('total_jobs', 0)}，"
+            f"已完成={snapshot.get('completed_jobs', 0)}，"
+            f"运行中={snapshot.get('running_jobs_count', 0)}，"
+            f"剩余={snapshot.get('remaining_jobs', 0)}，"
+            f"延后队列={snapshot.get('deferred_jobs', 0)}，"
+            f"失败={snapshot.get('failed_jobs', 0)}，"
+            f"成功率={snapshot.get('success_rate', 'n/a')}"
+        ),
+        (
+            f"累计尝试={snapshot.get('completed_attempts', 0)}，"
+            f"累计重排={snapshot.get('requeued_total', 0)}，"
+            f"当前并发上限={snapshot.get('active_limit', 0)}/{snapshot.get('worker_cap', 0)}，"
+            f"自动调度并发={'开启' if int(snapshot.get('auto_workers', 0) or 0) else '关闭'}"
+        ),
+        "",
+        "二、资源与 ETA",
+        (
+            f"CPU={_format_float(pressure.get('cpu_percent'), 1, '%')}，"
+            f"内存={_format_float(pressure.get('mem_percent'), 1, '%')}，"
+            f"交换区={_format_float(pressure.get('swap_percent'), 1, '%')}，"
+            f"可用内存GB={_format_float(pressure.get('avail_gb'), 2)}，"
+            f"每核负载={_format_float(pressure.get('load_per_core'), 2)}"
+        ),
+        (
+            f"剩余 ETA={snapshot.get('eta_remaining', 'n/a')}，"
+            f"预计完成时间={snapshot.get('eta_finish_at', 'n/a')}，"
+            f"已完成任务平均耗时={snapshot.get('avg_completed_runtime_human', 'n/a')}，"
+            f"当前最长运行任务={snapshot.get('max_running_elapsed_human', 'n/a')}"
+        ),
+        "",
+        "三、任务空间",
+        (
+            f"算法({len(variants)})={json.dumps(variants[:10], ensure_ascii=False)}；"
+            f"分布({len(distributions)})={json.dumps(distributions[:12], ensure_ascii=False)}；"
+            f"R={json.dumps(request_numbers, ensure_ascii=False)}；"
+            f"seed={json.dumps(seeds, ensure_ascii=False)}"
+        ),
+        "",
+        "四、调度器状态",
+        f"调度配置：{json.dumps(settings, ensure_ascii=False)}",
+        f"当前求解器：{json.dumps(planner, ensure_ascii=False)}",
+        f"状态计数：{json.dumps(status_counter, ensure_ascii=False)}",
+        f"各分布待运行数：{json.dumps(pending_by_dist, ensure_ascii=False)}",
+        f"预测负载数组：{json.dumps(slot_pred_loads, ensure_ascii=False)}",
+        f"实际负载数组：{json.dumps(slot_actual_loads, ensure_ascii=False)}",
+    ]
+    if diagnosis:
+        lines.extend(["", "五、诊断提示"])
+        lines.extend([f"- {item}" for item in diagnosis])
+    if paths:
+        lines.extend(["", f"结果路径：{json.dumps(paths, ensure_ascii=False)}"])
+    lines.extend(_format_count_table_text("按算法统计", by_variant))
+    lines.extend(_format_count_table_text("按分布统计", by_dist))
+    if running_jobs:
+        lines.append("")
+        lines.append("当前运行中的任务：")
+        for item in running_jobs[:8]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "  - "
+                f"槽位={item.get('slot_id')}，"
+                f"任务={item.get('variant')}|{item.get('dist_name')}|R{item.get('request_number')}|S{item.get('seed')}，"
+                f"尝试={item.get('attempt')}，"
+                f"已运行={item.get('elapsed_human', 'n/a')}，"
+                f"预测={item.get('predicted_human', 'n/a')}，"
+                f"超时阈值={item.get('timeout_human', 'n/a')}"
+            )
+    if recent_completions:
+        lines.append("")
+        lines.append("最近完成任务：")
+        for item in recent_completions[:8]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "  - "
+                f"{item.get('ts', '')}，"
+                f"任务={item.get('variant')}|{item.get('dist_name')}|R{item.get('request_number')}|S{item.get('seed')}，"
+                f"尝试={item.get('attempt')}，"
+                f"状态={item.get('status')}，"
+                f"耗时={item.get('elapsed_human', 'n/a')}，"
+                f"预测={item.get('predicted_human', 'n/a')}，"
+                f"实际/预测比={item.get('ratio', 'n/a')}"
+            )
+    if recent_issues:
+        lines.append("")
+        lines.append("最近异常：")
+        for item in recent_issues[:8]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "  - "
+                f"{item.get('ts', '')}，类型={item.get('kind', '')}，任务={item.get('job_key', '')}，"
+                f"尝试={item.get('attempt', '')}，详情={item.get('detail', '')}"
+            )
+    if failures:
+        lines.append("")
+        lines.append("最终失败任务：")
+        for key, detail in list(failures.items())[:8]:
+            lines.append(f"  - 任务={key}，失败详情={detail}")
+    return "\n".join(lines)
+
+
+def _format_count_table_text(title: str, rows: List[Dict[str, object]], *, label_key: str = "name") -> List[str]:
+    if not rows:
+        return []
+    lines = ["", f"{title}:"]
+    for row in rows[:12]:
+        lines.append(
+            "  - "
+            f"{row.get(label_key, '')}: "
+            f"总数={row.get('total', 0)} "
+            f"成功={row.get('ok', 0)} "
+            f"失败={row.get('failed', 0)} "
+            f"运行中={row.get('running', 0)} "
+            f"待运行={row.get('pending', 0)} "
+            f"延后={row.get('deferred', 0)} "
+            f"重排={row.get('requeued', 0)}"
+        )
+    return lines
+
+
+def _html_table(headers: List[str], rows: List[List[object]]) -> str:
+    if not rows:
+        return "<p><em>n/a</em></p>"
+    head = "".join(
+        f"<th style='text-align:left;padding:6px 8px;border-bottom:1px solid #d8d8d8;background:#f5f5f5'>{html.escape(str(h))}</th>"
+        for h in headers
+    )
+    body_rows = []
+    for row in rows:
+        cols = "".join(
+            f"<td style='padding:6px 8px;border-bottom:1px solid #eeeeee;vertical-align:top'>{html.escape(str(v))}</td>"
+            for v in row
+        )
+        body_rows.append(f"<tr>{cols}</tr>")
+    return (
+        "<table style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:13px;margin:6px 0 16px 0;min-width:680px'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+    )
+
+
+def _format_scheduler_html(snapshot: Dict[str, object]) -> str:
+    severity = str(snapshot.get("notify_severity", "INFO")).upper()
+    if severity == "ERROR":
+        badge_bg = "#fce8e6"
+        badge_fg = "#b3261e"
+    elif severity == "WARN":
+        badge_bg = "#fef7e0"
+        badge_fg = "#8d5f00"
+    elif severity == "DONE":
+        badge_bg = "#e6f4ea"
+        badge_fg = "#188038"
+    else:
+        badge_bg = "#e8f0fe"
+        badge_fg = "#1967d2"
+    pressure = snapshot.get("pressure", {}) if isinstance(snapshot.get("pressure"), dict) else {}
+    settings = snapshot.get("settings", {}) if isinstance(snapshot.get("settings"), dict) else {}
+    paths = snapshot.get("paths", {}) if isinstance(snapshot.get("paths"), dict) else {}
+    running_jobs = snapshot.get("running_jobs", []) if isinstance(snapshot.get("running_jobs"), list) else []
+    recent_completions = snapshot.get("recent_completions", []) if isinstance(snapshot.get("recent_completions"), list) else []
+    recent_issues = snapshot.get("recent_issues", []) if isinstance(snapshot.get("recent_issues"), list) else []
+    failures = snapshot.get("failures", {}) if isinstance(snapshot.get("failures"), dict) else {}
+    by_variant = snapshot.get("by_variant", []) if isinstance(snapshot.get("by_variant"), list) else []
+    by_dist = snapshot.get("by_dist", []) if isinstance(snapshot.get("by_dist"), list) else []
+    planner = snapshot.get("planner", {}) if isinstance(snapshot.get("planner"), dict) else {}
+    diagnosis = _build_scheduler_diagnosis(snapshot)
+
+    kpi_rows = [
+        ["运行目录", snapshot.get("run_root", "")],
+        ["当前阶段", snapshot.get("phase", "")],
+        ["当前时间", snapshot.get("timestamp", "")],
+        ["启动时间", snapshot.get("started_at_iso", "")],
+        ["累计运行", snapshot.get("elapsed_total_human", "n/a")],
+        ["总任务数", snapshot.get("total_jobs", 0)],
+        ["已完成", snapshot.get("completed_jobs", 0)],
+        ["运行中", snapshot.get("running_jobs_count", 0)],
+        ["剩余任务", snapshot.get("remaining_jobs", 0)],
+        ["延后队列", snapshot.get("deferred_jobs", 0)],
+        ["失败任务", snapshot.get("failed_jobs", 0)],
+        ["成功率", snapshot.get("success_rate", "n/a")],
+        ["累计尝试", snapshot.get("completed_attempts", 0)],
+        ["累计重排", snapshot.get("requeued_total", 0)],
+        ["当前并发", f"{snapshot.get('active_limit', 0)}/{snapshot.get('worker_cap', 0)}"],
+        ["剩余 ETA", snapshot.get("eta_remaining", "n/a")],
+        ["预计完成时间", snapshot.get("eta_finish_at", "n/a")],
+        ["平均完成耗时", snapshot.get("avg_completed_runtime_human", "n/a")],
+        ["当前最长运行", snapshot.get("max_running_elapsed_human", "n/a")],
+        ["CPU", _format_float(pressure.get("cpu_percent"), 1, "%")],
+        ["内存", _format_float(pressure.get("mem_percent"), 1, "%")],
+        ["交换区", _format_float(pressure.get("swap_percent"), 1, "%")],
+        ["可用内存GB", _format_float(pressure.get("avail_gb"), 2)],
+        ["每核负载", _format_float(pressure.get("load_per_core"), 2)],
+    ]
+    settings_rows = [[k, v] for k, v in settings.items()]
+    planner_rows = [[k, v] for k, v in planner.items()]
+    paths_rows = [[k, v] for k, v in paths.items()]
+    running_rows = [
+        [
+            item.get("slot_id", ""),
+            f"{item.get('variant', '')}|{item.get('dist_name', '')}|R{item.get('request_number', '')}|S{item.get('seed', '')}",
+            item.get("attempt", ""),
+            item.get("elapsed_human", "n/a"),
+            item.get("predicted_human", "n/a"),
+            item.get("timeout_human", "n/a"),
+        ]
+        for item in running_jobs[:10]
+        if isinstance(item, dict)
+    ]
+    completion_rows = [
+        [
+            item.get("ts", ""),
+            f"{item.get('variant', '')}|{item.get('dist_name', '')}|R{item.get('request_number', '')}|S{item.get('seed', '')}",
+            item.get("status", ""),
+            item.get("attempt", ""),
+            item.get("elapsed_human", "n/a"),
+            item.get("predicted_human", "n/a"),
+            item.get("ratio", "n/a"),
+        ]
+        for item in recent_completions[:10]
+        if isinstance(item, dict)
+    ]
+    issue_rows = [
+        [item.get("ts", ""), item.get("kind", ""), item.get("job_key", ""), item.get("attempt", ""), item.get("detail", "")]
+        for item in recent_issues[:10]
+        if isinstance(item, dict)
+    ]
+    failure_rows = [[k, v] for k, v in list(failures.items())[:10]]
+    by_variant_rows = [
+        [row.get("name", ""), row.get("total", 0), row.get("ok", 0), row.get("failed", 0), row.get("running", 0), row.get("pending", 0), row.get("deferred", 0), row.get("requeued", 0)]
+        for row in by_variant[:12]
+        if isinstance(row, dict)
+    ]
+    by_dist_rows = [
+        [row.get("name", ""), row.get("total", 0), row.get("ok", 0), row.get("failed", 0), row.get("running", 0), row.get("pending", 0), row.get("deferred", 0), row.get("requeued", 0)]
+        for row in by_dist[:16]
+        if isinstance(row, dict)
+    ]
+
+    return (
+        "<html><body style='font-family:Segoe UI,Arial,sans-serif;color:#202124;line-height:1.45'>"
+        f"<div style='margin:0 0 10px 0'><span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        f"background:{badge_bg};color:{badge_fg};font-weight:700;font-size:12px;letter-spacing:0.2px'>{html.escape(_severity_cn(severity))}</span></div>"
+        f"<h2 style='margin:0 0 8px 0'>服务器调度运行简报</h2>"
+        f"<p style='margin:0 0 14px 0;color:#5f6368'>本邮件汇总了 <strong>{html.escape(str(snapshot.get('run_root', '')))}</strong> 的当前状态，便于远程判断运行是否正常。</p>"
+        + (
+            "<div style='margin:0 0 16px 0;padding:10px 14px;border-left:4px solid #8ab4f8;background:#f8fbff'>"
+            "<div style='font-weight:700;margin:0 0 6px 0'>诊断提示</div>"
+            + "".join(f"<div style='margin:3px 0'>- {html.escape(str(item))}</div>" for item in diagnosis)
+            + "</div>"
+            if diagnosis
+            else ""
+        )
+        + "<h3 style='margin:14px 0 6px 0'>一、总体概览</h3>"
+        + _html_table(["项目", "值"], kpi_rows)
+        + "<h3 style='margin:14px 0 6px 0'>二、调度配置</h3>"
+        + _html_table(["配置项", "值"], settings_rows)
+        + "<h3 style='margin:14px 0 6px 0'>三、求解器状态</h3>"
+        + _html_table(["求解项", "值"], planner_rows)
+        + "<h3 style='margin:14px 0 6px 0'>四、按算法统计</h3>"
+        + _html_table(["算法", "总数", "成功", "失败", "运行中", "待运行", "延后", "重排"], by_variant_rows)
+        + "<h3 style='margin:14px 0 6px 0'>五、按分布统计</h3>"
+        + _html_table(["分布", "总数", "成功", "失败", "运行中", "待运行", "延后", "重排"], by_dist_rows)
+        + "<h3 style='margin:14px 0 6px 0'>六、当前运行任务</h3>"
+        + _html_table(["槽位", "任务", "尝试", "已运行", "预测", "超时阈值"], running_rows)
+        + "<h3 style='margin:14px 0 6px 0'>七、最近完成任务</h3>"
+        + _html_table(["时间", "任务", "状态", "尝试", "耗时", "预测", "实际/预测比"], completion_rows)
+        + "<h3 style='margin:14px 0 6px 0'>八、最近异常</h3>"
+        + _html_table(["时间", "类型", "任务", "尝试", "详情"], issue_rows)
+        + "<h3 style='margin:14px 0 6px 0'>九、最终失败任务</h3>"
+        + _html_table(["任务", "详情"], failure_rows)
+        + "<h3 style='margin:14px 0 6px 0'>十、结果路径</h3>"
+        + _html_table(["路径键", "值"], paths_rows)
+        + "</body></html>"
+    )
+
+
+class SchedulerNotifier:
+    def __init__(self, *, notifier: NotificationManager, run_root: Path, args: argparse.Namespace) -> None:
+        self.notifier = notifier
+        self.run_root = run_root
+        self.enabled = bool(notifier.enabled) and bool(getattr(args, "notify_scheduler", True))
+        self.clock_slots = _parse_clock_slots(getattr(args, "notify_schedule_times", ""))
+        self.batch_size = max(0, int(getattr(args, "notify_batch_size", 0) or 0))
+        self.notify_on_start = bool(getattr(args, "notify_on_start", True))
+        self.notify_on_requeue = bool(getattr(args, "notify_on_requeue", True))
+        self.notify_on_finish = bool(getattr(args, "notify_on_finish", True))
+        self.live_status_interval_s = max(5.0, float(getattr(args, "notify_live_status_interval_s", 30.0) or 30.0))
+        self.state_path = (
+            Path(str(getattr(args, "notify_state_path", "")).strip()).resolve()
+            if str(getattr(args, "notify_state_path", "")).strip()
+            else (run_root / "adaptive_scheduler_notify_state.json").resolve()
+        )
+        self.live_status_path = (
+            Path(str(getattr(args, "live_status_path", "")).strip()).resolve()
+            if str(getattr(args, "live_status_path", "")).strip()
+            else (run_root / "adaptive_scheduler_live_status.json").resolve()
+        )
+        raw_state = _load_json(self.state_path)
+        sent_slots = raw_state.get("sent_clock_slots", [])
+        self.sent_clock_slots = set(str(x).strip() for x in sent_slots if str(x).strip())
+        self.last_batch_bucket = int(raw_state.get("last_batch_bucket", 0) or 0)
+        self.start_sent = bool(raw_state.get("start_sent", False))
+        self.finish_sent = bool(raw_state.get("finish_sent", False))
+        self.last_live_write_ts = 0.0
+
+    def _decorate_title(self, severity: str, title: str) -> str:
+        return f"[{_severity_cn(severity)}] {title}"
+
+    def _save_state(self) -> None:
+        try:
+            keep_slots = sorted(self.sent_clock_slots)[-64:]
+            _save_json(
+                self.state_path,
+                {
+                    "sent_clock_slots": keep_slots,
+                    "last_batch_bucket": int(self.last_batch_bucket),
+                    "start_sent": bool(self.start_sent),
+                    "finish_sent": bool(self.finish_sent),
+                    "ts": time.time(),
+                },
+            )
+        except Exception:
+            pass
+
+    def update_live_status(self, snapshot: Dict[str, object], *, force: bool = False) -> None:
+        now = time.monotonic()
+        if (not force) and (now - self.last_live_write_ts < self.live_status_interval_s):
+            return
+        self.last_live_write_ts = now
+        try:
+            _save_json(self.live_status_path, snapshot)
+        except Exception:
+            pass
+
+    def notify_start(self, snapshot: Dict[str, object]) -> None:
+        if not self.enabled or not self.notify_on_start or self.start_sent:
+            return
+        payload = dict(snapshot)
+        payload["notify_severity"] = "INFO"
+        title = self._decorate_title(
+            "INFO",
+            f"调度启动：{Path(str(snapshot.get('run_root', self.run_root))).name}，"
+            f"任务数={snapshot.get('total_jobs', 0)}，并发槽位={snapshot.get('worker_cap', 0)}",
+        )
+        self.notifier.send(
+            "scheduler_started",
+            title,
+            _format_scheduler_message(payload),
+            payload=payload,
+            html_message=_format_scheduler_html(payload),
+        )
+        self.start_sent = True
+        self._save_state()
+
+    def notify_clock_ticks(self, snapshot: Dict[str, object]) -> None:
+        if not self.enabled or not self.clock_slots:
+            return
+        now = datetime.datetime.now()
+        today = now.date().isoformat()
+        for slot in self.clock_slots:
+            hh, mm = slot.split(":", 1)
+            due = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+            key = f"{today}T{slot}"
+            if now >= due and key not in self.sent_clock_slots:
+                payload = dict(snapshot)
+                payload["scheduled_slot"] = slot
+                payload["notify_severity"] = "WARN" if int(payload.get("failed_jobs", 0) or 0) > 0 else "INFO"
+                title = self._decorate_title(
+                    payload["notify_severity"],
+                    f"定时状态播报 {slot}："
+                    f"已完成={snapshot.get('completed_jobs', 0)}/{snapshot.get('total_jobs', 0)}，"
+                    f"失败={snapshot.get('failed_jobs', 0)}",
+                )
+                self.notifier.send(
+                    "scheduler_scheduled_status",
+                    title,
+                    _format_scheduler_message(payload),
+                    payload=payload,
+                    html_message=_format_scheduler_html(payload),
+                )
+                self.sent_clock_slots.add(key)
+                self._save_state()
+
+    def notify_batch(self, snapshot: Dict[str, object]) -> None:
+        if not self.enabled or self.batch_size <= 0:
+            return
+        completed = int(snapshot.get("completed_jobs", 0) or 0)
+        bucket = completed // self.batch_size
+        if bucket <= 0 or bucket <= int(self.last_batch_bucket):
+            return
+        payload = dict(snapshot)
+        payload["batch_bucket"] = int(bucket)
+        payload["batch_size"] = int(self.batch_size)
+        payload["notify_severity"] = "WARN" if int(payload.get("failed_jobs", 0) or 0) > 0 else "INFO"
+        title = self._decorate_title(
+            payload["notify_severity"],
+            f"批次进度更新：已完成={completed}/{snapshot.get('total_jobs', 0)}，"
+            f"失败={snapshot.get('failed_jobs', 0)}",
+        )
+        self.notifier.send(
+            "scheduler_batch_progress",
+            title,
+            _format_scheduler_message(payload),
+            payload=payload,
+            html_message=_format_scheduler_html(payload),
+        )
+        self.last_batch_bucket = int(bucket)
+        self._save_state()
+
+    def notify_requeue(
+        self,
+        *,
+        snapshot: Dict[str, object],
+        job: ScheduledJob,
+        attempt: int,
+        max_attempts: int,
+        detail: str,
+        delay_s: float,
+    ) -> None:
+        if not self.enabled or not self.notify_on_requeue:
+            return
+        payload = dict(snapshot)
+        payload.update(
+            {
+                "job_key": job.job_key,
+                "attempt": int(attempt),
+                "max_attempts": int(max_attempts),
+                "detail": str(detail),
+                "requeue_delay_s": float(delay_s),
+                "variant": str(job.variant.raw),
+                "dist_name": str(job.dist_name),
+                "request_number": int(job.request_number),
+                "seed": int(job.seed),
+                "notify_severity": "WARN",
+            }
+        )
+        title = self._decorate_title(
+            "WARN",
+            f"任务重排：{job.variant.raw}|{job.dist_name}|R{job.request_number}|S{job.seed}，"
+            f"尝试={attempt}/{max_attempts}",
+        )
+        message = _format_scheduler_message(payload) + "\n\n" + f"重排原因={detail}\n延迟重试(秒)={delay_s:.1f}"
+        self.notifier.send(
+            "scheduler_job_requeued",
+            title,
+            message,
+            payload=payload,
+            html_message=_format_scheduler_html(payload),
+        )
+
+    def notify_finish(self, snapshot: Dict[str, object]) -> None:
+        if not self.enabled or not self.notify_on_finish or self.finish_sent:
+            return
+        payload = dict(snapshot)
+        severity = "ERROR" if int(payload.get("failed_jobs", 0) or 0) > 0 else "DONE"
+        payload["notify_severity"] = severity
+        title = self._decorate_title(
+            severity,
+            f"调度结束：{Path(str(snapshot.get('run_root', self.run_root))).name}，"
+            f"已完成={snapshot.get('completed_jobs', 0)}/{snapshot.get('total_jobs', 0)}，"
+            f"失败={snapshot.get('failed_jobs', 0)}",
+        )
+        self.notifier.send(
+            "scheduler_finished",
+            title,
+            _format_scheduler_message(payload),
+            payload=payload,
+            html_message=_format_scheduler_html(payload),
+        )
+        self.finish_sent = True
+        self._save_state()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -715,14 +1892,52 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--precheck-workers", type=int, default=0)
     parser.add_argument("--notify-success", action="store_true", default=False)
     parser.add_argument("--no-notify-failure", action="store_false", dest="notify_failure", default=True)
+    parser.add_argument("--notify-scheduler", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--notify-schedule-times", type=str, default="08:00,12:00,16:00,20:00")
+    parser.add_argument("--notify-batch-size", type=int, default=5)
+    parser.add_argument("--notify-on-start", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--notify-on-requeue", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--notify-on-finish", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--notify-live-status-interval-s", type=float, default=30.0)
+    parser.add_argument("--notify-state-path", type=str, default="")
+    parser.add_argument("--live-status-path", type=str, default="")
 
-    parser.add_argument("--scheduler-policy", type=str, default="adaptive_lpt", choices=["adaptive_lpt", "fifo"])
+    parser.add_argument(
+        "--scheduler-policy",
+        type=str,
+        default="optimal_hybrid",
+        choices=["optimal_hybrid", "optimal_exact", "adaptive_lpt", "fifo"],
+    )
     parser.add_argument("--algo-coef-init", type=str, default="", help="e.g. PPO=1.0,PPO_NEW=1.2,NOVA_EDRL=2.0")
     parser.add_argument("--dist-coef-init", type=str, default="", help="e.g. O_10_90=1.3,F2_10_60=1.1")
     parser.add_argument("--model-lr", type=float, default=0.35)
     parser.add_argument("--model-global-lr", type=float, default=0.10)
     parser.add_argument("--model-min-pred-sec", type=float, default=60.0)
+    parser.add_argument("--scheduler-opt-max-exact-jobs", type=int, default=18)
+    parser.add_argument("--scheduler-opt-frontier-jobs", type=int, default=14)
+    parser.add_argument("--scheduler-opt-time-limit-sec", type=float, default=3.0)
+    parser.add_argument("--scheduler-opt-load-round-sec", type=float, default=1.0)
+    parser.add_argument(
+        "--scheduler-opt-solver",
+        type=str,
+        default="auto",
+        choices=["auto", "gurobi", "mp_bnb", "serial_bnb"],
+        help="exact planner backend: auto prefers Gurobi, then multiprocessing B&B, then serial B&B",
+    )
+    parser.add_argument(
+        "--scheduler-opt-max-solver-workers",
+        type=int,
+        default=2,
+        help="upper bound on solver-side parallel workers when mp_bnb/Gurobi is used",
+    )
+    parser.add_argument(
+        "--scheduler-opt-gurobi-mip-gap",
+        type=float,
+        default=0.0,
+        help="optional Gurobi MIP gap tolerance for assignment scheduler",
+    )
     parser.add_argument("--coef-state-path", type=str, default="")
+    parser.add_argument("--template-state-path", type=str, default="")
     parser.add_argument("--reset-coef-state", action="store_true")
     parser.add_argument("--events-csv", type=str, default="")
     parser.add_argument("--summary-json", type=str, default="")
@@ -874,6 +2089,7 @@ def main() -> int:
         if str(args.coef_state_path).strip()
         else (run_root / "adaptive_scheduler_coef_state.json").resolve()
     )
+    template_state_path = Path(str(args.template_state_path)).resolve() if str(args.template_state_path).strip() else None
     if bool(args.reset_coef_state) or (not state_path.exists()):
         model = AdaptiveDurationModel(
             algo_init=algo_init,
@@ -895,6 +2111,17 @@ def main() -> int:
     for job in all_jobs:
         model.ensure_key(algo_key=job.algorithm_key, dist_name=job.dist_name)
 
+    persist_paths: List[Path] = [state_path]
+    if template_state_path is not None and template_state_path.resolve() != state_path.resolve():
+        persist_paths.append(template_state_path)
+
+    def _persist_model_state() -> None:
+        payload = model.to_dict()
+        for target_path in persist_paths:
+            _save_json(target_path, payload)
+
+    _persist_model_state()
+
     worker_cap = min(resolve_max_workers(all_jobs[0].config, args.max_workers), len(all_jobs))
     min_workers = max(1, min(int(args.min_workers), int(worker_cap)))
     if bool(args.auto_workers):
@@ -909,6 +2136,7 @@ def main() -> int:
         init_diag = {}
 
     notifier = NotificationManager(run_root=run_root)
+    scheduler_notifier = SchedulerNotifier(notifier=notifier, run_root=run_root, args=args)
     events_csv = (
         Path(str(args.events_csv)).resolve()
         if str(args.events_csv).strip()
@@ -951,6 +2179,16 @@ def main() -> int:
         f"min={float(args.dispatch_timeout_min_sec):.1f}s "
         f"max={float(args.dispatch_timeout_max_sec):.1f}s"
     )
+    print(
+        f"[adaptive] scheduler policy={str(args.scheduler_policy)} "
+        f"solver={str(args.scheduler_opt_solver)} "
+        f"solver_workers_cap={int(args.scheduler_opt_max_solver_workers)} "
+        f"opt_max_exact_jobs={int(args.scheduler_opt_max_exact_jobs)} "
+        f"opt_frontier_jobs={int(args.scheduler_opt_frontier_jobs)} "
+        f"opt_time_limit={float(args.scheduler_opt_time_limit_sec):.2f}s "
+        f"opt_round={float(args.scheduler_opt_load_round_sec):.1f}s "
+        f"gurobi_gap={float(args.scheduler_opt_gurobi_mip_gap):.4f}"
+    )
     if init_diag:
         print(
             "[adaptive] auto_init "
@@ -975,16 +2213,223 @@ def main() -> int:
     status_counter: Dict[str, int] = {}
     completed_attempts = 0
     completed_jobs_final = 0
+    requeued_total = 0
     job_attempts: Dict[str, int] = {}
+    recent_completions: List[Dict[str, object]] = []
+    recent_issues: List[Dict[str, object]] = []
     run_started = time.monotonic()
+    run_started_wall = datetime.datetime.now()
     pressure_last = _sample_system_pressure()
+    total_by_variant: Dict[str, int] = {}
+    total_by_dist: Dict[str, int] = {}
+    ok_by_variant: Dict[str, int] = {}
+    ok_by_dist: Dict[str, int] = {}
+    failed_by_variant: Dict[str, int] = {}
+    failed_by_dist: Dict[str, int] = {}
+    requeued_by_variant: Dict[str, int] = {}
+    requeued_by_dist: Dict[str, int] = {}
+    for job in all_jobs:
+        total_by_variant[str(job.variant.raw)] = int(total_by_variant.get(str(job.variant.raw), 0)) + 1
+        total_by_dist[str(job.dist_name)] = int(total_by_dist.get(str(job.dist_name), 0)) + 1
     high_streak = 0
     low_streak = 0
     last_adjust_check = 0.0
     last_adjust_event = 0.0
+    latest_plan = SchedulerPlan(
+        policy=str(args.scheduler_policy),
+        mode="startup",
+        total_pending_jobs=int(len(all_jobs)),
+        optimized_jobs=0,
+        slot_sequences={idx: [] for idx in range(worker_cap)},
+        best_makespan_seconds=max(slot_pred_loads) if slot_pred_loads else 0.0,
+        lower_bound_seconds=max(slot_pred_loads) if slot_pred_loads else 0.0,
+        upper_bound_seconds=max(slot_pred_loads) if slot_pred_loads else 0.0,
+    )
 
     def _remaining_jobs_count() -> int:
         return sum(len(v) for v in pending_by_dist.values()) + len(deferred_jobs)
+
+    def _record_issue(kind: str, *, job: ScheduledJob, attempt: int, detail: str) -> None:
+        recent_issues.append(
+            {
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "kind": str(kind),
+                "job_key": str(job.job_key),
+                "attempt": int(attempt),
+                "detail": str(detail)[:500],
+            }
+        )
+        if len(recent_issues) > 20:
+            del recent_issues[:-20]
+
+    def _estimate_remaining_seconds() -> float:
+        total = 0.0
+        now_local = time.monotonic()
+        for dispatch in running.values():
+            elapsed_running = max(0.0, float(now_local - dispatch.started_at))
+            total += max(0.0, float(dispatch.predicted_seconds) - elapsed_running)
+        for items in pending_by_dist.values():
+            for job in items:
+                total += float(
+                    model.predict(
+                        algo_key=job.algorithm_key,
+                        dist_name=job.dist_name,
+                        request_number=int(job.request_number),
+                    )
+                )
+        for _, job in deferred_jobs:
+            total += float(
+                model.predict(
+                    algo_key=job.algorithm_key,
+                    dist_name=job.dist_name,
+                    request_number=int(job.request_number),
+                )
+            )
+        return float(total / max(1, int(active_limit)))
+
+    def _build_snapshot(phase: str) -> Dict[str, object]:
+        now_local = time.monotonic()
+        running_jobs: List[Dict[str, object]] = []
+        for dispatch in sorted(running.values(), key=lambda item: (item.slot_id, item.started_at)):
+            elapsed_running = max(0.0, float(now_local - dispatch.started_at))
+            running_jobs.append(
+                {
+                    "slot_id": int(dispatch.slot_id),
+                    "variant": str(dispatch.job.variant.raw),
+                    "dist_name": str(dispatch.job.dist_name),
+                    "request_number": int(dispatch.job.request_number),
+                    "seed": int(dispatch.job.seed),
+                    "attempt": int(dispatch.attempt),
+                    "predicted_seconds": float(dispatch.predicted_seconds),
+                    "predicted_human": _format_eta(float(dispatch.predicted_seconds)),
+                    "elapsed_seconds": float(elapsed_running),
+                    "elapsed_human": _format_eta(float(elapsed_running)),
+                    "timeout_limit_s": float(dispatch.timeout_limit_s),
+                    "timeout_human": _format_eta(float(dispatch.timeout_limit_s)),
+                }
+            )
+        pending_counts = {str(k): int(len(v)) for k, v in pending_by_dist.items() if len(v) > 0}
+        pending_by_variant: Dict[str, int] = {}
+        deferred_by_variant: Dict[str, int] = {}
+        running_by_variant: Dict[str, int] = {}
+        running_by_dist: Dict[str, int] = {}
+        for items in pending_by_dist.values():
+            for job in items:
+                pending_by_variant[str(job.variant.raw)] = int(pending_by_variant.get(str(job.variant.raw), 0)) + 1
+        deferred_by_dist: Dict[str, int] = {}
+        for _, job in deferred_jobs:
+            deferred_by_variant[str(job.variant.raw)] = int(deferred_by_variant.get(str(job.variant.raw), 0)) + 1
+            deferred_by_dist[str(job.dist_name)] = int(deferred_by_dist.get(str(job.dist_name), 0)) + 1
+        for dispatch in running.values():
+            running_by_variant[str(dispatch.job.variant.raw)] = int(running_by_variant.get(str(dispatch.job.variant.raw), 0)) + 1
+            running_by_dist[str(dispatch.job.dist_name)] = int(running_by_dist.get(str(dispatch.job.dist_name), 0)) + 1
+        by_variant_rows: List[Dict[str, object]] = []
+        for name in sorted(total_by_variant.keys()):
+            by_variant_rows.append(
+                {
+                    "name": name,
+                    "total": int(total_by_variant.get(name, 0)),
+                    "ok": int(ok_by_variant.get(name, 0)),
+                    "failed": int(failed_by_variant.get(name, 0)),
+                    "running": int(running_by_variant.get(name, 0)),
+                    "pending": int(pending_by_variant.get(name, 0)),
+                    "deferred": int(deferred_by_variant.get(name, 0)),
+                    "requeued": int(requeued_by_variant.get(name, 0)),
+                }
+            )
+        by_dist_rows: List[Dict[str, object]] = []
+        for name in sorted(total_by_dist.keys()):
+            by_dist_rows.append(
+                {
+                    "name": name,
+                    "total": int(total_by_dist.get(name, 0)),
+                    "ok": int(ok_by_dist.get(name, 0)),
+                    "failed": int(failed_by_dist.get(name, 0)),
+                    "running": int(running_by_dist.get(name, 0)),
+                    "pending": int(pending_counts.get(name, 0)),
+                    "deferred": int(deferred_by_dist.get(name, 0)),
+                    "requeued": int(requeued_by_dist.get(name, 0)),
+                }
+            )
+        eta_remaining_s = _estimate_remaining_seconds()
+        completed_elapsed = [float(item.get("elapsed_seconds", 0.0)) for item in recent_completions if isinstance(item, dict)]
+        avg_completed_runtime = (sum(completed_elapsed) / len(completed_elapsed)) if completed_elapsed else float("nan")
+        max_running_elapsed = max([float(item.get("elapsed_seconds", 0.0)) for item in running_jobs], default=float("nan"))
+        total_elapsed_s = max(0.0, float(now_local - run_started))
+        eta_finish_at = "n/a"
+        if math.isfinite(eta_remaining_s):
+            eta_finish_at = (datetime.datetime.now() + datetime.timedelta(seconds=float(eta_remaining_s))).isoformat(timespec="seconds")
+        success_rate = "n/a"
+        denom = int(completed_jobs_final + len(failures))
+        if denom > 0:
+            success_rate = f"{(100.0 * float(completed_jobs_final) / float(denom)):.1f}%"
+        return {
+            "run_root": str(run_root),
+            "phase": str(phase),
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "started_at_iso": run_started_wall.isoformat(timespec="seconds"),
+            "elapsed_total_seconds": float(total_elapsed_s),
+            "elapsed_total_human": _format_eta(float(total_elapsed_s)),
+            "total_jobs": int(len(all_jobs)),
+            "completed_jobs": int(completed_jobs_final),
+            "completed_attempts": int(completed_attempts),
+            "running_jobs_count": int(len(running)),
+            "remaining_jobs": int(_remaining_jobs_count()),
+            "deferred_jobs": int(len(deferred_jobs)),
+            "failed_jobs": int(len(failures)),
+            "success_rate": success_rate,
+            "status_counter": dict(status_counter),
+            "requeued_total": int(requeued_total),
+            "worker_cap": int(worker_cap),
+            "active_limit": int(active_limit),
+            "min_workers": int(min_workers),
+            "auto_workers": int(bool(args.auto_workers)),
+            "pressure": dict(pressure_last),
+            "slot_pred_loads": [float(x) for x in slot_pred_loads],
+            "slot_actual_loads": [float(x) for x in slot_actual_loads],
+            "pending_by_dist": _trim_mapping(pending_counts, limit=16),
+            "running_jobs": running_jobs[:12],
+            "recent_completions": list(recent_completions[-10:]),
+            "recent_issues": list(recent_issues[-10:]),
+            "failures": _trim_mapping(failures, limit=10),
+            "eta_remaining_seconds": float(eta_remaining_s),
+            "eta_remaining": _format_eta(float(eta_remaining_s)),
+            "eta_finish_at": eta_finish_at,
+            "avg_completed_runtime_seconds": float(avg_completed_runtime) if math.isfinite(avg_completed_runtime) else float("nan"),
+            "avg_completed_runtime_human": _format_eta(float(avg_completed_runtime)) if math.isfinite(avg_completed_runtime) else "n/a",
+            "max_running_elapsed_seconds": float(max_running_elapsed) if math.isfinite(max_running_elapsed) else float("nan"),
+            "max_running_elapsed_human": _format_eta(float(max_running_elapsed)) if math.isfinite(max_running_elapsed) else "n/a",
+            "variants": [str(v.raw) for v in variants],
+            "distributions": list(dists),
+            "request_numbers": [int(x) for x in requests],
+            "seeds": [int(x) for x in seeds],
+            "by_variant": by_variant_rows,
+            "by_dist": by_dist_rows,
+            "planner": latest_plan.summary_dict(),
+            "settings": {
+                "scheduler_policy": str(args.scheduler_policy),
+                "scheduler_opt_solver": str(args.scheduler_opt_solver),
+                "scheduler_opt_max_solver_workers": int(args.scheduler_opt_max_solver_workers),
+                "scheduler_opt_gurobi_mip_gap": float(args.scheduler_opt_gurobi_mip_gap),
+                "run_baseline": bool(args.run_baseline),
+                "run_metrics": bool(args.run_metrics),
+                "run_plots": bool(args.run_plots),
+                "cleanup_after_run": bool(args.cleanup_after_run),
+                "resume_existing": bool(args.resume_existing),
+                "skip_completed": bool(args.skip_completed),
+                "reschedule_timeout_jobs": bool(args.reschedule_timeout_jobs),
+                "reschedule_max_attempts": int(reschedule_max_attempts),
+                "dispatch_kill_on_timeout": bool(args.dispatch_kill_on_timeout),
+                "dispatch_timeout_factor": float(args.dispatch_timeout_factor),
+            },
+            "paths": {
+                "events_csv": str(events_csv),
+                "summary_json": str(summary_json),
+                "coef_state_path": str(state_path),
+                "template_state_path": str(template_state_path) if template_state_path is not None else "",
+                "live_status_path": str(scheduler_notifier.live_status_path),
+            },
+        }
 
     def _release_deferred_jobs(now_ts: float) -> int:
         if not deferred_jobs:
@@ -1078,8 +2523,13 @@ def main() -> int:
         return bool(low)
 
     running: Dict[concurrent.futures.Future, RunningDispatch] = {}
+    scheduler_notifier.update_live_status(_build_snapshot("startup"), force=True)
+    scheduler_notifier.notify_start(_build_snapshot("startup"))
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_cap) as pool:
         while _remaining_jobs_count() > 0 or running:
+            scheduler_notifier.update_live_status(_build_snapshot("loop"))
+            scheduler_notifier.notify_clock_ticks(_build_snapshot("loop"))
+            scheduler_notifier.notify_batch(_build_snapshot("loop"))
             now = time.monotonic()
             released = _release_deferred_jobs(now)
             if released > 0:
@@ -1129,13 +2579,45 @@ def main() -> int:
                             f"load={pressure_last.get('load_per_core')}"
                         )
 
+            current_policy = str(args.scheduler_policy).strip().lower()
+            if free_slots and _remaining_jobs_count() > 0 and len(running) < int(active_limit):
+                if current_policy in {"optimal_hybrid", "optimal_exact"}:
+                    latest_plan = _build_optimal_scheduler_plan(
+                        policy=current_policy,
+                        pending_by_dist=pending_by_dist,
+                        slot_pred_loads=slot_pred_loads,
+                        model=model,
+                        args=args,
+                        running_count=len(running),
+                    )
+                else:
+                    latest_plan = SchedulerPlan(
+                        policy=str(args.scheduler_policy),
+                        mode="legacy_greedy",
+                        total_pending_jobs=int(_remaining_jobs_count()),
+                        optimized_jobs=0,
+                        slot_sequences={idx: [] for idx in range(worker_cap)},
+                        best_makespan_seconds=max(slot_pred_loads) if slot_pred_loads else 0.0,
+                        lower_bound_seconds=max(slot_pred_loads) if slot_pred_loads else 0.0,
+                        upper_bound_seconds=max(slot_pred_loads) if slot_pred_loads else 0.0,
+                    )
+
             while free_slots and _remaining_jobs_count() > 0 and len(running) < int(active_limit):
-                slot_id = min(free_slots, key=lambda s: slot_pred_loads[s])
+                if current_policy in {"optimal_hybrid", "optimal_exact"}:
+                    dispatchable_slots = [slot_id for slot_id in free_slots if latest_plan.slot_sequences.get(slot_id)]
+                    if not dispatchable_slots:
+                        break
+                    slot_id = min(dispatchable_slots, key=lambda s: slot_pred_loads[s])
+                    planned_job = latest_plan.slot_sequences[slot_id].pop(0)
+                    job = _pop_specific_pending_job(pending_by_dist, planned_job)
+                    if job is None:
+                        continue
+                else:
+                    slot_id = min(free_slots, key=lambda s: slot_pred_loads[s])
+                    job = _pick_next_job()
+                    if job is None:
+                        break
                 free_slots.remove(slot_id)
-                job = _pick_next_job()
-                if job is None:
-                    free_slots.append(slot_id)
-                    break
                 attempt_no = int(job_attempts.get(job.job_key, 0) + 1)
                 job_attempts[job.job_key] = attempt_no
                 pred = model.predict(
@@ -1296,9 +2778,13 @@ def main() -> int:
                     dist_coef_val = float(upd.get("dist_coef", dist_coef_val))
                     failures.pop(job.job_key, None)
                     completed_jobs_final += 1
+                    ok_by_variant[str(job.variant.raw)] = int(ok_by_variant.get(str(job.variant.raw), 0)) + 1
+                    ok_by_dist[str(job.dist_name)] = int(ok_by_dist.get(str(job.dist_name), 0)) + 1
                 elif result.status in {"dry_run", "skipped_completed"}:
                     failures.pop(job.job_key, None)
                     completed_jobs_final += 1
+                    ok_by_variant[str(job.variant.raw)] = int(ok_by_variant.get(str(job.variant.raw), 0)) + 1
+                    ok_by_dist[str(job.dist_name)] = int(ok_by_dist.get(str(job.dist_name), 0)) + 1
                 else:
                     reason_text = _compose_failure_reason(job.plan.run_dir, result.status, result.error)
                     reason_text_lower = str(reason_text).lower()
@@ -1347,14 +2833,34 @@ def main() -> int:
                             float(args.requeue_delay_max_sec),
                             float(args.requeue_delay_base_sec) * (2 ** max(0, attempt_no - 1)),
                         )
+                        requeued_total += 1
+                        requeued_by_variant[str(job.variant.raw)] = int(requeued_by_variant.get(str(job.variant.raw), 0)) + 1
+                        requeued_by_dist[str(job.dist_name)] = int(requeued_by_dist.get(str(job.dist_name), 0)) + 1
                         deferred_jobs.append((time.monotonic() + float(delay), job))
+                        _record_issue(
+                            "requeued",
+                            job=job,
+                            attempt=attempt_no,
+                            detail=f"{reason_text} -> {requeue_reason} delay={delay:.1f}s",
+                        )
                         print(
                             f"[adaptive][reschedule] {job.job_key} attempt={attempt_no}/"
                             f"{int(reschedule_max_attempts)} reason={reason_text} delay={delay:.1f}s"
                         )
+                        scheduler_notifier.notify_requeue(
+                            snapshot=_build_snapshot("requeue"),
+                            job=job,
+                            attempt=attempt_no,
+                            max_attempts=int(reschedule_max_attempts),
+                            detail=str(reason_text),
+                            delay_s=float(delay),
+                        )
                     else:
                         failures[job.job_key] = f"{result.status}: {result.error[:400]}"
                         completed_jobs_final += 1
+                        failed_by_variant[str(job.variant.raw)] = int(failed_by_variant.get(str(job.variant.raw), 0)) + 1
+                        failed_by_dist[str(job.dist_name)] = int(failed_by_dist.get(str(job.dist_name), 0)) + 1
+                        _record_issue("final_failure", job=job, attempt=attempt_no, detail=str(reason_text or result.error))
 
                 _append_csv_row(
                     events_csv, event_fields,
@@ -1388,7 +2894,28 @@ def main() -> int:
                         "error": str(reason_text or result.error)[:1000],
                     },
                 )
-                _save_json(state_path, model.to_dict())
+                recent_completions.append(
+                    {
+                        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                        "variant": str(job.variant.raw),
+                        "dist_name": str(job.dist_name),
+                        "request_number": int(job.request_number),
+                        "seed": int(job.seed),
+                        "attempt": int(attempt_no),
+                        "status": str(status_out),
+                        "elapsed_seconds": float(result.elapsed_seconds),
+                        "elapsed_human": _format_eta(float(result.elapsed_seconds)),
+                        "predicted_seconds": float(dispatch.predicted_seconds),
+                        "predicted_human": _format_eta(float(dispatch.predicted_seconds)),
+                        "ratio": "" if (ratio != ratio) else f"{float(ratio):.2f}",
+                    }
+                )
+                if len(recent_completions) > 20:
+                    del recent_completions[:-20]
+                _persist_model_state()
+                scheduler_notifier.update_live_status(_build_snapshot("post_complete"), force=True)
+                scheduler_notifier.notify_clock_ticks(_build_snapshot("post_complete"))
+                scheduler_notifier.notify_batch(_build_snapshot("post_complete"))
                 print(
                     f"[adaptive] done attempt={completed_attempts:03d} final={completed_jobs_final:03d}/{len(all_jobs)} "
                     f"{job.variant.raw}|{job.dist_name}|R{job.request_number}|S{job.seed} "
@@ -1411,16 +2938,27 @@ def main() -> int:
         "active_limit_final": int(active_limit),
         "min_workers": int(min_workers),
         "auto_workers": int(bool(args.auto_workers)),
+        "requeued_total": int(requeued_total),
         "total_elapsed_seconds": float(total_elapsed),
         "slot_actual_loads": [float(x) for x in slot_actual_loads],
         "slot_pred_loads": [float(x) for x in slot_pred_loads],
         "actual_makespan_seconds": float(makespan),
         "pressure_last": pressure_last,
         "model": model.to_dict(),
+        "planner": latest_plan.summary_dict(),
+        "state_path": str(state_path),
+        "template_state_path": str(template_state_path) if template_state_path is not None else "",
+        "events_csv": str(events_csv),
+        "summary_json": str(summary_json),
         "failures": failures,
+        "recent_issues": list(recent_issues[-20:]),
     }
     _save_json(summary_json, summary)
-    _save_json(state_path, model.to_dict())
+    _persist_model_state()
+    final_snapshot = _build_snapshot("finished")
+    final_snapshot.update(summary)
+    scheduler_notifier.update_live_status(final_snapshot, force=True)
+    scheduler_notifier.notify_finish(final_snapshot)
     print(f"[adaptive] summary_json={summary_json}")
     print(
         f"[adaptive] finished total={len(all_jobs)} completed={completed_jobs_final} "

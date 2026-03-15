@@ -31,6 +31,7 @@ import sys
 from collections import defaultdict
 import zipfile
 import csv
+import threading
 # This import registers the 3D projection, but is otherwise unused.
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
 import os
@@ -299,13 +300,80 @@ def atomic_write_excel(df, path, sheet_name):
             except Exception:
                 pass
 
+def _safe_file_size(path):
+    try:
+        if path and os.path.exists(path):
+            return os.path.getsize(path)
+    except Exception:
+        return ""
+    return ""
+
+def _log_excel_debug(event, **kwargs):
+    try:
+        payload = {
+            "event": event,
+            "pid": os.getpid(),
+            "tid": threading.get_ident(),
+        }
+        payload.update(kwargs)
+        parts = [f"{key}={payload[key]!r}" for key in payload]
+        print("[excel-debug]", " ".join(parts))
+    except Exception:
+        pass
+
 def atomic_write_excel_writer(path, write_callback):
     tmp_path = f"{path}.tmp.{os.getpid()}.xlsx"
     lock_path = acquire_file_lock(path)
     try:
+        parent_dir = str(Path(path).parent)
+        _log_excel_debug(
+            "atomic_write_begin",
+            path=str(path),
+            tmp_path=str(tmp_path),
+            path_len=len(str(path)),
+            tmp_len=len(str(tmp_path)),
+            parent_dir=parent_dir,
+            parent_exists=os.path.isdir(parent_dir),
+            cwd=os.getcwd(),
+        )
         with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+            handle = getattr(getattr(writer, "_handles", None), "handle", None)
+            _log_excel_debug(
+                "atomic_writer_opened",
+                path=str(path),
+                tmp_path=str(tmp_path),
+                handle_type=type(handle).__name__ if handle is not None else "",
+                handle_name=getattr(handle, "name", ""),
+                handle_closed=getattr(handle, "closed", ""),
+            )
             write_callback(writer)
+        _log_excel_debug(
+            "atomic_writer_closed",
+            path=str(path),
+            tmp_path=str(tmp_path),
+            tmp_exists=os.path.exists(tmp_path),
+            tmp_size=_safe_file_size(tmp_path),
+        )
         replace_with_retry(tmp_path, path)
+        _log_excel_debug(
+            "atomic_replace_done",
+            path=str(path),
+            final_exists=os.path.exists(path),
+            final_size=_safe_file_size(path),
+        )
+    except Exception as exc:
+        _log_excel_debug(
+            "atomic_write_failed",
+            path=str(path),
+            tmp_path=str(tmp_path),
+            exc_type=type(exc).__name__,
+            exc=str(exc),
+            tmp_exists=os.path.exists(tmp_path),
+            tmp_size=_safe_file_size(tmp_path),
+            final_exists=os.path.exists(path),
+            final_size=_safe_file_size(path),
+        )
+        raise
     finally:
         release_file_lock(lock_path)
         if os.path.exists(tmp_path):
@@ -2430,9 +2498,10 @@ def one_position_insert_delivery(routes2, R, has_end_depot, i, k, j, h, R_i, ori
             if check_uncertainty_in_insertion_by_RL_or_not == 1 and K[k, 5] == influenced_mode_by_current_event:
                 #check_repeat_r_in_R_pool(), check_T_k_record_and_R()
                 store_unchanged_routes_for_RL_insertion = my_deepcopy(routes)
+                store_request_flow_t_for_RL_insertion = copy.copy(request_flow_t)
                 routes[k] = result
                 feasibility_or_route = RL_insertion_constraints(index, result, i, new_row, finish_or_begin, uncertainty_index, k, store_routes_for_another_k, store_R_pool_for_another_k,duration, congestion_link,
-                                 congestion_node)
+                                 congestion_node, store_unchanged_routes_for_RL_insertion, store_request_flow_t_for_RL_insertion)
                 routes = my_deepcopy(store_unchanged_routes_for_RL_insertion)
                 # for key_test in routes.keys():
                 #     if np.array_equal(routes[key_test], result, equal_nan=False):
@@ -6334,10 +6403,14 @@ def satisfy_constraints(routes, has_end_depot, R, k, route, fixed_vehicles_perce
     return route, '_'
 
 def RL_insertion_constraints(index, route, inserted_r, new_row, finish_or_begin, uncertainty_index, k, store_routes_for_another_k, store_R_pool_for_another_k,duration, congestion_link,
-                                 congestion_node):
+                                 congestion_node, routes_store=-1, request_flow_t_store=-1):
 
-    global RL_insertion_segment
+    global RL_insertion_segment, request_flow_t, routes
     RL_insertion_segment = 0
+    if isinstance(routes_store, int) and routes_store == -1:
+        routes_store = my_deepcopy(routes)
+    if isinstance(request_flow_t_store, int) and request_flow_t_store == -1:
+        request_flow_t_store = copy.copy(request_flow_t)
     index_r = list(R[:, 7]).index(inserted_r)
     congestion_nodes_in_this_route, use_RL_in_insertion = get_congestion_nodes_in_this_route(route, duration)
     # the r's number without labeling of T
@@ -13938,6 +14011,21 @@ def save_results(round, routes_save, obj_record = -1):
         Path(path + current_save + '/').mkdir(parents=True, exist_ok=True)
         best_routes_path_round = path + current_save + '/best_routes' + current_save + '_' + str(
             exp_number - 1) + '.xlsx'
+    _log_excel_debug(
+        "save_results_prepare",
+        round=round,
+        current_save=str(current_save),
+        base_path=str(path),
+        best_routes_path=str(best_routes_path_round),
+        best_routes_parent=str(Path(best_routes_path_round).parent),
+        best_routes_parent_exists=os.path.isdir(str(Path(best_routes_path_round).parent)),
+        route_count=len(routes_save) if hasattr(routes_save, "__len__") else "",
+        dynamic=dynamic,
+        CP=CP,
+        implement=getattr(dynamic_RL34959, "implement", ""),
+        stop_phase=getattr(dynamic_RL34959, "stop_everything_in_learning_and_go_to_implementation_phase", ""),
+        dynamic_t=globals().get("dynamic_t", ""),
+    )
     # save routes, routes match, obj_record
     def _write_round_routes(writer):
         for key, value in routes_save.items():

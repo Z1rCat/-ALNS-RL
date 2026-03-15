@@ -893,6 +893,14 @@ TRAIN_FIELDS = [
     "v8a2_target_action_mode", "v8a2_aux_ce_loss", "v8a2_aux_kl_guard_loss",
     "v8a2_aux_weight_mean", "v8a2_aux_scale",
     "v9a2_enabled", "v9a2_shortage_ema", "v9a2_kappa", "v9a2_kappa_mean", "v9a2_kappa_base",
+    # V11 AV2 diagnostics
+    "av2_enabled", "av2_triggered", "av2_trigger_delta",
+    "av2_hard_samples", "av2_easy_samples",
+    "av2_hard_action_rate", "av2_hard_reward", "av2_easy_reward", "av2_gap",
+    "av2_anchor_bank_size", "av2_anchor_update", "av2_merge_alpha",
+    "av2_repair_steps", "av2_repair_applied", "av2_repair_accept",
+    "av2_repair_loss", "av2_repair_crit_loss", "av2_repair_entropy", "av2_repair_easy_kl", "av2_repair_l2",
+    "av2_target_prob_before", "av2_target_prob_after", "av2_target_prob_gain",
     # Generic Phase2 visual markers
     "phase2_active", "phase2_stage", "phase2_triggered_groups",
     "phase2_new_samples", "phase2_generated_samples", "phase2_generated_target", "phase2_generated_shortfall", "phase2_target_action_mode",
@@ -1713,6 +1721,15 @@ class TCRRolloutStatsCallback(BaseCallback):
                         "group": phase_label,
                         "action": self._to_scalar_int(actions[i] if i < len(actions) else 0),
                         "reward": self._to_scalar_float(rewards[i] if i < len(rewards) else 0.0),
+                        "severity": self._to_scalar_float(
+                            info_i.get("severity", row_dict.get("severity", globals().get("severity_level", 0.0)))
+                        ),
+                        "stage_family": str(
+                            info_i.get("stage_family", row_dict.get("stage_family", _decision_stage_family(""))) or ""
+                        ).strip().lower(),
+                        "semantic_action": str(
+                            info_i.get("semantic_action", row_dict.get("semantic_action", "")) or ""
+                        ).strip().lower(),
                         "obs": obs_arr.copy(),
                     }
                 )
@@ -2453,11 +2470,18 @@ class coordinationEnv(Env):
                                 row_dict = {}
                             row_dict["pair_index"] = pair_index
                             uncertainty_type = Intermodal_ALNS34959.state_reward_pairs['uncertainty_type'][pair_index]
+                            stage_family = _decision_stage_family("")
+                            action_value = _decision_to_action_value(action)
+                            severity_value = globals().get("severity_level", "")
                             info = {
                                 "row_dict": row_dict,
                                 "uncertainty_type": uncertainty_type,
                                 "pair_index": pair_index,
                                 "phase_label": str(current_phase_label or ""),
+                                "severity": severity_value,
+                                "stage_family": stage_family,
+                                "semantic_action": _decision_semantic_action(stage_family, action_value),
+                                "action_meaning": _decision_action_meaning(stage_family, action_value),
                             }
                             if not LBKLAC_CUSTOM_LOGGING:
                                 log_training_row("implement" if implement == 1 else "train", step_idx=step_id, reward=reward)
@@ -2894,6 +2918,7 @@ def main(algorithm2, mode2):
             "v10_c", "v10-c", "v10c", "pponew_v10_c", "pponewv10_c",
             "v10_d", "v10-d", "v10d", "pponew_v10_d", "pponewv10_d",
             "v10_e", "v10-e", "v10e", "pponew_v10_e", "pponewv10_e",
+            "v11_av2", "v11-av2", "v11av2", "av2", "pponew_v11_av2", "pponewv11_av2",
         ):
             default_window = 4
         else:
@@ -3466,6 +3491,7 @@ def main(algorithm2, mode2):
                 "v10_c", "v10-c", "v10c", "pponew_v10_c", "pponewv10_c",
                 "v10_d", "v10-d", "v10d", "pponew_v10_d", "pponewv10_d",
                 "v10_e", "v10-e", "v10e", "pponew_v10_e", "pponewv10_e",
+                "v11_av2", "v11-av2", "v11av2", "av2", "pponew_v11_av2", "pponewv11_av2",
             )
             v8_family_versions = (
                 "v8_a", "v8-a", "v8a", "pponew_v8_a", "pponewv8_a",
@@ -3482,6 +3508,7 @@ def main(algorithm2, mode2):
                 "v10_e", "v10-e", "v10e", "pponew_v10_e", "pponewv10_e",
             )
             v9a2_family_versions = ("v9_a2", "v9-a2", "v9a2", "pponew_v9_a2", "pponewv9_a2")
+            av2_family_versions = ("v11_av2", "v11-av2", "v11av2", "av2", "pponew_v11_av2", "pponewv11_av2")
             if ALGO_VERSION in tcr_family_versions:
                 tcr_kwargs = {
                     "tcr_enable": os.environ.get("RL_TCR_ENABLE", "1").strip() == "1",
@@ -3547,6 +3574,44 @@ def main(algorithm2, mode2):
                             "v9a2_kappa_slope": float(os.environ.get("RL_V9A2_KAPPA_SLOPE", "2.00")),
                             "v9a2_kappa_min": float(os.environ.get("RL_V9A2_KAPPA_MIN", "0.50")),
                             "v9a2_kappa_max": float(os.environ.get("RL_V9A2_KAPPA_MAX", "3.00")),
+                        }
+                    )
+                if ALGO_VERSION in av2_family_versions:
+                    tcr_kwargs.update(
+                        {
+                            "tcr_enable": os.environ.get("RL_TCR_ENABLE", "0").strip() == "1",
+                            "av2_enable": os.environ.get("RL_AV2_ENABLE", "1").strip() == "1",
+                            "av2_target_action": int(os.environ.get("RL_AV2_TARGET_ACTION", "1")),
+                            "av2_hard_stage_family": os.environ.get("RL_AV2_HARD_STAGE_FAMILY", "removal").strip().lower(),
+                            "av2_hard_min_severity": float(os.environ.get("RL_AV2_HARD_MIN_SEVERITY", "4")),
+                            "av2_easy_stage_family": os.environ.get("RL_AV2_EASY_STAGE_FAMILY", "").strip().lower(),
+                            "av2_easy_max_severity": float(os.environ.get("RL_AV2_EASY_MAX_SEVERITY", "2")),
+                            "av2_trigger_action_rate_threshold": float(os.environ.get("RL_AV2_TRIGGER_ACTION_RATE", "0.12")),
+                            "av2_trigger_hard_reward_threshold": float(os.environ.get("RL_AV2_TRIGGER_HARD_REWARD", "0.35")),
+                            "av2_trigger_gap_threshold": float(os.environ.get("RL_AV2_TRIGGER_GAP", "0.10")),
+                            "av2_min_hard_samples": int(os.environ.get("RL_AV2_MIN_HARD_SAMPLES", "24")),
+                            "av2_min_easy_samples": int(os.environ.get("RL_AV2_MIN_EASY_SAMPLES", "24")),
+                            "av2_recent_window": int(os.environ.get("RL_AV2_RECENT_WINDOW", "1024")),
+                            "av2_anchor_interval": int(os.environ.get("RL_AV2_ANCHOR_INTERVAL", "1")),
+                            "av2_anchor_max_snapshots": int(os.environ.get("RL_AV2_ANCHOR_MAX", "6")),
+                            "av2_anchor_warmup_updates": int(os.environ.get("RL_AV2_ANCHOR_WARMUP", "12")),
+                            "av2_anchor_min_update": int(os.environ.get("RL_AV2_ANCHOR_MIN_UPDATE", "1")),
+                            "av2_anchor_action_coef": float(os.environ.get("RL_AV2_ANCHOR_ACTION_COEF", "1.0")),
+                            "av2_anchor_kl_coef": float(os.environ.get("RL_AV2_ANCHOR_KL_COEF", "0.60")),
+                            "av2_anchor_age_coef": float(os.environ.get("RL_AV2_ANCHOR_AGE_COEF", "0.10")),
+                            "av2_merge_alpha_base": float(os.environ.get("RL_AV2_MERGE_ALPHA_BASE", "0.10")),
+                            "av2_merge_alpha_scale": float(os.environ.get("RL_AV2_MERGE_ALPHA_SCALE", "0.70")),
+                            "av2_merge_alpha_min": float(os.environ.get("RL_AV2_MERGE_ALPHA_MIN", "0.05")),
+                            "av2_merge_alpha_max": float(os.environ.get("RL_AV2_MERGE_ALPHA_MAX", "0.65")),
+                            "av2_repair_steps": int(os.environ.get("RL_AV2_REPAIR_STEPS", "8")),
+                            "av2_repair_batch_size": int(os.environ.get("RL_AV2_REPAIR_BATCH", "64")),
+                            "av2_repair_lr": float(os.environ.get("RL_AV2_REPAIR_LR", "0.0003")),
+                            "av2_repair_crit_coef": float(os.environ.get("RL_AV2_REPAIR_CRIT_COEF", "1.0")),
+                            "av2_repair_entropy_coef": float(os.environ.get("RL_AV2_REPAIR_ENTROPY_COEF", "0.01")),
+                            "av2_repair_easy_kl_coef": float(os.environ.get("RL_AV2_REPAIR_EASY_KL_COEF", "0.05")),
+                            "av2_repair_l2_coef": float(os.environ.get("RL_AV2_REPAIR_L2_COEF", "0.0001")),
+                            "av2_accept_min_prob_gain": float(os.environ.get("RL_AV2_ACCEPT_PROB_GAIN", "0.02")),
+                            "av2_accept_max_easy_kl": float(os.environ.get("RL_AV2_ACCEPT_MAX_EASY_KL", "0.08")),
                         }
                     )
             model = build_ppo_new_model(
@@ -3771,6 +3836,11 @@ def main(algorithm2, mode2):
                     extra.update(dict(getattr(model, "last_v9a2_metrics", {}) or {}))
             except Exception:
                 pass
+            try:
+                if hasattr(model, "last_av2_metrics"):
+                    extra.update(dict(getattr(model, "last_av2_metrics", {}) or {}))
+            except Exception:
+                pass
             _maybe_console_phase2(extra, phase="train")
             if not extra:
                 extra = None
@@ -3861,6 +3931,11 @@ def main(algorithm2, mode2):
             try:
                 if hasattr(model, "last_v9a2_metrics"):
                     eval_extra.update(dict(getattr(model, "last_v9a2_metrics", {}) or {}))
+            except Exception:
+                pass
+            try:
+                if hasattr(model, "last_av2_metrics"):
+                    eval_extra.update(dict(getattr(model, "last_av2_metrics", {}) or {}))
             except Exception:
                 pass
             _maybe_console_phase2(eval_extra, phase="eval")

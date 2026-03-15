@@ -5,10 +5,31 @@ import stat
 import sys
 import time
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 
 DEFAULT_DELETE_DIRS = ("data", "alns_outputs")
+
+DEFAULT_ALWAYS_REQUIRED_FILES = (
+    "meta.json",
+)
+
+DEFAULT_MASTER_EVIDENCE_FILES = (
+    "rl_trace.csv",
+    "rl_training.csv",
+    "rl_decision.csv",
+    "rl_summary.csv",
+)
+
+DEFAULT_POST_EVIDENCE_PATHS = (
+    "metrics.json",
+    "run_summary.json",
+    "run_summary_flat.csv",
+    "paper_figures",
+    "baseline_wait.csv",
+    "baseline_reroute.csv",
+    "baseline_random.csv",
+)
 
 
 def _on_rm_error(func, path, exc_info):
@@ -33,26 +54,37 @@ def _safe_rmtree(path: Path, *, attempts: int = 10, sleep_s: float = 1.0) -> Non
     raise RuntimeError(f"Failed to delete {path}: {last_exc}")
 
 
+def _existing_required_entries(run_dir: Path, names: Sequence[str]) -> List[str]:
+    return [name for name in names if (run_dir / name).exists()]
+
+
+def _require_any(run_dir: Path, names: Sequence[str], *, label: str) -> None:
+    hits = _existing_required_entries(run_dir, names)
+    if hits:
+        return
+    raise FileNotFoundError(
+        f"Refuse to cleanup {run_dir}: missing any {label} evidence; expected one of {list(names)}"
+    )
+
+
 def cleanup_run_dir(
     run_dir: Path,
     *,
     delete_dirs: Iterable[str] = DEFAULT_DELETE_DIRS,
-    require_files: Iterable[str] = (
-        "meta.json",
-        "rl_trace.csv",
-        "rl_training.csv",
-        "baseline_wait.csv",
-        "baseline_reroute.csv",
-        "baseline_random.csv",
-        "metrics.json",
-    ),
+    require_files: Iterable[str] = DEFAULT_ALWAYS_REQUIRED_FILES,
 ) -> List[str]:
     if not run_dir.exists() or not run_dir.is_dir():
         raise FileNotFoundError(f"run_dir not found or not a directory: {run_dir}")
 
+    if (run_dir / "FAILED.json").exists():
+        raise FileNotFoundError(f"Refuse to cleanup {run_dir}: FAILED.json exists")
+
     missing = [name for name in require_files if not (run_dir / name).exists()]
     if missing:
         raise FileNotFoundError(f"Refuse to cleanup {run_dir}: missing required files: {missing}")
+
+    _require_any(run_dir, DEFAULT_MASTER_EVIDENCE_FILES, label="master-output")
+    _require_any(run_dir, DEFAULT_POST_EVIDENCE_PATHS, label="post-run")
 
     deleted: List[str] = []
     for name in delete_dirs:

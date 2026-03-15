@@ -479,11 +479,20 @@ def run_nova_edrl_pipeline(
         raise FileNotFoundError(f"NOVA_EDRL pipeline script not found: {script_path}")
 
     seed_val = int(seed) if seed is not None else 42
+    nova_actor_earlypool_versions = {
+        "a_epool",
+        "a-epool",
+        "aepool",
+        "v3_a_epool",
+        "v3-a-epool",
+        "v3aepool",
+    }
     if run_name:
         run_id = str(run_name)
     else:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        run_id = f"run_{timestamp}_R{request_number}_{dist_name}_NOVA_EDRL_S{seed_val}"
+        run_label = "NOVA_A_EPOOL" if str(algo_version or "v1").strip().lower() in nova_actor_earlypool_versions else "NOVA_EDRL"
+        run_id = f"run_{timestamp}_R{request_number}_{dist_name}_{run_label}_S{seed_val}"
     rl_log_root = str(os.environ.get("RL_LOG_ROOT", "") or "").strip()
     run_id_for_pipeline = run_id
     try:
@@ -494,10 +503,11 @@ def run_nova_edrl_pipeline(
         run_id_for_pipeline = run_id
 
     nova_version = str(algo_version or "v1").strip().lower()
-    outer_action_space_version = "v2" if nova_version in {"v2", "v3", "v4"} else "v1"
+    actor_rollback_earlypool_profile = nova_version in nova_actor_earlypool_versions
+    outer_action_space_version = "v2" if nova_version in {"v2", "v3", "v4"} or actor_rollback_earlypool_profile else "v1"
     if nova_version == "v4":
         outer_edrl_version = "v4"
-    elif nova_version == "v3":
+    elif nova_version == "v3" or actor_rollback_earlypool_profile:
         outer_edrl_version = "v3"
     else:
         outer_edrl_version = "v1"
@@ -693,6 +703,21 @@ def run_nova_edrl_pipeline(
         cmd.append("--phase1-skip-generator")
     if external_data_root:
         cmd.extend(["--phase1-external-data-root", str(external_data_root)])
+    if actor_rollback_earlypool_profile:
+        cmd.extend(
+            [
+                "--phase1-history-every-tables",
+                "1",
+                "--actor-rollback-enable",
+                "--actor-rollback-ckpt-selector",
+                "ranked_early_pool",
+                "--actor-rollback-early-pool-fraction",
+                "0.50",
+                "--actor-rollback-early-pool-max-candidates",
+                "5",
+                "--actor-rollback-fast-profile",
+            ]
+        )
 
     print("")
     print(f">>> [NOVA] orchestrating 4-phase pipeline for run_id={run_id_for_pipeline}")
@@ -700,6 +725,8 @@ def run_nova_edrl_pipeline(
         f">>> [NOVA] profile={nova_version} outer_action_space={outer_action_space_version} "
         f"outer_edrl={outer_edrl_version}"
     )
+    if actor_rollback_earlypool_profile:
+        print(">>> [NOVA] actor rollback variant enabled: ranked_early_pool + dense phase1 history")
     print(">>> [NOVA] forcing phase flow: phase1(train_only) -> phase2/phase3(outer) -> phase4(eval_only implement)")
     subprocess.run(cmd, check=True)
 
